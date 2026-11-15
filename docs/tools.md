@@ -88,7 +88,8 @@ examples. The planners, and the tools that read a finished run (`summarize`,
 
 | Command | What it answers |
 |---|---|
-| `planning.budget` | Time, GPU-hours, energy, cost and memory of a run on one or more GPU types; `--from_run` uses a measured run instead of an assumed MFU ([planning.md](planning.md)) |
+| `planning.budget` | Time, GPU-hours, energy, cost and memory of a run on one or more GPU types; `--from_run` uses a measured run instead of an assumed MFU; a scaling law's loss and compute-optimal size, and with `--target_loss` the tokens and time to reach a loss ([planning.md](planning.md)) |
+| `planning.scaling` | The compute-optimal model for a compute budget and the cheapest one to a target loss, from Chinchilla's scaling law refit or your own; `--fit` fits a law to JAX-Titan runs ([planning.md](planning.md#scaling-laws-loss-and-the-compute-optimal-size)) |
 | `planning.step` | Step time by part: compute, collectives, bubble and runtime gaps. `--calibrate RUN` fits the parts to a run; `--ladder` predicts other GPU counts, with `--weak` keeping the batch per GPU ([planning.md](planning.md#step-time-calibration-and-the-scale-ladder)) |
 | `planning.collectives` | RCCL and MORI time by message size; `--calibrate` turns `bench_collectives.sh` output into a table ([planning.md](planning.md#collectives-rccl-and-mori)) |
 | `planning.remaining RUN` | Time left in a running job ([planning.md](planning.md#during-a-run-time-left-and-the-performance-database)) |

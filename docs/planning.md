@@ -35,7 +35,6 @@ python -m jax_titan.planning.budget --model=llama3.1-8b --tokens=2e12 --gpu=MI32
   tokens:                 2.000T (249 per active parameter)
   model FLOPs:            1.029e+23
   executed FLOPs:         1.352e+23
-  compute-optimal:        28.3B parameters on 0.57T tokens (Chinchilla, C = 6ND)
   throughput:             2.60M tokens/s
   throughput per GPU:     10160 tokens/s
   wall time:              8.9 days
@@ -47,6 +46,15 @@ python -m jax_titan.planning.budget --model=llama3.1-8b --tokens=2e12 --gpu=MI32
   wall time at 30% MFU:   11.9 days
   wall time at 40% MFU:   8.9 days
   wall time at 50% MFU:   7.1 days
+
+--------- Scaling Law Report ---------
+  law:                    chinchilla_refit (Besiroglu et al. 2024, a refit of Chinchilla's runs)
+  loss units:             nats per token on MassiveText with a 32k vocabulary
+  loss:                   2.056 at 2T tokens (2.075 at 1T, 2.041 at 4T)
+  loss floor:             1.990 with unlimited tokens
+  compute (6ND):          9.636e+22 FLOPs over 8.03B parameters
+  compute-optimal:        28.9B parameters on 556B tokens (19 per parameter), loss 2.033
+  20 tokens/parameter:    28.3B parameters on 567B tokens
 
 --------- Memory Report ---------
   layout:                 tp 1, pp 1, dp 256, ep 1
@@ -75,6 +83,10 @@ The default layout, plain data parallelism, keeps the whole training state on
 every GPU (120 GiB for 8B parameters at 16 bytes each), so it does not fit;
 the report lists layouts that do. Add `--fsdp`, `--tp` or `--pp` to plan one.
 There is no XLA BF16 GEMM section: only the MI355X has a measured ceiling.
+The Scaling Law Report is what a scaling law says about the run
+([Scaling laws](#scaling-laws-loss-and-the-compute-optimal-size)): the same
+compute would train a model of about 29B parameters on 0.56T tokens to a loss
+0.023 lower, in the law's units.
 
 ### Several GPU types: one row each
 
@@ -239,6 +251,81 @@ python -m jax_titan.planning.budget --model=llama3.1-8b --tokens=2e12 --gpu=MI35
   ...
 ```
 
+### The compute-optimal size for the same compute
+
+Llama 3.1 70B on 20T tokens, 283 tokens per parameter (the planner counts 70.55B
+parameters, the embeddings included):
+
+```bash
+python -m jax_titan.planning.budget --model=llama3.1-70b --tokens=20e12 --gpu=MI350X \
+  --gpus=1024 --fsdp
+```
+
+```text
+--------- Scaling Law Report ---------
+  law:                    chinchilla_refit (Besiroglu et al. 2024, a refit of Chinchilla's runs)
+  loss units:             nats per token on MassiveText with a 32k vocabulary
+  loss:                   1.927 at 20T tokens (1.935 at 10T, 1.921 at 40T)
+  loss floor:             1.898 with unlimited tokens
+  compute (6ND):          8.466e+24 FLOPs over 70.6B parameters
+  compute-optimal:        287B parameters on 4.92T tokens (17 per parameter), loss 1.915
+  20 tokens/parameter:    266B parameters on 5.31T tokens
+```
+
+The same 8.5e24 FLOPs would train a model four times larger on a quarter of
+the tokens to a loss 0.012 lower. The 70B model loses little against that
+and costs a quarter as much to serve, which is why Llama 3 trained its 8B and
+70B models far past 20 tokens per parameter.
+
+### Training to a target loss
+
+`--target_loss` replaces the token budget with the tokens the law says the
+model needs, and the report gives their time and cost:
+
+```bash
+python -m jax_titan.planning.budget --model=llama3.1-8b --target_loss=2.05 --gpu=MI355X \
+  --gpus=256 --fsdp --critical_batch_tokens=2e6
+```
+
+```text
+--------- System Budget Full Report ---------
+  ...
+  tokens:                 2.625T (327 per active parameter)
+  ...
+  wall time:              6.1 days
+  ...
+  GPU-hours:              37.39k
+  ...
+
+--------- Scaling Law Report ---------
+  ...
+  target loss:            2.050: 2.62T tokens for this model
+  cheapest for target:    23.4B parameters on 455B tokens, 6.38e+22 FLOPs (6ND), x0.50 this run's
+  batch:                  4.19M tokens against a critical 2M: x3.10 the fewest tokens to a given loss (x2 at the critical batch)
+```
+
+A 23B model would reach the same loss on half the compute. With a critical
+batch of 2M tokens, the 4.19M-token steps take 1.55 times the tokens training
+at the critical batch would (x3.10 over x2).
+
+### The model for a compute budget
+
+`planning.scaling` answers without a model: the compute-optimal model for a
+budget, and the cheapest one that reaches a target loss.
+
+```bash
+python -m jax_titan.planning.scaling --compute=8.4e24 --target_loss=1.95
+```
+
+```text
+--------- Scaling Law Report ---------
+  law:                    chinchilla_refit (Besiroglu et al. 2024, a refit of Chinchilla's runs)
+  compute (6ND):          8.400e+24 FLOPs
+  compute-optimal:        285B parameters on 4.91T tokens (17 per parameter), loss 1.915
+  20 tokens/parameter:    265B parameters on 5.29T tokens
+  cheapest for target:    117B parameters on 2.11T tokens, 1.49e+24 FLOPs (6ND)
+```
+
 ## Models
 
 `--model` takes any of these:
@@ -336,7 +423,9 @@ scaling; grow the batch with the GPUs (`--weak`) as a separate experiment.
 Hardware scaling says how fast the cluster runs the workload; it doesn't say
 how many tokens the model needs. That comes from model-quality scaling:
 smaller models over meaningful token budgets, and scaling laws. The time to
-a target quality is the tokens it needs over the effective throughput.
+a target quality is the tokens it needs over the effective throughput:
+`--target_loss` takes those tokens from a scaling law fit to smaller runs
+([Scaling laws](#scaling-laws-loss-and-the-compute-optimal-size)).
 
 ## What it computes
 
@@ -416,8 +505,90 @@ The planner doesn't model tensor, pipeline or expert-parallel communication,
 or the pipeline bubble. For pipelines, `jax_titan.observability.flops` has
 them per stage.
 
-**Compute-optimal size.** For the same compute in Chinchilla's C = 6ND, at
-20 tokens per parameter, the optimum is N = sqrt(C/120) and D = 20N.
+## Scaling laws: loss and the compute-optimal size
+
+The rest of the planner says how long a run takes; a scaling law says what it
+buys. `jax_titan.planning.scaling` predicts the final loss of a dense model
+with N parameters trained on D tokens with the form of Hoffmann et al.
+(2022, [arXiv:2203.15556](https://arxiv.org/abs/2203.15556)), at C = 6ND
+training FLOPs:
+
+```text
+L(N, D) = E + A / N^alpha + B / D^beta
+```
+
+Its minimum along 6ND = C is the compute-optimal model,
+N = G (C/6)^(beta / (alpha + beta)) and D = C / 6N, with
+G = (alpha A / (beta B))^(1 / (alpha + beta)). The report also prints
+Chinchilla's rule of thumb, 20 tokens per parameter: N = sqrt(C/120) and D = 20N.
+
+N counts every parameter a token uses, the embeddings included, as Hoffmann et
+al. did (Kaplan et al. 2020 excluded them). C is 6ND, not the model FLOPs of
+the System Budget report, which count attention and leave out the embedding
+lookup: 9.6e22 against 1.03e23 for Llama 3.1 8B on 2T tokens.
+
+`--law` picks the coefficients:
+
+| Law | E | A | B | alpha | beta | Optimum |
+|---|---:|---:|---:|---:|---:|---|
+| `chinchilla_refit` (default): Besiroglu et al. 2024 ([arXiv:2404.10102](https://arxiv.org/abs/2404.10102)), a refit of Chinchilla's runs | 1.8172 | 482.01 | 2085.43 | 0.3478 | 0.3658 | about 20 tokens per parameter, as Chinchilla 70B was trained and as Hoffmann et al.'s other two methods found |
+| `chinchilla_2022`: Hoffmann et al.'s own fit (approach 3, unrounded) | 1.6934 | 406.4 | 410.7 | 0.3392 | 0.2849 | 50-90 tokens per parameter from 1e23 to 1e26 FLOPs: 40B for Gopher's compute, where approach 1 gives 67B |
+| a JSON file from `planning.scaling --fit` | | | | | | your runs' |
+
+The report shows:
+- **loss:** at the run's tokens, and at half and twice as many;
+- **loss floor:** with unlimited tokens;
+- **compute-optimal:** the law's optimum, and the rule of thumb, for the
+  run's compute;
+- **target loss** (`--target_loss`): the tokens this model needs, which
+  become the run's token budget, and the cheapest model that reaches the
+  loss;
+- **batch** (`--critical_batch_tokens`): Kaplan et al.'s Eq. 5.1. Reaching a
+  loss at a batch of B tokens takes E_min (1 + B / B_crit) tokens, twice the
+  fewest at the critical batch and more above it. The critical batch grows as
+  the loss falls; Kaplan et al. measured 1-2M tokens late in training for
+  their largest models, so measure it for yours.
+
+The predictions hold under these limits:
+- **Units.** A law's losses compare only with losses measured on its data,
+  tokenizer and recipe. The presets are in nats per token on MassiveText with
+  a 32k vocabulary, so they rank allocations; they do not predict the loss of
+  a Llama-tokenized run on other data.
+- **Dense models.** The presets are fit to dense models, so for a mixture of
+  experts the report predicts no loss. Its rule of thumb on active parameters
+  is an extrapolation.
+- **New data.** The fits saw each token about once. With `--epochs` above 1
+  the report notes the repetition, and the loss reads low.
+- **Learning-rate schedule.** Hoffmann et al. decayed the learning rate over
+  each run's own tokens; overshooting by more than 25% hurt. The trainer's
+  `--steps` sets the decay, so plan the token budget before the run.
+- **Training compute only.** The optimum ignores inference. A smaller model
+  trained longer costs less to serve: Llama 3 trained 8B and 70B models on
+  about 15T tokens.
+
+Kaplan et al.'s compute-optimal allocation, N growing as C^0.73, came from
+small models and a schedule that did not end with each run. Hoffmann et al.
+and later reconciliations replace it with near-equal scaling, so the planner
+does not use it.
+
+### Fitting a law to your runs
+
+```bash
+python -m jax_titan.planning.scaling --fit runs/a runs/b runs/c ... --out law.json
+python -m jax_titan.planning.budget --model=llama3.1-8b --tokens=2e12 --law=law.json ...
+```
+
+`--fit` takes JAX-Titan run directories and CSV or JSON files of `params`,
+`tokens` and `loss`. A run gives its model's parameters, the tokens trained
+when its last validation pass ran, and that pass's loss; without one, the mean
+of its last 10 step losses. Fit runs whose learning-rate schedule ended with
+them: a midway loss of a longer schedule reads high. The fit minimizes
+Hoffmann et al.'s Huber loss on the log loss from a grid of starts.
+
+Five coefficients need runs at several model sizes and token counts. With
+fewer, `--fix=alpha,beta` keeps the exponents of `--law` and fits E, A and B.
+Hold the largest run out of the fit and check that the law predicts it before
+you trust its extrapolation.
 
 ## GPUs
 
@@ -724,9 +895,14 @@ default it computes the logits of the last token only, as in inference.
 
 ## Limitations
 
-- **Time to quality:** the planner doesn't predict it. The tokens needed for
-  a target loss come from scaling laws or smaller runs, and
-  `summarize --target_loss` measures a run's time to target.
+- **Time to quality:** `--target_loss` predicts it from a scaling law, which
+  holds only for the data, tokenizer and recipe it was fit on. The presets do
+  not predict a JAX-Titan run's loss, and a law fit to your runs is as good as
+  the model sizes and token counts behind it. `summarize --target_loss`
+  measures a run's time to target.
+- **Batch size and convergence:** the planner times steps at
+  `--batch_tokens`. The extra tokens a batch above the critical batch costs
+  come only from `--critical_batch_tokens`, which has to be measured.
 - **MFU:** it's an input, and only measured on MI355X so far. Planning other
   GPU types from it, or at the default 40%, is an assumption.
 - **Memory factor:** it was measured on two 8B pipelines on one node.
