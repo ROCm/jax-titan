@@ -33,6 +33,16 @@ class GPU:
   source: str
   notes: str = ""
   scaleup_mesh: bool = False
+  # Compute units, chiplets (XCDs) and the peak engine clock the dense peaks assume.
+  cus: int | None = None
+  xcds: int | None = None
+  clock_ghz: float | None = None
+
+  def peak_tflops_at(self, precision: str, clock_ghz: float) -> float:
+    """The dense peak at another engine clock, such as the one a power cap sustains."""
+    if not self.clock_ghz:
+      raise ValueError(f"{self.name} has no peak clock to scale from")
+    return self.peak_tflops(precision) * clock_ghz / self.clock_ghz
 
   def scaleup_gbs_for(self, ranks: int) -> float:
     """Per-direction bandwidth a collective over `ranks` GPUs of one domain gets."""
@@ -53,20 +63,21 @@ GPUS = {
     "MI300X": GPU("AMD Instinct MI300X", 1307.4, 2614.9, None, 192, 5.3, 750, 8, 448, 50,
                   f"{_AMD}/mi300/mi300x.html",
                   "scale-up derived: 7 Infinity Fabric links of 128 GB/s (both directions) "
-                  "to the platform's other GPUs", scaleup_mesh=True),
+                  "to the platform's other GPUs", scaleup_mesh=True, cus=304, xcds=8, clock_ghz=2.1),
     "MI325X": GPU("AMD Instinct MI325X", 1307.4, 2614.9, None, 256, 6.0, 1000, 8, 448, 50,
                   f"{_AMD}/mi300/mi325x.html",
                   "scale-up derived: 7 Infinity Fabric links of 128 GB/s (both directions) "
-                  "to the platform's other GPUs", scaleup_mesh=True),
+                  "to the platform's other GPUs", scaleup_mesh=True, cus=304, xcds=8, clock_ghz=2.1),
     "MI350X": GPU("AMD Instinct MI350X", 2306.9, 4613.7, 9227.5, 288, 8.0, 1000, 8, 504, 50,
                   f"{_AMD}/mi350/mi350x.html",
                   "peaks derived as 256 CUs x 2.2 GHz x 4,096, 8,192 and 16,384 FLOPs per "
                   "clock (the page rounds to 2.3, 4.6 and 9.2 PFLOP/s); scale-up derived: 7 "
-                  "Infinity Fabric links of 144 GB/s (both directions)", scaleup_mesh=True),
+                  "Infinity Fabric links of 144 GB/s (both directions)", scaleup_mesh=True,
+                  cus=256, xcds=8, clock_ghz=2.2),
     "MI355X": GPU("AMD Instinct MI355X", 2516.6, 5033.2, 10066.3, 288, 8.0, 1400, 8, 504, 50,
                   f"{_AMD}/mi350/mi355x.html",
                   "scale-up derived: 7 Infinity Fabric links of 144 GB/s (both directions)",
-                  scaleup_mesh=True),
+                  scaleup_mesh=True, cus=256, xcds=8, clock_ghz=2.4),
     "MI455X": GPU("AMD Instinct MI455X", 5033.2, 20132.7, 40265.3, 432, 23.3, None, 72, 1800,
                   300, f"{_AMD}/mi400/mi455x.html",
                   "AMD lists 5, 20.1 and 40.3 PFLOP/s: 256 work group processors x 2.4 GHz x "

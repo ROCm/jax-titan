@@ -1,7 +1,7 @@
 """Per-GPU busy and idle time from a `jax.profiler` trace.
 
   python -m jax_titan.observability.profile TRACE_DIR [--lines]
-      [--steps N] [--json OUT]
+      [--steps N] [--json OUT] [--kernel_times OUT]
 
 Reads the newest `*.xplane.pb` under TRACE_DIR and reports, for each GPU, the
 share of the traced window it spends in compute kernels, in collective
@@ -12,9 +12,17 @@ collective share is exposed communication: collective time no compute
 kernel overlaps. With `--steps`, the number of traced steps, it also gives
 seconds per step; `--json` writes the result, which `summarize` reads as
 `<run_dir>/profile.json`, with the spread of each share across GPUs.
+
+`--kernel_times` writes every compute kernel launch instead: its name, the
+`hlo_module` and `hlo_op` XLA's ROCm and CUDA collectors attach, its start and
+duration, and the fraction of it that a collective kernel on the same GPU
+overlapped. Collectives running alongside take CUs and memory bandwidth, so a
+GEMM that overlaps one usually runs slower. `gemms.py --times` joins the
+launches to the program's GEMM sites.
 """
 
 import argparse
+import bisect
 import json
 import pathlib
 import re
@@ -75,6 +83,66 @@ def device_events(xplane: pathlib.Path):
       if _is_stream_line(line.name):
         out.extend((e.name, e.start_ns, e.end_ns) for e in line.events)
   return events
+
+
+def kernel_events(xplane: pathlib.Path) -> dict[int, list[dict]]:
+  """{gpu id: [{name, start_ns, end_ns, hlo_module, hlo_op}]} from the GPU stream lines."""
+  from jax.profiler import ProfileData  # pylint: disable=g-import-not-at-top
+
+  data = ProfileData.from_file(str(xplane))
+  events = {}
+  for plane in data.planes:
+    m = DEVICE_PLANE.search(plane.name)
+    if not m:
+      continue
+    out = events.setdefault(int(m.group(1)), [])
+    for line in plane.lines:
+      if not _is_stream_line(line.name):
+        continue
+      for e in line.events:
+        stats = {}
+        for name, value in e.stats:
+          if name in ("hlo_module", "hlo_op"):
+            stats[name] = str(value)
+        out.append({"name": e.name, "start_ns": e.start_ns, "end_ns": e.end_ns, **stats})
+  return events
+
+
+def _covered(start, end, merged, starts) -> int:
+  """Length of [start, end) inside the merged, sorted intervals."""
+  i = max(0, bisect.bisect_right(starts, start) - 1)
+  total = 0
+  while i < len(merged) and merged[i][0] < end:
+    lo, hi = max(start, merged[i][0]), min(end, merged[i][1])
+    if hi > lo:
+      total += hi - lo
+    i += 1
+  return total
+
+
+def kernel_times(events: dict[int, list[dict]]) -> list[dict]:
+  """One record per compute kernel launch, with the share a collective overlapped."""
+  out = []
+  for gpu, evs in sorted(events.items()):
+    comm = _merge([(e["start_ns"], e["end_ns"]) for e in evs if COLLECTIVE.search(e["name"])])
+    starts = [s for s, _ in comm]
+    for e in sorted(evs, key=lambda e: e["start_ns"]):
+      if COLLECTIVE.search(e["name"]) or COPY.search(e["name"]):
+        continue
+      dur = e["end_ns"] - e["start_ns"]
+      overlap = _covered(e["start_ns"], e["end_ns"], comm, starts) / dur if dur > 0 else 0.0
+      out.append({"gpu": gpu, "kernel": e["name"], "hlo_module": e.get("hlo_module", ""),
+                  "hlo_op": e.get("hlo_op", ""), "start_ns": e["start_ns"], "dur_ns": dur,
+                  "rccl_overlap": round(overlap, 4)})
+  return out
+
+
+def write_kernel_times(trace_dir: str, steps: int, out_path) -> dict:
+  xplane = newest_xplane(trace_dir)
+  out = {"xplane": str(xplane), "steps": steps or None,
+         "launches": kernel_times(kernel_events(xplane))}
+  pathlib.Path(out_path).write_text(json.dumps(out) + "\n")
+  return out
 
 
 def summarize(xplane: pathlib.Path) -> dict:
@@ -143,9 +211,18 @@ def main(argv=None):
   )
   parser.add_argument("--steps", type=int, default=0, help="Steps in the trace.")
   parser.add_argument("--json", default="", help="Write the result here.")
+  parser.add_argument("--kernel_times", default="",
+                      help="Write every compute kernel launch, with its HLO op and collective "
+                      "overlap, here (for gemms.py --times).")
   args = parser.parse_args(argv)
   xplane = newest_xplane(args.trace_dir)
   print(xplane)
+  if args.kernel_times:
+    out = write_kernel_times(args.trace_dir, args.steps, args.kernel_times)
+    named = sum(1 for k in out["launches"] if k["hlo_op"])
+    print(f"{len(out['launches'])} compute kernel launches, {named} with an HLO op, "
+          f"to {args.kernel_times}")
+    return 0
   if args.lines:
     import collections  # pylint: disable=g-import-not-at-top
     from jax.profiler import ProfileData  # pylint: disable=g-import-not-at-top

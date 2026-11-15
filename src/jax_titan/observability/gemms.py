@@ -5,6 +5,7 @@
       python -m jax_titan.trainer.train ... --steps=2 --run_dir=RUN
   python3 gemms.py DUMP [--run_dir RUN | --calls FILE] [--merge]
       [--module REGEX] [--sites] [--csv OUT] [--json OUT]
+      [--times KERNEL_TIMES --steps N]
 
 This file uses only the Python standard library: run it directly, or copy it
 to any machine with Python 3.8 or later, for a dump of any XLA program; it
@@ -30,6 +31,13 @@ shapes are what one device computes. With a JAX-Titan `--run_dir`, or
 each weighted by its calls per step: the jit module runs once, and a pipeline
 runs each stage's forward fragment once per microbatch and a backward fragment
 that serves several microbatches once for each.
+
+The `share` column is each shape's share of GEMM FLOPs. `--times` adds
+measured time from `profile.py --kernel_times` of a trace of the same
+program: each site's kernel launches, joined by HLO module and op, with the
+median per launch and its bootstrap interval, the medians of launches no
+collective overlapped ("clean") and of those mostly overlapped, and the
+milliseconds per traced step (`--steps`). Sites are then ranked by time.
 """
 
 from __future__ import annotations
@@ -40,7 +48,9 @@ import json
 import math
 import os
 import pathlib
+import random
 import re
+import statistics
 
 # Library GEMM custom calls and the ROCm library each runs; XLA keeps the
 # targets' cuBLAS-era names on ROCm.
@@ -767,6 +777,72 @@ def write_csv(path, sites: list[dict]):
                        "launch": json.dumps(s["launch"]) if s.get("launch") else ""})
 
 
+CLEAN, OVERLAPPED = 0.05, 0.5  # collective-overlap fractions of a launch
+
+
+def _median_ci(values, n=1000, seed=0):
+  if len(values) < 2:
+    return (values[0], values[0]) if values else (None, None)
+  rng = random.Random(seed)
+  meds = sorted(statistics.median(rng.choices(values, k=len(values))) for _ in range(n))
+  return meds[int(0.025 * n)], meds[int(0.975 * n) - 1]
+
+
+def attach_times(sites: list[dict], kernel_times: dict, steps: int = 0) -> dict:
+  """Add each site's measured launches from `profile.py --kernel_times` as `site["time"]`."""
+  steps = steps or kernel_times.get("steps") or 1
+  by_op = {}
+  for k in kernel_times["launches"]:
+    if k.get("hlo_op"):
+      by_op.setdefault((k["hlo_module"], k["hlo_op"]), []).append(k)
+  kernels = {}
+  for s in sites:
+    kernels.setdefault((s["module"], s["kernel"]), []).append(s)
+  matched = 0
+  for (module, kernel), group_ in kernels.items():
+    launches = by_op.get((module, kernel)) or by_op.get((module, "%" + kernel), [])
+    if not launches:
+      continue
+    matched += 1
+    us = [k["dur_ns"] / 1e3 for k in launches]
+    clean = [k["dur_ns"] / 1e3 for k in launches if k["rccl_overlap"] < CLEAN]
+    over = [k["dur_ns"] / 1e3 for k in launches if k["rccl_overlap"] >= OVERLAPPED]
+    lo, hi = _median_ci(us)
+    record = {
+        "launches": len(launches), "launches_per_step": len(launches) / steps,
+        "median_us": statistics.median(us), "ci_us": [lo, hi],
+        "clean": {"launches": len(clean), "median_us": statistics.median(clean) if clean else None},
+        "overlapped": {"launches": len(over), "median_us": statistics.median(over) if over else None},
+        "ms_per_step": sum(us) / 1e3 / steps, "kernels": sorted({k["kernel"] for k in launches})[:3],
+        "shared_by_sites": len(group_),
+    }
+    for s in group_:
+      s["time"] = dict(record, ms_per_step=record["ms_per_step"] / len(group_))
+  return {"steps": steps, "kernels_matched": matched, "kernels": len(kernels),
+          "launches": len(kernel_times["launches"]),
+          "unmatched_hlo_ops": len(by_op) - matched}
+
+
+def _times_table(sites, top=0, width=0):
+  timed = [s for s in sites if s.get("time")]
+  total = sum(s["time"]["ms_per_step"] for s in timed)
+  print(f"  {'ms/step':>8} {'share':>6} {'per step':>8} {'median us':>16} {'clean us':>9} "
+        f"{'overlap us':>10} {'TF/s':>6}  {'library':<10} {'M':>7} {'N':>7} {'K':>7}  {'layout':<6} "
+        f"{'pass':<5} kernel / source")
+  for s in sorted(timed, key=lambda s: -s["time"]["ms_per_step"])[:top or None]:
+    t = s["time"]
+    ci = t["ci_us"]
+    tflops = (s["flops"] or 0) / (t["median_us"] * 1e-6) / 1e12 if t["median_us"] else 0
+    fmt = lambda v: f"{v:9.1f}" if v is not None else f"{'-':>9}"  # noqa: E731
+    line = (f"  {t['ms_per_step']:8.2f} {100 * t['ms_per_step'] / total if total else 0:5.1f}% "
+            f"{t['launches_per_step']:8.1f} {t['median_us']:7.1f} ({ci[0]:.0f}-{ci[1]:.0f}) "
+            f"{fmt(t['clean']['median_us'])} {fmt(t['overlapped']['median_us']):>10} {tflops:6.0f}  "
+            f"{s['library']:<10} {s['m']:>7} {s['n']:>7} {s['k']:>7}  {s['layout']:<6} {s['pass']:<5} "
+            f"{s['kernel']} {s['source']}")
+    print(line[:width] if width else line)
+  print(f"  measured GEMM time: {total:.2f} ms per step over {len(timed)} of {len(sites)} sites")
+
+
 def main(argv=None):
   parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
   parser.add_argument("dump", help="An --xla_dump_to directory or one *after_optimizations.txt file.")
@@ -786,6 +862,11 @@ def main(argv=None):
   parser.add_argument("--width", type=int, default=0, help="Cut lines to this width; 0 for no limit.")
   parser.add_argument("--csv", default="", help="Write every GEMM site here.")
   parser.add_argument("--json", default="", help="Write every module's GEMM sites and shapes here.")
+  parser.add_argument("--times", default="",
+                      help="profile.py --kernel_times output of a trace of this program: rank "
+                      "sites by measured time.")
+  parser.add_argument("--steps", type=int, default=0,
+                      help="Steps in that trace; default: the steps it records.")
   args = parser.parse_args(argv)
   results = analyze(args.dump, args.module)
   if not results:
@@ -808,6 +889,12 @@ def main(argv=None):
   with_gemms = [(m, sites) for m, sites in results if sites or m.other_calls]
   without = len(results) - len(with_gemms)
   everything = [site for _, sites in with_gemms for site in sites]
+  timing = None
+  if args.times:
+    timing = attach_times(everything, json.loads(pathlib.Path(args.times).read_text()), args.steps)
+    print(f"times: {timing['kernels_matched']} of {timing['kernels']} GEMM kernels matched launches "
+          f"over {timing['steps']} steps")
+    _times_table(everything, args.top, args.width)
   if args.merge:
     launches, total, split = _summary(everything)
     scope = "in one training step" if args.run_dir or args.calls else "each run once"
@@ -846,7 +933,7 @@ def main(argv=None):
   if args.csv:
     write_csv(args.csv, everything)
   if args.json:
-    out = {"dump": str(args.dump), "counts": unit, "modules": [
+    out = {"dump": str(args.dump), "counts": unit, "times": timing, "modules": [
         {"module": m.name, "file": m.path, "platform": m.platform,
          "calls_per_step": m.calls_per_step or None, "gemms": s, "shapes": group(s),
          "other_custom_calls": m.other_calls, "launch_check": m.launch_check}
