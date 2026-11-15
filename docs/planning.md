@@ -253,7 +253,8 @@ python -m jax_titan.planning.budget --model=llama3.1-8b --tokens=2e12 --gpu=MI35
 
 ### The compute-optimal size for the same compute
 
-A 70B model on 20T tokens, 286 tokens per parameter:
+Llama 3.1 70B on 20T tokens, 283 tokens per parameter (the planner counts 70.55B
+parameters, the embeddings included):
 
 ```bash
 python -m jax_titan.planning.budget --model=llama3.1-70b --tokens=20e12 --gpu=MI350X \
