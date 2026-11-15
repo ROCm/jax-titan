@@ -28,8 +28,10 @@ a comma-separated list gets a table with a row per GPU. It reports:
   `--microbatches`), whether it fits the GPU's HBM, and the layouts that do;
 - the data-parallel gradient reduction (or FSDP's gathers) per step against the step's
   compute, and the batch that hides it;
-- the compute-optimal model size and tokens for the same compute (Chinchilla, about 20
-  tokens per parameter with C = 6ND).
+- what a scaling law (`--law`, jax_titan.planning.scaling) says about the run: its loss,
+  the compute-optimal model for the same compute (and Chinchilla's 20 tokens per parameter
+  with C = 6ND), and with `--critical_batch_tokens` the tokens a large batch costs.
+  `--target_loss` replaces a token budget: the tokens the law says the model needs.
 
 MFU measured on one GPU type is only an assumption on another; time scales with 1 / MFU.
 """
@@ -44,9 +46,9 @@ from jax_titan.planning import comms
 from jax_titan.planning import gpus as gpus_lib
 from jax_titan.planning import memory
 from jax_titan.planning import models
+from jax_titan.planning import scaling
 
 DAY = 86400.0
-CHINCHILLA_TOKENS_PER_PARAM = 20
 # Measured with JAX-Titan on Llama 3.1 8B (docs/planning.md): the recipe's steady checkpoint
 # cost and restart cost including the first save, and peak HBM over the analytic floor of
 # JAX-Titan's own pipeline (1.96-2.01; the MaxText adapter's 2.83).
@@ -106,7 +108,7 @@ def estimate(model: models.Model, gpu: gpus_lib.GPU, gpus: int, *, tokens: float
   gpu_hours = gpus * wall_s / 3600
   model_flops = tokens * per_token
   # Chinchilla's C = 6ND, with N the parameters a token uses.
-  n_opt = math.sqrt(6 * model.params(active=True) * tokens / (6 * CHINCHILLA_TOKENS_PER_PARAM))
+  n_opt, d_opt = scaling.rule_of_thumb(6 * model.params(active=True) * tokens)
   out = {
       "model": model.name, "model_source": model.source, "params": model.params(),
       "active_params": model.params(active=True), "gpu": gpu.name, "gpus": gpus, "precision": precision, "peak_tflops": peak / 1e12,
@@ -116,7 +118,7 @@ def estimate(model: models.Model, gpu: gpus_lib.GPU, gpus: int, *, tokens: float
       "model_flops": model_flops, "executed_flops": tokens * executed_per_token,
       "tokens_per_s": tokens_per_s, "tokens_per_s_per_gpu": tokens_per_s / gpus,
       "compute_days": wall_s * ettr / DAY, "wall_days": wall_s / DAY, "gpu_hours": gpu_hours,
-      "compute_optimal": {"params": n_opt, "tokens": CHINCHILLA_TOKENS_PER_PARAM * n_opt},
+      "compute_optimal": {"params": n_opt, "tokens": d_opt},
       "tokens_per_param": tokens / model.params(active=True),
   }
   if gpu.board_power_w:
@@ -318,9 +320,6 @@ def report(r: dict, args) -> None:
           f"{r['tokens'] / 1e12:.3f}T ({r['tokens_per_param']:.0f} per active parameter)")
   _metric("model FLOPs", f"{r['model_flops']:.3e}")
   _metric("executed FLOPs", f"{r['executed_flops']:.3e}")
-  co = r["compute_optimal"]
-  _metric("compute-optimal", f"{co['params'] / 1e9:.1f}B parameters on "
-          f"{co['tokens'] / 1e12:.2f}T tokens (Chinchilla, C = 6ND)")
   _metric("throughput", f"{_count(r['tokens_per_s'])} tokens/s")
   _metric("throughput per GPU", f"{r['tokens_per_s_per_gpu']:.0f} tokens/s")
   _metric("wall time", _duration(r["wall_days"]))
@@ -333,6 +332,10 @@ def report(r: dict, args) -> None:
     _metric("cost", f"${r['cost_usd'] / 1e6:.2f}M")
   for mfu, days in r["wall_days_at_mfu"].items():
     _metric(f"wall time at {100 * mfu:.0f}% MFU", _duration(days))
+
+  _section("Scaling Law Report")
+  for label, value in scaling.lines(r["scaling"]):
+    _metric(label, value)
 
   if "measured_gemm_tflops" in r:
     g = r["measured_gemm_tflops"]
@@ -394,6 +397,15 @@ def comparison(results: list[dict]) -> None:
   print("HBM: the layout's floor x overhead over the GPU's HBM; DP comm/step: the data-parallel "
         "collectives over the step's compute, at --comm_efficiency of the links' peak (above "
         "1x stays exposed even when overlapped).")
+  _section("Scaling Law Report")
+  if len({round(r["tokens"]) for r in results}) == 1:
+    for label, value in scaling.lines(results[0]["scaling"]):
+      _metric(label, value)
+  else:
+    for r in results:
+      s = r["scaling"]
+      _metric(r["gpu"], f"{_count(r['tokens'])} tokens" + (f", loss {s['loss']:.3f} ({s['law']})"
+                                                           if "loss" in s else ""))
 
 
 def main(argv=None):
@@ -408,7 +420,15 @@ def main(argv=None):
                       help="Tokens in one epoch of the dataset; with --epochs.")
   budget.add_argument("--days", type=float, help="Wall-clock days available.")
   budget.add_argument("--gpu_hours", type=float, help="GPU-hours available.")
+  budget.add_argument("--target_loss", type=float,
+                      help="Train until --law predicts this loss: the tokens it needs.")
   parser.add_argument("--epochs", type=float, default=1.0)
+  parser.add_argument("--law", default=scaling.DEFAULT,
+                      help=f"Scaling law for the loss and the compute-optimal size: "
+                      f"{' or '.join(scaling.LAWS)}, or a JSON file from planning.scaling --fit.")
+  parser.add_argument("--critical_batch_tokens", type=float, default=None,
+                      help="The critical batch of the run's loss (Kaplan et al. 2020), for the "
+                      "extra tokens a larger --batch_tokens takes to reach a loss.")
   parser.add_argument("--attention", default="causal", choices=list(models.ATTENTION),
                       help="How the attention scores count: causal half (JAX-Titan), the "
                       "full square (PaLM, Megatron) or none (6N, as in published compute "
@@ -465,8 +485,22 @@ def main(argv=None):
   args = parser.parse_args(argv)
 
   model = models.from_name(args.model)
+  law_name, law = scaling.load(args.law)
+  custom = law_name not in scaling.LAWS
+  if args.target_loss is not None:
+    if model.moe_layers and not custom:
+      parser.error("--target_loss needs a --law fit to MoE runs; the presets are dense")
+    args.tokens = law.tokens_for(scaling.params_of(model, law), args.target_loss)
+    if args.tokens is None:
+      parser.error(f"--target_loss {args.target_loss} is out of reach for {model.name}: "
+                   f"{law_name} puts its floor at {law.floor(scaling.params_of(model, law)):.3f}")
   run = from_run(args.from_run) if args.from_run else None
   results = [plan(model, gpus_lib.get(name), args, run) for name in args.gpu.split(",")]
+  for r in results:
+    r["scaling"] = scaling.assess(
+        model, r["tokens"], law, law_name, custom=custom, target_loss=args.target_loss,
+        batch_tokens=args.batch_tokens, critical_batch_tokens=args.critical_batch_tokens,
+        epochs=args.epochs if args.dataset_tokens else 1.0)
   if len(results) == 1:
     report(results[0], args)
   else:
