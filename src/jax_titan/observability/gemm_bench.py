@@ -30,6 +30,10 @@ Backends (flags are added to $XLA_FLAGS, so later ones win):
   jax_aiter            JAX-AITER's BF16 ASM GEMM, a [M,K] times b [N,K] transposed;
                        other layouts transpose operands first ("transposes" says how
                        many), and K must be a multiple of 64
+  flydsl               FlyDSL's preshuffle BF16 GEMM through XLA's FFI
+                       (ops/providers/flydsl.py, JAX_TITAN_FLYDSL_LIB): a [M,K] times
+                       b [N,K] transposed, b shuffled into blocks in the timed program
+  flydsl_kernel        the same kernel with its inputs converted before timing
 """
 
 from __future__ import annotations
@@ -83,22 +87,37 @@ def _bootstrap(values, n=2000, seed=0):
   return meds[int(0.025 * n)], meds[int(0.975 * n) - 1]
 
 
+DIRECT = ("triton_gemm", "jax_aiter", "flydsl", "flydsl_kernel")
+
+
 def _direct(backend: str, a_layout: str, b_layout: str):
-  """(fn(a, b) for operands in the stored layouts, operands it transposes first)."""
+  """(fn(a, b), operands it transposes, prepare(a, b) run once before timing)."""
+  same = lambda a, b: (a, b)  # noqa: E731
+  to_mk = lambda a: a.T if a_layout == "KM" else a  # noqa: E731
+  to_nk = lambda b: b if b_layout == "NK" else b.T  # noqa: E731
+  moved = (a_layout == "KM") + (b_layout == "KN")
   if backend == "triton_gemm":
     from jax_titan.ops.providers import triton  # pylint: disable=g-import-not-at-top
     params = (a_layout == "KM", b_layout == "NK")
-    return (lambda a, b: triton.triton_matmul(a, b, params)), 0
+    return (lambda a, b: triton.triton_matmul(a, b, params)), 0, same
+  if backend.startswith("flydsl"):
+    from jax_titan.ops.providers import flydsl  # pylint: disable=g-import-not-at-top
+    if backend == "flydsl_kernel":
+      return flydsl.gemm_shuffled, 0, lambda a, b: (to_mk(a), flydsl.shuffle(to_nk(b)))
+    return (lambda a, b: flydsl.gemm_shuffled(to_mk(a), flydsl.shuffle(to_nk(b)))), moved, same
   from jax_aiter.gemm import gemm  # pylint: disable=g-import-not-at-top
-  return ((lambda a, b: gemm(a.T if a_layout == "KM" else a, b if b_layout == "NK" else b.T)),
-          (a_layout == "KM") + (b_layout == "KN"))
+  return (lambda a, b: gemm(to_mk(a), to_nk(b))), moved, same
 
 
-def _direct_skip(backend: str, k: int, batch: int, dtype: str) -> str | None:
+def _direct_skip(backend: str, n: int, k: int, batch: int, dtype: str) -> str | None:
   if batch != 1 or dtype != "bf16":
     return f"{backend} times bf16 problems without a batch"
   if backend == "jax_aiter" and k % 64:
     return "JAX-AITER's ASM GEMM needs K a multiple of 64"
+  if backend.startswith("flydsl"):
+    from jax_titan.ops.providers import flydsl  # pylint: disable=g-import-not-at-top
+    if (n, k) not in flydsl.kernels():
+      return f"no FlyDSL kernel for N x K {n}x{k} in ${flydsl.LIB_ENV}"
   return None
 
 
@@ -111,7 +130,7 @@ def _worker(spec_path: str, backend: str, out_path: str, iters: int, rounds: int
   if provider:
     from jax_titan import ops  # pylint: disable=g-import-not-at-top
     ops.set_policy(f"linear={provider}")
-  direct = backend in ("triton_gemm", "jax_aiter")
+  direct = backend in DIRECT
   results = []
   for spec in json.loads(pathlib.Path(spec_path).read_text()):
     m, n, k, b = spec["m"], spec["n"], spec["k"], spec.get("batch", 1) or 1
@@ -121,7 +140,7 @@ def _worker(spec_path: str, backend: str, out_path: str, iters: int, rounds: int
     if provider and (spec["layout"] != "MK,KN" or b != 1):
       results.append(dict(rec, skipped="ops providers time MK,KN problems without a batch"))
       continue
-    if direct and (why := _direct_skip(backend, k, b, spec.get("dtype", "bf16"))):
+    if direct and (why := _direct_skip(backend, n, k, b, spec.get("dtype", "bf16"))):
       results.append(dict(rec, skipped=why))
       continue
     a_shape = (m, k) if a_layout == "MK" else (k, m)
@@ -135,11 +154,14 @@ def _worker(spec_path: str, backend: str, out_path: str, iters: int, rounds: int
     keys = jax.random.split(jax.random.PRNGKey(0), 2 * sets)
     xs = [jax.random.normal(keys[2 * i], a_shape, jnp.float32).astype(dtype) for i in range(sets)]
     ws = [jax.random.normal(keys[2 * i + 1], b_shape, jnp.float32).astype(dtype) for i in range(sets)]
+    x0, w0 = xs[0], ws[0]
     if provider:
       fn = jax.jit(lambda x, w: ops.linear(x, w))
     elif direct:
-      call, rec["transposes"] = _direct(backend, a_layout, b_layout)
+      call, rec["transposes"], prepare = _direct(backend, a_layout, b_layout)
       fn = jax.jit(call)
+      prepare = jax.jit(prepare)
+      xs, ws = map(list, zip(*(prepare(x, w) for x, w in zip(xs, ws))))
     else:
       fn = jax.jit(lambda x, w: lax.dot_general(x, w, dims))
     try:
@@ -166,14 +188,14 @@ def _worker(spec_path: str, backend: str, out_path: str, iters: int, rounds: int
       out.block_until_ready()
       per_round.append((time.perf_counter() - t0) / iters * 1e3)
     got = compiled(xs[0], ws[0]).astype(jnp.float32)
-    ref = lax.dot_general(xs[0].astype(jnp.float32), ws[0].astype(jnp.float32), dims,
+    ref = lax.dot_general(x0.astype(jnp.float32), w0.astype(jnp.float32), dims,
                           precision=lax.Precision.HIGHEST)
     if provider:
-      ref = jnp.dot(xs[0].astype(jnp.float32), ws[0].astype(jnp.float32), precision=lax.Precision.HIGHEST)
+      ref = jnp.dot(x0.astype(jnp.float32), w0.astype(jnp.float32), precision=lax.Precision.HIGHEST)
     rel = float(jnp.linalg.norm(got - ref) / jnp.linalg.norm(ref))
     results.append(dict(rec, ms=statistics.median(per_round), rounds_ms=per_round, rel_l2=rel,
                         flops=2 * b * m * n * k))
-    del xs, ws, out, got, ref, compiled
+    del xs, ws, x0, w0, out, got, ref, compiled
   pathlib.Path(out_path).write_text(json.dumps(results) + "\n")
 
 

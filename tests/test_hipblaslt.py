@@ -171,6 +171,34 @@ def test_bound_sits_below_measured_times_and_scales_with_the_clock():
   assert capped < 1.45  # the measured best in _results
 
 
+def test_sweep_times_a_problem_with_the_beta_its_calls_use():
+  key = dict(zip(hipblaslt.KEY, ("N", "N", 1, 4096, 8192, 14336, "bf16_r", "bf16_r", "bf16_r", "f32_r")))
+  residual = hipblaslt._sweep_args({"key": key, "desc": {"beta": 1.0}})
+  assert residual[-2:] == ["--beta", "1"]
+  assert "--beta" not in hipblaslt._sweep_args({"key": key, "desc": {"beta": 0.0}})
+
+
+def _timed(site, us, ci=5.0):
+  return dict(site, time={"launches_per_step": 32, "median_us": us, "ci_us": [us - ci, us + ci],
+                          "clean": {"launches": 32, "median_us": us}, "overlapped": {"launches": 0}})
+
+
+def test_instep_keeps_rows_that_are_not_slower_in_the_step(tmp_path):
+  fwd, dgrad = _site(8192, 14336, 4096, "MK,KN"), _site(8192, 4096, 14336, "MK,NK", kernel="custom-call.2")
+  rows = [dict(zip(hipblaslt.KEY, hipblaslt.site_key(s) + ("f32_r",)), solution_index=i)
+          for s, i in ((fwd, 11), (dgrad, 22))]
+  override = tmp_path / "tuning.txt"
+  hipblaslt.write_override(rows, "abc123", override)
+  base = {"modules": [{"gemms": [_timed(fwd, 1500.0), _timed(dgrad, 1600.0)]}]}
+  tuned = {"modules": [{"gemms": [_timed(fwd, 1450.0), _timed(dgrad, 1680.0)]}]}
+  out = hipblaslt.instep(base, tuned, override)
+  assert [r["keep"] for r in out["rows"]] == [True, False]
+  assert out["rows"][1]["delta"] == pytest.approx(0.05)
+  assert out["rows"][0]["ms_per_step"] == pytest.approx(-32 * 50 / 1e3)
+  assert [r["solution_index"] for r in out["kept"]] == [11]
+  assert "| no |" in hipblaslt.instep_table(out)
+
+
 def test_f32_problems_are_bound_at_the_fp32_peak_where_one_is_published():
   key = dict(_results()["results"][0]["key"], a_type="f32_r", b_type="f32_r", c_type="f32_r")
   bound = 2 * 14336 * 8192 * 4096 / 163.4e12 * 1e3

@@ -9,10 +9,11 @@
 //   hipblaslt_sweep screen   m n k tA tB [--batch B] [--ws BYTES] [--target_ms T] [--warmup_ms W]
 //                                        [--mode rot|hot]
 //
-// Problems are column major, as hipBLASLt sees them: D[m, n] = op(A) op(B) with
-// --types A,B,C (bf16_r, f16_r or f32_r; D has C's type, default bf16_r for all
-// three), --compute f32_r (or xf32_r), f32 scale, alpha 1 and beta 0, and
-// leading dimensions equal to the row counts. INDEX is a solution index, or -1 for the
+// Problems are column major, as hipBLASLt sees them: D[m, n] = op(A) op(B) + beta C
+// with --types A,B,C (bf16_r, f16_r or f32_r; D has C's type, default bf16_r for
+// all three), --compute f32_r (or xf32_r), f32 scale, alpha 1, --beta (default
+// 0; XLA passes 1 when it adds a residual into the GEMM, with C and D one
+// buffer, as here), and leading dimensions equal to the row counts. INDEX is a solution index, or -1 for the
 // heuristic's first choice (what XLA runs at autotune level 0). A solution is
 // supported if hipBLASLt accepts it for the problem within --ws bytes of
 // workspace, the workspace XLA gives the call.
@@ -100,6 +101,7 @@ struct Options {
   double target_ms = 100, warmup_ms = 1000;
   std::string mode = "rot";
   std::string types = "bf16_r,bf16_r,bf16_r", compute = "f32_r";
+  float beta = 0.f;
   std::vector<int> indices;
 };
 
@@ -123,7 +125,7 @@ hipblasComputeType_t compute_type(const std::string& name) {
 Options parse(int argc, char** argv) {
   Options o;
   if (argc < 2) {
-    fprintf(stderr, "usage: hipblaslt_sweep probe|list|time|validate m n k tA tB [options] [INDEX...]\n");
+    fprintf(stderr, "usage: hipblaslt_sweep probe|list|screen|time|validate m n k tA tB [options] [INDEX...]\n");
     exit(2);
   }
   o.command = argv[1];
@@ -155,6 +157,7 @@ Options parse(int argc, char** argv) {
     else if (a == "--mode") o.mode = next("--mode");
     else if (a == "--types") o.types = next("--types");
     else if (a == "--compute") o.compute = next("--compute");
+    else if (a == "--beta") o.beta = static_cast<float>(atof(next("--beta")));
     else o.indices.push_back(atoi(a.c_str()));
   }
   return o;
@@ -175,7 +178,7 @@ struct Problem {
   void* workspace = nullptr;
   hipStream_t stream{};
 
-  explicit Problem(const Options& opts) : o(opts) {
+  explicit Problem(const Options& opts) : o(opts), beta(opts.beta) {
     CHECK_BLAS(hipblasLtCreate(&handle));
     {
       std::vector<std::string> t;
@@ -547,6 +550,8 @@ int validate_command(Problem& p) {
   int index = -1;
   size_t ws = 0;
   if (!p.resolve(-1, &algo, &index, &ws)) return 1;
+  // C is D: zero it, so beta C adds nothing and every result is A B.
+  CHECK_HIP(hipMemset(ops.d[0], 0, p.bytes_d()));
   p.run(algo, ops.a[0], ops.b[0], ops.d[0]);
   CHECK_HIP(hipStreamSynchronize(p.stream));
   std::vector<float> base = download(ops.d[0], count, p.type_c);

@@ -11,6 +11,7 @@ problem. This tool finds those rows and checks that they take effect:
   python3 hipblaslt.py sweep problems.json --out DIR --bench hipblaslt-bench --sweep_bin BIN
   python3 hipblaslt.py write DIR/results.json --out tuning.txt
   python3 hipblaslt.py verify LOG... --override tuning.txt [--api --sweep_bin BIN]
+  python3 hipblaslt.py instep base_gemms.json tuned_gemms.json --override tuning.txt --out refined.txt
   python3 hipblaslt.py map DIR/results.json --names DIR2 --json OUT
   python3 hipblaslt.py report DIR/results.json [--times times.json]
 
@@ -31,6 +32,10 @@ team's method, when a bench built for the same library is at hand. Stage 2
 times finalists, the default among them, in separate processes with
 interleaved rounds, and adopts a solution only when its bootstrap interval
 separates from the default's and it is at least `--min_gain` faster.
+
+A solution that wins alone can lose in the step, beside collectives that share
+the GPU. `instep` compares traces of the step without and with the override
+(`gemms.py --times`) row by row and writes the rows that are not slower.
 
 Override rows are tied to one library build: the file's first line must be
 `Git Version: <hipblasLtGetGitRevision>`, or hipBLASLt ignores the whole file.
@@ -340,10 +345,13 @@ def _json_lines(text: str) -> list[dict]:
 
 
 def _sweep_args(problem: dict) -> list[str]:
+  """The sweep binary's problem arguments. beta is not in the override key, but
+  a call that adds into C (XLA's residual adds) reads C, which changes timings."""
   k = problem["key"]
+  beta = float((problem.get("desc") or {}).get("beta") or 0.0)
   return [str(k["m"]), str(k["n"]), str(k["k"]), k["transA"], k["transB"],
           "--batch", str(k["batch_count"]), "--types", f"{k['a_type']},{k['b_type']},{k['c_type']}",
-          "--compute", k["compute_type"]]
+          "--compute", k["compute_type"]] + (["--beta", f"{beta:g}"] if beta else [])
 
 
 _TYPES = ("bf16_r", "f16_r", "f32_r")
@@ -592,6 +600,58 @@ def rows_from_results(results: dict) -> list[dict]:
       row["kernel_name"] = r["winner_names"]["kernel"]
     rows.append(row)
   return rows
+
+
+def instep_times(gemms_json: dict) -> dict:
+  """{problem id: in-step us per launch and its interval}, launch-weighted over a problem's sites,
+  from `gemms.py --json --times`."""
+  acc = {}
+  for module in gemms_json.get("modules", []):
+    for s in module.get("gemms", []):
+      t = s.get("time")
+      if not t or not t.get("median_us") or s.get("library") != "hipBLASLt":
+        continue
+      pid = key_text(site_key(s) + ("f32_r",))
+      n = t["launches_per_step"]
+      a = acc.setdefault(pid, [0.0, 0.0, 0.0, 0.0])
+      for i, v in enumerate((n, n * t["median_us"], n * t["ci_us"][0], n * t["ci_us"][1])):
+        a[i] += v
+  return {pid: {"launches_per_step": n, "us": us / n, "ci_us": [lo / n, hi / n]}
+          for pid, (n, us, lo, hi) in acc.items() if n}
+
+
+def instep(base_gemms: dict, tuned_gemms: dict, override_path) -> dict:
+  """Per override row, its problem's in-step launches without and with the override.
+
+  A row whose tuned launches run slower in the step, their intervals apart, is
+  not kept: its solution won alone but loses beside the step's other work, such
+  as collectives sharing the GPU.
+  """
+  git, rows = parse_tuning_file(override_path)
+  base, tuned = instep_times(base_gemms), instep_times(tuned_gemms)
+  out = []
+  for row in rows:
+    pid = key_text(key_of(row))
+    b, t = base.get(pid), tuned.get(pid)
+    rec = {"id": pid, "solution_index": row["solution_index"], "base": b, "tuned": t}
+    if b and t:
+      rec["delta"] = t["us"] / b["us"] - 1
+      rec["slower"] = t["ci_us"][0] > b["ci_us"][1]
+      rec["ms_per_step"] = (t["us"] - b["us"]) * b["launches_per_step"] / 1e3
+    rec["keep"] = not rec.get("slower", False)
+    out.append(rec)
+  return {"git_version": git, "rows": out, "kept": [r for r, rec in zip(rows, out) if rec["keep"]]}
+
+
+def instep_table(result: dict) -> str:
+  lines = ["| problem | solution | base us | tuned us | change | ms/step | keep |", "|---|---|---|---|---|---|---|"]
+  for r in result["rows"]:
+    if r.get("delta") is None:
+      lines.append(f"| {r['id']} | {r['solution_index']} | | | not in both traces | | yes |")
+      continue
+    lines.append(f"| {r['id']} | {r['solution_index']} | {r['base']['us']:.0f} | {r['tuned']['us']:.0f} | "
+                 f"{r['delta']:+.1%} | {r['ms_per_step']:+.2f} | {'yes' if r['keep'] else 'no'} |")
+  return "\n".join(lines)
 
 
 def verify(logs, override_path) -> dict:
@@ -897,6 +957,13 @@ def main(argv=None) -> int:
   p.add_argument("--sweep_bin", default="hipblaslt_sweep")
   p.add_argument("--json", default="")
 
+  p = sub.add_parser("instep", help="Each row's in-step launches without and with the override.")
+  p.add_argument("base_gemms", help="gemms.py --json --times of a trace without the override.")
+  p.add_argument("tuned_gemms", help="The same with it.")
+  p.add_argument("--override", required=True)
+  p.add_argument("--out", default="", help="Write the rows that are not slower in the step here.")
+  p.add_argument("--json", default="")
+
   p = sub.add_parser("map", help="Carry winners to the hipBLASLt build this process loads.")
   p.add_argument("results")
   p.add_argument("--sweep_bin", default="hipblaslt_sweep")
@@ -954,6 +1021,14 @@ def main(argv=None) -> int:
     if args.api:
       out["api"] = verify_api(args.override, args.sweep_bin)
     print(_dump(out, args.json), end="")
+  elif args.command == "instep":
+    out = instep(_load(args.base_gemms), _load(args.tuned_gemms), args.override)
+    if args.json:
+      _dump(out, args.json)
+    print(instep_table(out))
+    if args.out:
+      n = write_override(out["kept"], out["git_version"], args.out)
+      print(f"kept {n} of {len(out['rows'])} rows in {args.out}")
   elif args.command == "map":
     print(_dump(map_results(_load(args.results), args.sweep_bin, listings_dir=args.listings or None),
                 args.json), end="")

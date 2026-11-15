@@ -51,6 +51,17 @@ Each stage writes into `OUT`:
 | `cost` | `cost.md` | Per problem and per step: selection, contention, in-step other, and ceiling (below) |
 | `negative` | `negative/summary.json` | Each way the file can fail shows up: a wrong git version (no hits), a wrong key field (the row goes unused), too much workspace (no hit), and an executable from the compilation cache built without the file (all hits) |
 
+A solution that wins alone can still lose in the step: beside a collective
+that shares the GPU, one kernel can slow down more than another. With traces
+of the step without and with the file (`profile`), `hipblaslt.py instep`
+compares each row's in-step launches and writes the rows that are not slower,
+for a second A/B:
+
+```bash
+python3 src/jax_titan/tuning/hipblaslt.py instep OUT/profile/base_gemms.json \
+  OUT/profile/tuned_gemms.json --override OUT/tuning.txt --out OUT/tuning_refined.txt
+```
+
 `sweep` adopts a solution only when its 95% bootstrap interval over separate
 processes separates from the default's and it is at least 2% faster
 (`--min_gain`). Stage 1 times every supported solution once at XLA's
@@ -147,6 +158,10 @@ does. What the cost breakdown shows instead:
   which `--times` also matches.
 - A wrong `Git Version` line disables the whole file without a log line; only
   `verify` shows it.
+- With the file set, XLA's compilation takes longer (about 20 s more for a
+  program with 50 hipBLASLt calls on TheRock 10.1): XLA queries hipBLASLt for
+  each call while compiling. An executable from the compilation cache skips
+  that and still picks the file up.
 - Sweep at the workspace XLA gives the call (`capture` records it). A winner
   that needs more is not supported at run time and the call silently falls
   back to the default; `negative` checks this.
