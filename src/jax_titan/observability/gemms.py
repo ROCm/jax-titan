@@ -425,6 +425,9 @@ class _Walker:
           self.record((fusion, name), count, flags, fusion, BLAS_TARGETS[target], target, operands,
                       self._out(name), _numbers_from_config(config), attrs,
                       self._blas_config(config, self._workspace(name)))
+          if (fusion, name) in self.sites:
+            # A library call in a fusion (dynamic-slice fusion) launches under its own name.
+            self.sites[(fusion, name)]["trace_op"] = name
       elif opcode == "fusion":
         _, attrs = self.module.parts(rest, at)
         for callee in _names(attrs.get("calls")):
@@ -800,7 +803,11 @@ def attach_times(sites: list[dict], kernel_times: dict, steps: int = 0) -> dict:
     kernels.setdefault((s["module"], s["kernel"]), []).append(s)
   matched = 0
   for (module, kernel), group_ in kernels.items():
-    launches = by_op.get((module, kernel)) or by_op.get((module, "%" + kernel), [])
+    launches = []
+    for op in [kernel] + sorted({s["trace_op"] for s in group_ if s.get("trace_op")}):
+      launches = by_op.get((module, op)) or by_op.get((module, "%" + op), [])
+      if launches:
+        break
     if not launches:
       continue
     matched += 1
@@ -808,8 +815,10 @@ def attach_times(sites: list[dict], kernel_times: dict, steps: int = 0) -> dict:
     clean = [k["dur_ns"] / 1e3 for k in launches if k["rccl_overlap"] < CLEAN]
     over = [k["dur_ns"] / 1e3 for k in launches if k["rccl_overlap"] >= OVERLAPPED]
     lo, hi = _median_ci(us)
+    expected = sum(s["count"] for s in group_) / len(group_)
     record = {
         "launches": len(launches), "launches_per_step": len(launches) / steps,
+        "coverage": len(launches) / steps / expected if expected else None,
         "median_us": statistics.median(us), "ci_us": [lo, hi],
         "clean": {"launches": len(clean), "median_us": statistics.median(clean) if clean else None},
         "overlapped": {"launches": len(over), "median_us": statistics.median(over) if over else None},
@@ -818,9 +827,12 @@ def attach_times(sites: list[dict], kernel_times: dict, steps: int = 0) -> dict:
     }
     for s in group_:
       s["time"] = dict(record, ms_per_step=record["ms_per_step"] / len(group_))
+  timed = [s for s in sites if s.get("time")]
+  seen = sum(s["time"]["launches_per_step"] for s in timed)
+  expected = sum(s["count"] for s in timed)
   return {"steps": steps, "kernels_matched": matched, "kernels": len(kernels),
-          "launches": len(kernel_times["launches"]),
-          "unmatched_hlo_ops": len(by_op) - matched}
+          "launches": len(kernel_times["launches"]), "unmatched_hlo_ops": len(by_op) - matched,
+          "coverage": seen / expected if expected else None}
 
 
 def _times_table(sites, top=0, width=0):
@@ -892,8 +904,9 @@ def main(argv=None):
   timing = None
   if args.times:
     timing = attach_times(everything, json.loads(pathlib.Path(args.times).read_text()), args.steps)
+    coverage = f"{100 * timing['coverage']:.0f}%" if timing["coverage"] is not None else "n/a"
     print(f"times: {timing['kernels_matched']} of {timing['kernels']} GEMM kernels matched launches "
-          f"over {timing['steps']} steps")
+          f"over {timing['steps']} steps; launches traced per expected launch: {coverage}")
     _times_table(everything, args.top, args.width)
   if args.merge:
     launches, total, split = _summary(everything)

@@ -9,9 +9,10 @@ the default solution's and the best solution's isolated times. GEMMS_JSON is
 launches, with the medians of launches no collective overlapped and of those
 mostly overlapped. Four times are kept apart, per launch:
 
-- t_bound: max(FLOPs at the peak for `--clock_ghz`, unique bytes at HBM
-  bandwidth). A lower bound for any kernel; under a power cap pass the clock
-  the GPU sustains on GEMMs, not the peak clock.
+- t_bound: max(FLOPs at the inputs' precision peak for `--clock_ghz`, unique
+  bytes at HBM bandwidth). A lower bound for any kernel; under a power cap
+  pass the clock the GPU sustains on bf16 GEMMs (`hipblaslt.py clock`), not
+  the peak clock. f32 GEMMs are bound at the FP32 matrix peak and peak clock.
 - t_default and t_best: the isolated default and the fastest solution measured.
 - t_now: the median in-step launch, with its clean and overlapped medians.
 
@@ -40,12 +41,28 @@ from jax_titan.planning import gpus as gpus_lib  # noqa: E402
 from jax_titan.tuning import hipblaslt  # noqa: E402
 
 _BYTES = {"bf16_r": 2, "f16_r": 2, "f32_r": 4, "f8_r": 1, "bf8_r": 1, "f8_fnuz_r": 1, "bf8_fnuz_r": 1}
+_PRECISION = {"f32_r": "fp32", "f8_r": "fp8", "bf8_r": "fp8", "f8_fnuz_r": "fp8", "bf8_fnuz_r": "fp8"}
+
+
+def bound_precision(key: dict, gpu: gpus_lib.GPU) -> str:
+  """The peak a problem's inputs run at: fp32, fp8 or bf16; bf16 where the GPU publishes no other."""
+  precision = _PRECISION.get(key["a_type"], "bf16")
+  try:
+    gpu.peak_tflops(precision)
+  except ValueError:
+    return "bf16"
+  return precision
 
 
 def t_bound_ms(key: dict, gpu: gpus_lib.GPU, clock_ghz: float | None = None) -> float:
+  """`clock_ghz` is one a bf16 GEMM sustains, so other precisions, which draw
+  less power at their lower peaks, are bound at the peak clock."""
   b, m, n, k = key["batch_count"], key["m"], key["n"], key["k"]
   flops = 2 * b * m * n * k
-  peak = gpu.peak_tflops_at("bf16", clock_ghz) if clock_ghz else gpu.peak_tflops("bf16")
+  precision = bound_precision(key, gpu)
+  if precision != "bf16":
+    clock_ghz = None
+  peak = gpu.peak_tflops_at(precision, clock_ghz) if clock_ghz else gpu.peak_tflops(precision)
   bytes_ = b * (m * k * _BYTES.get(key["a_type"], 2) + k * n * _BYTES.get(key["b_type"], 2)
                 + m * n * _BYTES.get(key["c_type"], 2))
   return max(flops / (peak * 1e12), bytes_ / (gpu.hbm_tbps * 1e12)) * 1e3

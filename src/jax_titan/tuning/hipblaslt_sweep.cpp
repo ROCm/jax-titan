@@ -2,6 +2,7 @@
 //
 //   hipblaslt_sweep probe
 //   hipblaslt_sweep list     m n k tA tB [--batch B] [--ws BYTES] [--heuristic N]
+//   (every command also takes --types A,B,C and --compute TYPE)
 //   hipblaslt_sweep time     m n k tA tB [--batch B] [--ws BYTES] [--rounds R] [--target_ms T]
 //                                        [--warmup_ms W] [--mode rot|hot] INDEX...
 //   hipblaslt_sweep validate m n k tA tB [--batch B] [--ws BYTES] INDEX...
@@ -9,8 +10,9 @@
 //                                        [--mode rot|hot]
 //
 // Problems are column major, as hipBLASLt sees them: D[m, n] = op(A) op(B) with
-// bf16 A, B, C and D, f32 compute and scale, alpha 1 and beta 0, and leading
-// dimensions equal to the row counts. INDEX is a solution index, or -1 for the
+// --types A,B,C (bf16_r, f16_r or f32_r; D has C's type, default bf16_r for all
+// three), --compute f32_r (or xf32_r), f32 scale, alpha 1 and beta 0, and
+// leading dimensions equal to the row counts. INDEX is a solution index, or -1 for the
 // heuristic's first choice (what XLA runs at autotune level 0). A solution is
 // supported if hipBLASLt accepts it for the problem within --ws bytes of
 // workspace, the workspace XLA gives the call.
@@ -32,6 +34,7 @@
 //             supported solution, each timed once for about --target_ms after
 //             the warm-up, then {"kind": "screen_done", count, best, best_ms}.
 //             A quick pass to pick finalists for `time`.
+#include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 #include <hipblaslt/hipblaslt-ext.hpp>
 #include <hipblaslt/hipblaslt.h>
@@ -96,8 +99,26 @@ struct Options {
   int heuristic = 128, rounds = 5;
   double target_ms = 100, warmup_ms = 1000;
   std::string mode = "rot";
+  std::string types = "bf16_r,bf16_r,bf16_r", compute = "f32_r";
   std::vector<int> indices;
 };
+
+hipDataType data_type(const std::string& name) {
+  if (name == "bf16_r") return HIP_R_16BF;
+  if (name == "f16_r") return HIP_R_16F;
+  if (name == "f32_r") return HIP_R_32F;
+  fprintf(stderr, "unsupported type %s (bf16_r, f16_r, f32_r)\n", name.c_str());
+  exit(2);
+}
+
+size_t type_bytes(hipDataType t) { return t == HIP_R_32F ? 4 : 2; }
+
+hipblasComputeType_t compute_type(const std::string& name) {
+  if (name == "f32_r") return HIPBLAS_COMPUTE_32F;
+  if (name == "xf32_r") return HIPBLAS_COMPUTE_32F_FAST_TF32;
+  fprintf(stderr, "unsupported compute type %s (f32_r, xf32_r)\n", name.c_str());
+  exit(2);
+}
 
 Options parse(int argc, char** argv) {
   Options o;
@@ -132,6 +153,8 @@ Options parse(int argc, char** argv) {
     else if (a == "--target_ms") o.target_ms = atof(next("--target_ms"));
     else if (a == "--warmup_ms") o.warmup_ms = atof(next("--warmup_ms"));
     else if (a == "--mode") o.mode = next("--mode");
+    else if (a == "--types") o.types = next("--types");
+    else if (a == "--compute") o.compute = next("--compute");
     else o.indices.push_back(atoi(a.c_str()));
   }
   return o;
@@ -145,6 +168,8 @@ struct Problem {
   hipblasLtMatrixLayout_t la{}, lb{}, lc{}, ld{};
   hipblasLtMatmulPreference_t pref{};
   hipblasOperation_t op_a{}, op_b{};
+  hipDataType type_a = HIP_R_16BF, type_b = HIP_R_16BF, type_c = HIP_R_16BF;
+  hipblasComputeType_t compute = HIPBLAS_COMPUTE_32F;
   int64_t rows_a = 0, cols_a = 0, rows_b = 0, cols_b = 0;
   float alpha = 1.f, beta = 0.f;
   void* workspace = nullptr;
@@ -152,19 +177,36 @@ struct Problem {
 
   explicit Problem(const Options& opts) : o(opts) {
     CHECK_BLAS(hipblasLtCreate(&handle));
+    {
+      std::vector<std::string> t;
+      size_t start = 0, comma;
+      while ((comma = o.types.find(',', start)) != std::string::npos) {
+        t.push_back(o.types.substr(start, comma - start));
+        start = comma + 1;
+      }
+      t.push_back(o.types.substr(start));
+      if (t.size() != 3) {
+        fprintf(stderr, "--types needs A,B,C\n");
+        exit(2);
+      }
+      type_a = data_type(t[0]);
+      type_b = data_type(t[1]);
+      type_c = data_type(t[2]);
+      compute = compute_type(o.compute);
+    }
     op_a = o.ta == 'T' ? HIPBLAS_OP_T : HIPBLAS_OP_N;
     op_b = o.tb == 'T' ? HIPBLAS_OP_T : HIPBLAS_OP_N;
     rows_a = o.ta == 'N' ? o.m : o.k;
     cols_a = o.ta == 'N' ? o.k : o.m;
     rows_b = o.tb == 'N' ? o.k : o.n;
     cols_b = o.tb == 'N' ? o.n : o.k;
-    CHECK_BLAS(hipblasLtMatmulDescCreate(&desc, HIPBLAS_COMPUTE_32F, HIP_R_32F));
+    CHECK_BLAS(hipblasLtMatmulDescCreate(&desc, compute, HIP_R_32F));
     CHECK_BLAS(hipblasLtMatmulDescSetAttribute(desc, HIPBLASLT_MATMUL_DESC_TRANSA, &op_a, sizeof(op_a)));
     CHECK_BLAS(hipblasLtMatmulDescSetAttribute(desc, HIPBLASLT_MATMUL_DESC_TRANSB, &op_b, sizeof(op_b)));
-    la = layout(HIP_R_16BF, rows_a, cols_a);
-    lb = layout(HIP_R_16BF, rows_b, cols_b);
-    lc = layout(HIP_R_16BF, o.m, o.n);
-    ld = layout(HIP_R_16BF, o.m, o.n);
+    la = layout(type_a, rows_a, cols_a);
+    lb = layout(type_b, rows_b, cols_b);
+    lc = layout(type_c, o.m, o.n);
+    ld = layout(type_c, o.m, o.n);
     CHECK_BLAS(hipblasLtMatmulPreferenceCreate(&pref));
     uint64_t ws = o.ws;
     CHECK_BLAS(hipblasLtMatmulPreferenceSetAttribute(pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &ws,
@@ -190,6 +232,14 @@ struct Problem {
   size_t elements_b() const { return static_cast<size_t>(rows_b * cols_b * o.batch); }
   size_t elements_d() const { return static_cast<size_t>(o.m * o.n * o.batch); }
   double flops() const { return 2.0 * o.batch * o.m * o.n * o.k; }
+  size_t bytes_a() const { return elements_a() * type_bytes(type_a); }
+  size_t bytes_b() const { return elements_b() * type_bytes(type_b); }
+  size_t bytes_d() const { return elements_d() * type_bytes(type_c); }
+
+  void all_algos(std::vector<hipblasLtMatmulHeuristicResult_t>& all) const {
+    CHECK_BLAS(hipblaslt_ext::getAllAlgos(handle, hipblaslt_ext::GemmType::HIPBLASLT_GEMM, op_a, op_b, type_a,
+                                          type_b, type_c, type_c, compute, all));
+  }
 
   std::vector<hipblasLtMatmulHeuristicResult_t> heuristic(int count) const {
     std::vector<hipblasLtMatmulHeuristicResult_t> out(std::max(count, 1));
@@ -232,25 +282,35 @@ struct Operands {
   Operands(const Problem& p, int sets) {
     std::mt19937 gen(1);
     std::normal_distribution<float> normal(0.f, 1.f);
-    std::vector<uint16_t> pattern((1 << 22) + 7);
-    for (auto& v : pattern) v = to_bf16(normal(gen));
-    auto fill = [&](size_t count, size_t offset) {
+    std::vector<float> pattern((1 << 22) + 7);
+    for (auto& v : pattern) v = normal(gen);
+    auto fill = [&](size_t count, size_t offset, hipDataType type) {
+      size_t bytes = type_bytes(type);
       void* ptr;
-      CHECK_HIP(hipMalloc(&ptr, count * 2));
-      std::vector<uint16_t> host(std::min<size_t>(count, 1 << 24));
-      for (size_t done = 0; done < count; done += host.size()) {
-        size_t chunk = std::min(host.size(), count - done);
-        for (size_t i = 0; i < chunk; i++) host[i] = pattern[(done + i + offset) % pattern.size()];
-        CHECK_HIP(hipMemcpy(static_cast<uint16_t*>(ptr) + done, host.data(), chunk * 2, hipMemcpyHostToDevice));
+      CHECK_HIP(hipMalloc(&ptr, count * bytes));
+      std::vector<uint8_t> host(std::min<size_t>(count, 1 << 24) * bytes);
+      size_t chunk_elems = host.size() / bytes;
+      for (size_t done = 0; done < count; done += chunk_elems) {
+        size_t chunk = std::min(chunk_elems, count - done);
+        for (size_t i = 0; i < chunk; i++) {
+          float f = pattern[(done + i + offset) % pattern.size()];
+          if (type == HIP_R_32F) {
+            memcpy(&host[i * 4], &f, 4);
+          } else {
+            uint16_t h = type == HIP_R_16BF ? to_bf16(f) : static_cast<uint16_t>(__half_as_ushort(__float2half(f)));
+            memcpy(&host[i * 2], &h, 2);
+          }
+        }
+        CHECK_HIP(hipMemcpy(static_cast<uint8_t*>(ptr) + done * bytes, host.data(), chunk * bytes, hipMemcpyHostToDevice));
       }
       return ptr;
     };
     for (int s = 0; s < sets; s++) {
-      a.push_back(fill(p.elements_a(), 1000003ull * s));
-      b.push_back(fill(p.elements_b(), 7777777ull + 1000003ull * s));
+      a.push_back(fill(p.elements_a(), 1000003ull * s, p.type_a));
+      b.push_back(fill(p.elements_b(), 7777777ull + 1000003ull * s, p.type_b));
       void* ptr;
-      CHECK_HIP(hipMalloc(&ptr, p.elements_d() * 2));
-      CHECK_HIP(hipMemset(ptr, 0, p.elements_d() * 2));
+      CHECK_HIP(hipMalloc(&ptr, p.bytes_d()));
+      CHECK_HIP(hipMemset(ptr, 0, p.bytes_d()));
       d.push_back(ptr);
     }
   }
@@ -290,8 +350,7 @@ int list_command(Problem& p) {
            heur[i].workspaceSize);
   }
   std::vector<hipblasLtMatmulHeuristicResult_t> all;
-  CHECK_BLAS(hipblaslt_ext::getAllAlgos(p.handle, hipblaslt_ext::GemmType::HIPBLASLT_GEMM, p.op_a, p.op_b,
-                                        HIP_R_16BF, HIP_R_16BF, HIP_R_16BF, HIP_R_16BF, HIPBLAS_COMPUTE_32F, all));
+  p.all_algos(all);
   for (auto& r : all) {
     int index = hipblaslt_ext::getIndexFromAlgo(r.algo);
     size_t ws = 0;
@@ -314,7 +373,7 @@ struct Candidate {
 };
 
 int time_command(Problem& p) {
-  size_t set_bytes = (p.elements_a() + p.elements_b() + p.elements_d()) * 2;
+  size_t set_bytes = p.bytes_a() + p.bytes_b() + p.bytes_d();
   int sets = p.o.mode == "hot" ? 1 : std::max(2, static_cast<int>(std::ceil(512.0 * (1 << 20) / set_bytes)));
   Operands ops(p, sets);
   std::vector<Candidate> cands;
@@ -371,15 +430,14 @@ int time_command(Problem& p) {
 }
 
 int screen_command(Problem& p) {
-  size_t set_bytes = (p.elements_a() + p.elements_b() + p.elements_d()) * 2;
+  size_t set_bytes = p.bytes_a() + p.bytes_b() + p.bytes_d();
   int sets = p.o.mode == "hot" ? 1 : std::max(2, static_cast<int>(std::ceil(512.0 * (1 << 20) / set_bytes)));
   Operands ops(p, sets);
   std::map<int, int> rank;
   auto heur = p.heuristic(p.o.heuristic);
   for (size_t i = 0; i < heur.size(); i++) rank.emplace(hipblaslt_ext::getIndexFromAlgo(heur[i].algo), static_cast<int>(i));
   std::vector<hipblasLtMatmulHeuristicResult_t> all;
-  CHECK_BLAS(hipblaslt_ext::getAllAlgos(p.handle, hipblaslt_ext::GemmType::HIPBLASLT_GEMM, p.op_a, p.op_b,
-                                        HIP_R_16BF, HIP_R_16BF, HIP_R_16BF, HIP_R_16BF, HIPBLAS_COMPUTE_32F, all));
+  p.all_algos(all);
   hipEvent_t start, stop;
   CHECK_HIP(hipEventCreate(&start));
   CHECK_HIP(hipEventCreate(&stop));
@@ -436,11 +494,16 @@ int screen_command(Problem& p) {
   return 0;
 }
 
-std::vector<float> download_bf16(const void* ptr, size_t count) {
+std::vector<float> download(const void* ptr, size_t count, hipDataType type) {
+  std::vector<float> out(count);
+  if (type == HIP_R_32F) {
+    CHECK_HIP(hipMemcpy(out.data(), ptr, count * 4, hipMemcpyDeviceToHost));
+    return out;
+  }
   std::vector<uint16_t> host(count);
   CHECK_HIP(hipMemcpy(host.data(), ptr, count * 2, hipMemcpyDeviceToHost));
-  std::vector<float> out(count);
-  for (size_t i = 0; i < count; i++) out[i] = from_bf16(host[i]);
+  for (size_t i = 0; i < count; i++)
+    out[i] = type == HIP_R_16BF ? from_bf16(host[i]) : __half2float(__ushort_as_half(host[i]));
   return out;
 }
 
@@ -486,7 +549,7 @@ int validate_command(Problem& p) {
   if (!p.resolve(-1, &algo, &index, &ws)) return 1;
   p.run(algo, ops.a[0], ops.b[0], ops.d[0]);
   CHECK_HIP(hipStreamSynchronize(p.stream));
-  std::vector<float> base = download_bf16(ops.d[0], count);
+  std::vector<float> base = download(ops.d[0], count, p.type_c);
   bool against_default = ref.empty();
   if (against_default) ref = base;
   double base_rel = 0, base_abs = 0;
@@ -497,10 +560,10 @@ int validate_command(Problem& p) {
       printf("{\"kind\": \"validate\", \"index\": %d, \"ok\": false, \"reason\": \"unsupported\"}\n", requested);
       continue;
     }
-    CHECK_HIP(hipMemset(ops.d[0], 0, count * 2));
+    CHECK_HIP(hipMemset(ops.d[0], 0, p.bytes_d()));
     p.run(algo, ops.a[0], ops.b[0], ops.d[0]);
     CHECK_HIP(hipStreamSynchronize(p.stream));
-    std::vector<float> got = download_bf16(ops.d[0], count);
+    std::vector<float> got = download(ops.d[0], count, p.type_c);
     double rel = 0, worst = 0;
     errors(got, ref, &rel, &worst);
     // bf16 output rounding alone gives a relative error of about 2^-9.

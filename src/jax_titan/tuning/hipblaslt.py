@@ -342,13 +342,17 @@ def _json_lines(text: str) -> list[dict]:
 def _sweep_args(problem: dict) -> list[str]:
   k = problem["key"]
   return [str(k["m"]), str(k["n"]), str(k["k"]), k["transA"], k["transB"],
-          "--batch", str(k["batch_count"])]
+          "--batch", str(k["batch_count"]), "--types", f"{k['a_type']},{k['b_type']},{k['c_type']}",
+          "--compute", k["compute_type"]]
+
+
+_TYPES = ("bf16_r", "f16_r", "f32_r")
 
 
 def _supported(problem: dict) -> str:
   k = problem["key"]
-  ok = (k["a_type"] == k["b_type"] == k["c_type"] == "bf16_r" and k["compute_type"] == "f32_r")
-  return "" if ok else "the sweep binary times bf16 problems with f32 compute only"
+  ok = all(k[t] in _TYPES for t in ("a_type", "b_type", "c_type")) and k["compute_type"] in ("f32_r", "xf32_r")
+  return "" if ok else f"the sweep binary takes {', '.join(_TYPES)} operands with f32 or xf32 compute"
 
 
 def list_solutions(problem: dict, sweep_bin: str, workspace: int, gpu=None, heuristic: int = 128,
@@ -458,7 +462,7 @@ def _finalists(problem, s1, listing, seeds, top: int) -> list[int]:
   return unique
 
 
-def sweep_problem(problem, args, gpu, out_dir) -> dict:
+def sweep_problem(problem, args, gpu, out_dir, previous=None) -> dict:
   reason = _supported(problem)
   if reason:
     return {"id": problem["id"], "skipped": reason}
@@ -476,7 +480,7 @@ def sweep_problem(problem, args, gpu, out_dir) -> dict:
     else:
       record["stage1"] = screen(problem, args.sweep_bin, out_dir, ws, gpu, args.screen_ms, args.warmup_ms)
   else:
-    record["stage1"] = {"ranking": [], "winner": None}
+    record["stage1"] = (previous or {}).get("stage1") or {"ranking": [], "winner": None}
   seeds = [int(s) for s in (args.seeds or {}).get(problem["id"], [])]
   if args.stage in ("2", "both"):
     finalists = _finalists(problem, record["stage1"], listing, seeds, args.top)
@@ -525,6 +529,10 @@ def sweep(problems: dict, args) -> dict:
   out_dir.mkdir(parents=True, exist_ok=True)
   todo = [p for p in problems["problems"] if not args.only or re.search(args.only, p["id"])]
   gpus = [int(g) for g in args.gpus.split(",")] if args.gpus else [None]
+  # A stage-2 run reuses the stage-1 results of an earlier sweep into the same directory.
+  previous = {}
+  if args.stage == "2" and (out_dir / "results.json").exists():
+    previous = {r["id"]: r for r in json.loads((out_dir / "results.json").read_text())["results"]}
   results = []
   with concurrent.futures.ThreadPoolExecutor(len(gpus)) as pool:
     pending = {}
@@ -534,7 +542,7 @@ def sweep(problems: dict, args) -> dict:
       while queue and free:
         gpu = free.pop(0)
         p = queue.pop(0)
-        pending[pool.submit(sweep_problem, p, args, gpu, out_dir)] = gpu
+        pending[pool.submit(sweep_problem, p, args, gpu, out_dir, previous.get(p["id"]))] = gpu
       done, _ = concurrent.futures.wait(pending, return_when=concurrent.futures.FIRST_COMPLETED)
       for fut in done:
         free.append(pending.pop(fut))
@@ -543,6 +551,12 @@ def sweep(problems: dict, args) -> dict:
         print(f"{r['id']}: default {r.get('default_index')} winner {r.get('winner')}"
               + (f" gain {100 * r['stage2']['gain']:.1f}%" if "gain" in r.get("stage2", {}) else "")
               + (f" ({r['skipped']})" if r.get("skipped") else ""), flush=True)
+  if args.only and (out_dir / "results.json").exists():
+    # Keep the earlier results of the problems --only left out.
+    earlier = json.loads((out_dir / "results.json").read_text())["results"]
+    done = {r["id"] for r in results}
+    results += [r for r in earlier if r["id"] not in done]
+    todo = problems["problems"]
   order = {p["id"]: i for i, p in enumerate(todo)}
   results.sort(key=lambda r: order.get(r["id"], 0))
   out = {"probe": getattr(args, "probe_info", None), "workspace_bytes": args.workspace,
@@ -682,24 +696,31 @@ def map_results(results: dict, sweep_bin: str, gpu=None, listings_dir=None) -> l
 
 
 def report(results: dict, times: dict | None = None) -> str:
-  head = (f"| problem (transA,transB,batch,m,n,k,types) | launches/step | default | winner | "
-          f"default ms | winner ms | gain | adopted |\n|---|---|---|---|---|---|---|---|")
-  lines, saved = [head], 0.0
+  """A table per problem; `XLA = #0` checks that the solution XLA logged is heuristic #0."""
+  head = (f"| problem (transA,transB,batch,m,n,k,types) | launches/step | XLA = #0 | default | best | "
+          f"default ms | best ms | gain | adopted |\n|---|---|---|---|---|---|---|---|---|")
+  lines, saved, mismatched = [head], 0.0, 0
   for r in results["results"]:
     s2 = r.get("stage2", {})
     if r.get("skipped"):
-      lines.append(f"| {r['id']} | | | | | | | skipped: {r['skipped']} |")
+      lines.append(f"| {r['id']} | | | | | | | | skipped: {r['skipped']} |")
       continue
     d_ms, c_ms = s2.get("default_ms"), s2.get("candidate_ms")
     gain = s2.get("gain")
     launches = r.get("launches_per_step") or 0
+    logged = {int(i) for i in r.get("logged_solutions", {})}
+    same = "" if not logged else "yes" if logged == {r.get("default_index")} else f"no {sorted(logged)}"
+    mismatched += same.startswith("no")
     if r.get("winner") is not None and d_ms and c_ms:
       saved += launches * (d_ms - c_ms)
-    lines.append(f"| {r['id']} | {launches or ''} | {r.get('default_index')} | {s2.get('best', '')} | "
+    lines.append(f"| {r['id']} | {launches or ''} | {same} | {r.get('default_index')} | {s2.get('best', '')} | "
                  + (f"{d_ms:.4f}" if d_ms else "") + " | " + (f"{c_ms:.4f}" if c_ms else "") + " | "
                  + (f"{100 * gain:+.1f}%" if gain is not None else "") + " | "
                  + ("yes" if r.get("winner") is not None else "no") + " |")
   lines.append(f"\nPredicted GEMM time saved per step (isolated timings): {saved:.2f} ms")
+  if mismatched:
+    lines.append(f"{mismatched} problems ran a solution other than heuristic #0 at XLA's workspace: "
+                 "check the workspace and the descriptor.")
   return "\n".join(lines)
 
 
@@ -755,6 +776,54 @@ def probe() -> dict:
   except (OSError, subprocess.SubprocessError, ValueError, IndexError):
     pass
   return info
+
+
+def _smi_samples() -> list[dict]:
+  """Per GPU: socket power (W) and the mean of the XCD engine clocks (MHz), from amd-smi."""
+  try:
+    text = subprocess.run(["amd-smi", "metric", "--clock", "--power", "--json"], capture_output=True,
+                          text=True, check=True, timeout=30).stdout
+    data = json.loads(text)
+  except (OSError, subprocess.SubprocessError, ValueError):
+    return []
+  gpus = data if isinstance(data, list) else data.get("gpu_data", [])
+  out = []
+  for g in gpus:
+    clocks = [c["clk"]["value"] for name, c in g.get("clock", {}).items()
+              if name.startswith("gfx_") and isinstance(c, dict) and isinstance(c.get("clk", {}).get("value"), (int, float))]
+    power = g.get("power", {}).get("socket_power", {}).get("value")
+    out.append({"gpu": g.get("gpu"), "power_w": power if isinstance(power, (int, float)) else None,
+                "clock_mhz": statistics.mean(clocks) if clocks else None})
+  return out
+
+
+def sustained_clock(sweep_bin: str, gpu=0, seconds: float = 20, size: int = 8192) -> dict:
+  """The engine clock and power a GPU holds on a long bf16 GEMM (its power-limited clock).
+
+  Samples every GPU and reads the busiest, so HIP and amd-smi device order need not agree.
+  """
+  import time  # pylint: disable=g-import-not-at-top
+  cmd = [sweep_bin, "time", str(size), str(size), str(size), "N", "N", "--ws", str(32 * 2**20),
+         "--rounds", str(max(1, int(seconds))), "--target_ms", "1000", "--warmup_ms", "0", "-1"]
+  proc = subprocess.Popen(cmd, env=_gpu_env(gpu), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+  start, samples = time.time(), []
+  while proc.poll() is None:
+    samples.append((time.time() - start, _smi_samples()))
+    time.sleep(0.5)
+  stdout = proc.stdout.read()
+  rows = [r for r in _json_lines(stdout) if r.get("kind") == "time"]
+  steady = [s for t, s in samples if t > 3 and s]
+  if not steady:
+    return {"ok": False, "stderr": proc.stderr.read()[-2000:]}
+  busiest = max(range(len(steady[0])), key=lambda i: statistics.mean(
+      s[i]["power_w"] or 0 for s in steady if i < len(s)))
+  clocks = [s[busiest]["clock_mhz"] for s in steady if s[busiest]["clock_mhz"]]
+  power = [s[busiest]["power_w"] for s in steady if s[busiest]["power_w"]]
+  return {"ok": True, "smi_gpu": steady[0][busiest]["gpu"], "samples": len(clocks),
+          "clock_mhz_median": statistics.median(clocks), "clock_mhz_min": min(clocks),
+          "power_w_median": statistics.median(power), "power_w_max": max(power),
+          "tflops_median": statistics.median(r["tflops"] for r in rows) if rows else None,
+          "gemm": f"{size}x{size}x{size} NN bf16"}
 
 
 # Command line.
@@ -837,6 +906,12 @@ def main(argv=None) -> int:
   p = sub.add_parser("report", help="A Markdown table of sweep results.")
   p.add_argument("results")
 
+  p = sub.add_parser("clock", help="The clock and power a GPU sustains on a long bf16 GEMM.")
+  p.add_argument("--sweep_bin", default="hipblaslt_sweep")
+  p.add_argument("--gpu", type=int, default=0)
+  p.add_argument("--seconds", type=float, default=20)
+  p.add_argument("--json", default="")
+
   args = parser.parse_args(argv)
   if args.command == "probe":
     print(_dump(probe(), args.json), end="")
@@ -884,6 +959,8 @@ def main(argv=None) -> int:
                 args.json), end="")
   elif args.command == "report":
     print(report(_load(args.results)))
+  elif args.command == "clock":
+    print(_dump(sustained_clock(args.sweep_bin, args.gpu, args.seconds), args.json), end="")
   return 0
 
 

@@ -137,10 +137,14 @@ def kernel_times(events: dict[int, list[dict]]) -> list[dict]:
   return out
 
 
-def write_kernel_times(trace_dir: str, steps: int, out_path) -> dict:
+def write_kernel_times(trace_dir: str, steps: int, out_path, gpu: int = -1) -> dict:
+  """`kernel_times` of the newest trace; `gpu` keeps one device of a multi-GPU process."""
   xplane = newest_xplane(trace_dir)
-  out = {"xplane": str(xplane), "steps": steps or None,
-         "launches": kernel_times(kernel_events(xplane))}
+  events = kernel_events(xplane)
+  if gpu >= 0:
+    events = {gpu: events.get(gpu, [])}
+  out = {"xplane": str(xplane), "steps": steps or None, "gpus": sorted(events),
+         "launches": kernel_times(events)}
   pathlib.Path(out_path).write_text(json.dumps(out) + "\n")
   return out
 
@@ -214,11 +218,13 @@ def main(argv=None):
   parser.add_argument("--kernel_times", default="",
                       help="Write every compute kernel launch, with its HLO op and collective "
                       "overlap, here (for gemms.py --times).")
+  parser.add_argument("--gpu", type=int, default=-1,
+                      help="With --kernel_times, keep this device only (one process driving several).")
   args = parser.parse_args(argv)
   xplane = newest_xplane(args.trace_dir)
   print(xplane)
   if args.kernel_times:
-    out = write_kernel_times(args.trace_dir, args.steps, args.kernel_times)
+    out = write_kernel_times(args.trace_dir, args.steps, args.kernel_times, args.gpu)
     named = sum(1 for k in out["launches"] if k["hlo_op"])
     print(f"{len(out['launches'])} compute kernel launches, {named} with an HLO op, "
           f"to {args.kernel_times}")

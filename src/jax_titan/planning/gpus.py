@@ -37,6 +37,8 @@ class GPU:
   cus: int | None = None
   xcds: int | None = None
   clock_ghz: float | None = None
+  # Dense FP32 matrix peak, for f32 GEMMs.
+  fp32_tflops: float | None = None
 
   def peak_tflops_at(self, precision: str, clock_ghz: float) -> float:
     """The dense peak at another engine clock, such as the one a power cap sustains."""
@@ -51,8 +53,8 @@ class GPU:
     return self.scaleup_gbs
 
   def peak_tflops(self, precision: str) -> float:
-    value = {"bf16": self.bf16_tflops, "fp8": self.fp8_tflops,
-             "fp4": self.fp4_tflops, "mxfp4": self.fp4_tflops}[precision]
+    value = {"bf16": self.bf16_tflops, "fp8": self.fp8_tflops, "fp4": self.fp4_tflops,
+             "mxfp4": self.fp4_tflops, "fp32": self.fp32_tflops}[precision]
     if not value:
       raise ValueError(f"{self.name} has no published dense {precision} peak")
     return value
@@ -63,11 +65,13 @@ GPUS = {
     "MI300X": GPU("AMD Instinct MI300X", 1307.4, 2614.9, None, 192, 5.3, 750, 8, 448, 50,
                   f"{_AMD}/mi300/mi300x.html",
                   "scale-up derived: 7 Infinity Fabric links of 128 GB/s (both directions) "
-                  "to the platform's other GPUs", scaleup_mesh=True, cus=304, xcds=8, clock_ghz=2.1),
+                  "to the platform's other GPUs", scaleup_mesh=True, cus=304, xcds=8, clock_ghz=2.1,
+                  fp32_tflops=163.4),
     "MI325X": GPU("AMD Instinct MI325X", 1307.4, 2614.9, None, 256, 6.0, 1000, 8, 448, 50,
                   f"{_AMD}/mi300/mi325x.html",
                   "scale-up derived: 7 Infinity Fabric links of 128 GB/s (both directions) "
-                  "to the platform's other GPUs", scaleup_mesh=True, cus=304, xcds=8, clock_ghz=2.1),
+                  "to the platform's other GPUs", scaleup_mesh=True, cus=304, xcds=8, clock_ghz=2.1,
+                  fp32_tflops=163.4),
     "MI350X": GPU("AMD Instinct MI350X", 2306.9, 4613.7, 9227.5, 288, 8.0, 1000, 8, 504, 50,
                   f"{_AMD}/mi350/mi350x.html",
                   "peaks derived as 256 CUs x 2.2 GHz x 4,096, 8,192 and 16,384 FLOPs per "

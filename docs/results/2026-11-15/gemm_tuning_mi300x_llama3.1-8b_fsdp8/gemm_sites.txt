@@ -1,0 +1,18 @@
+1 module, in one training step: 547 GEMM launches, 368.9 TFLOP; FLOPs by library: hipBLASLt 100% (547 launches)
+  thunk sequence: 0 of 0 fused GEMM kernels by name, 20 library GEMM thunks for 20 library calls (all launched)
+   count  library    dtype             batch       M       N       K  layout    GFLOP  share  pass      source
+      64  hipBLASLt  bf16                  -    8192   14336    4096  MK,KN       962  16.7%  fwd       native.py:22 swiglu
+      64  hipBLASLt  bf16                  -    8192    4096   14336  MK,NK       962  16.7%  bwd       native.py:22 swiglu
+      64  hipBLASLt  bf16                  -    4096   14336    8192  KM,KN       962  16.7%  bwd       native.py:22 swiglu
+      32  hipBLASLt  bf16                  -    8192    4096   14336  MK,KN       962   8.3%  fwd       native.py:22 swiglu
+      32  hipBLASLt  bf16                  -    8192   14336    4096  MK,NK       962   8.3%  bwd       native.py:22 swiglu
+      32  hipBLASLt  bf16                  -   14336    4096    8192  KM,KN       962   8.3%  bwd       native.py:22 swiglu
+      64  hipBLASLt  bf16                  -    8192    4096    4096  MK,NK       275   4.8%  bwd       native.py:27 linear
+      32  hipBLASLt  bf16                  -    8192    6144    4096  MK,KN       412   3.6%  fwd       native.py:27 linear
+      32  hipBLASLt  bf16                  -    4096    6144    8192  KM,KN       412   3.6%  bwd       native.py:27 linear
+      32  hipBLASLt  bf16                  -    8192    4096    4096  MK,KN       275   2.4%  fwd       native.py:27 linear
+      32  hipBLASLt  bf16                  -    4096    4096    8192  KM,KN       275   2.4%  bwd       native.py:27 linear
+       1  hipBLASLt  bf16->f32             -    8192  128256    4096  MK,KN  8.61e+03   2.3%  fwd       llama.py:257 stage_forward
+       1  hipBLASLt  f32                   -    8192    4096  128256  MK,NK  8.61e+03   2.3%  bwd       llama.py:257 stage_forward
+       1  hipBLASLt  f32                   -    4096  128256    8192  KM,KN  8.61e+03   2.3%  bwd       llama.py:257 stage_forward
+      64  hipBLASLt  bf16                  -    8192    4096    1024  MK,NK      68.7   1.2%  bwd       native.py:27 linear

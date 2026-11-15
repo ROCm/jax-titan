@@ -171,6 +171,15 @@ def test_bound_sits_below_measured_times_and_scales_with_the_clock():
   assert capped < 1.45  # the measured best in _results
 
 
+def test_f32_problems_are_bound_at_the_fp32_peak_where_one_is_published():
+  key = dict(_results()["results"][0]["key"], a_type="f32_r", b_type="f32_r", c_type="f32_r")
+  bound = 2 * 14336 * 8192 * 4096 / 163.4e12 * 1e3
+  assert gemm_cost.t_bound_ms(key, gpus.get("MI300X")) == pytest.approx(bound)
+  # The capped clock is measured on bf16 GEMMs; f32 ones keep the peak clock.
+  assert gemm_cost.t_bound_ms(key, gpus.get("MI300X"), clock_ghz=1.3) == pytest.approx(bound)
+  assert gemm_cost.bound_precision(key, gpus.get("MI355X")) == "bf16"
+
+
 def test_breakdown_splits_selection_contention_and_ceiling():
   results = _results()
   site = dict(_site(8192, 14336, 4096, "MK,KN"),

@@ -1,0 +1,66 @@
+{
+ "log": {
+  "override": "$JAX_TITAN_ROOT/runs/gemm_proxy_mi300x/tuning.txt",
+  "git_version": "39d8d603",
+  "git_mismatch_logged": false,
+  "rows": 3,
+  "hit": 3,
+  "miss": 0,
+  "absent": 0,
+  "checks": [
+   {
+    "id": "N,T,1,6144,4096,8192,bf16_r,bf16_r,bf16_r,f32_r",
+    "tuned": 90003,
+    "used": {
+     "90003": 512
+    },
+    "status": "hit"
+   },
+   {
+    "id": "N,N,1,128256,8192,4096,bf16_r,bf16_r,f32_r,f32_r",
+    "tuned": 99576,
+    "used": {
+     "99576": 16
+    },
+    "status": "hit"
+   },
+   {
+    "id": "T,N,1,4096,8192,1024,bf16_r,bf16_r,bf16_r,f32_r",
+    "tuned": 90495,
+    "used": {
+     "90495": 1024
+    },
+    "status": "hit"
+   }
+  ]
+ },
+ "api": {
+  "override": "$JAX_TITAN_ROOT/runs/gemm_proxy_mi300x/tuning.txt",
+  "git_version": "39d8d603",
+  "hit": 3,
+  "rows": 3,
+  "checks": [
+   {
+    "id": "N,T,1,6144,4096,8192,bf16_r,bf16_r,bf16_r,f32_r",
+    "tuned": 90003,
+    "without": 72194,
+    "with": 90003,
+    "status": "hit"
+   },
+   {
+    "id": "N,N,1,128256,8192,4096,bf16_r,bf16_r,f32_r,f32_r",
+    "tuned": 99576,
+    "without": 99799,
+    "with": 99576,
+    "status": "hit"
+   },
+   {
+    "id": "T,N,1,4096,8192,1024,bf16_r,bf16_r,bf16_r,f32_r",
+    "tuned": 90495,
+    "without": 83398,
+    "with": 90495,
+    "status": "hit"
+   }
+  ]
+ }
+}

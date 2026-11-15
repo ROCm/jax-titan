@@ -1,0 +1,31 @@
+15 problems from 13128 logged calls in 1 files
+    1536 calls  N,N,1,14336,8192,4096,bf16_r,bf16_r,bf16_r,f32_r  solutions {'75696': 1536}
+    1536 calls  T,N,1,4096,8192,14336,bf16_r,bf16_r,bf16_r,f32_r  solutions {'82538': 1536}  (2 descriptors)
+    1536 calls  N,T,1,14336,4096,8192,bf16_r,bf16_r,bf16_r,f32_r  solutions {'72101': 1536}
+     768 calls  N,N,1,4096,8192,14336,bf16_r,bf16_r,bf16_r,f32_r  solutions {'75735': 768}
+     768 calls  T,N,1,14336,8192,4096,bf16_r,bf16_r,bf16_r,f32_r  solutions {'82503': 768}
+     768 calls  N,T,1,4096,14336,8192,bf16_r,bf16_r,bf16_r,f32_r  solutions {'72562': 768}
+    1536 calls  T,N,1,4096,8192,4096,bf16_r,bf16_r,bf16_r,f32_r  solutions {'82519': 1536}
+     768 calls  N,N,1,6144,8192,4096,bf16_r,bf16_r,bf16_r,f32_r  solutions {'76632': 768}
+     768 calls  N,T,1,6144,4096,8192,bf16_r,bf16_r,bf16_r,f32_r  solutions {'72194': 768}
+     768 calls  N,N,1,4096,8192,4096,bf16_r,bf16_r,bf16_r,f32_r  solutions {'75723': 768}
+     768 calls  N,T,1,4096,4096,8192,bf16_r,bf16_r,bf16_r,f32_r  solutions {'72101': 768}
+      24 calls  N,N,1,128256,8192,4096,bf16_r,bf16_r,f32_r,f32_r  solutions {'99799': 24}
+      24 calls  T,N,1,4096,8192,128256,f32_r,f32_r,f32_r,f32_r  solutions {'309614': 24}
+      24 calls  N,T,1,128256,4096,8192,f32_r,f32_r,f32_r,f32_r  solutions {'293458': 24}
+    1536 calls  T,N,1,4096,8192,1024,bf16_r,bf16_r,bf16_r,f32_r  solutions {'83398': 1536}  (2 descriptors)
+  N,N,1,14336,8192,4096,bf16_r,bf16_r,bf16_r,f32_r: 64 launches per step, workspace 79691776, 2 sites
+  T,N,1,4096,8192,14336,bf16_r,bf16_r,bf16_r,f32_r: 64 launches per step, workspace 79691776, 2 sites
+  N,T,1,14336,4096,8192,bf16_r,bf16_r,bf16_r,f32_r: 64 launches per step, workspace 79691776, 2 sites
+  N,N,1,4096,8192,14336,bf16_r,bf16_r,bf16_r,f32_r: 32 launches per step, workspace 79691776, 1 sites
+  T,N,1,14336,8192,4096,bf16_r,bf16_r,bf16_r,f32_r: 32 launches per step, workspace 79691776, 1 sites
+  N,T,1,4096,14336,8192,bf16_r,bf16_r,bf16_r,f32_r: 32 launches per step, workspace 79691776, 1 sites
+  T,N,1,4096,8192,4096,bf16_r,bf16_r,bf16_r,f32_r: 64 launches per step, workspace 79691776, 2 sites
+  N,N,1,6144,8192,4096,bf16_r,bf16_r,bf16_r,f32_r: 32 launches per step, workspace 79691776, 1 sites
+  N,T,1,6144,4096,8192,bf16_r,bf16_r,bf16_r,f32_r: 32 launches per step, workspace 79691776, 1 sites
+  N,N,1,4096,8192,4096,bf16_r,bf16_r,bf16_r,f32_r: 32 launches per step, workspace 79691776, 1 sites
+  N,T,1,4096,4096,8192,bf16_r,bf16_r,bf16_r,f32_r: 32 launches per step, workspace 79691776, 1 sites
+  N,N,1,128256,8192,4096,bf16_r,bf16_r,f32_r,f32_r: 1 launches per step, workspace 79691776, 1 sites
+  T,N,1,4096,8192,128256,f32_r,f32_r,f32_r,f32_r: 1 launches per step, workspace 79691776, 1 sites
+  N,T,1,128256,4096,8192,f32_r,f32_r,f32_r,f32_r: 1 launches per step, workspace 79691776, 1 sites
+  T,N,1,4096,8192,1024,bf16_r,bf16_r,bf16_r,f32_r: 64 launches per step, workspace 79691776, 2 sites

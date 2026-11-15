@@ -1,0 +1,41 @@
+times: 20 of 20 GEMM kernels matched launches over 3 steps; launches traced per expected launch: 100%
+   ms/step  share per step        median us  clean us overlap us   TF/s  library          M       N       K  layout pass  kernel / source
+     75.10  10.0%      1.0 75182.5 (74619-75485)   75182.5          -    114  hipBLASLt     8192    4096  128256  MK,NK  bwd   custom-call.34 llama.py:257 stage_forward
+     71.65   9.5%      1.0 71713.7 (71483-71759)   71713.7          -    120  hipBLASLt     4096  128256    8192  KM,KN  bwd   custom-call.35 llama.py:257 stage_forward
+     59.11   7.9%     32.0  1847.3 (1842-1851)    1847.3          -    521  hipBLASLt     8192   14336    4096  MK,NK  bwd   custom-call.20 native.py:22 swiglu
+     57.39   7.6%     32.0  1793.4 (1779-1803)    1793.4          -    536  hipBLASLt     8192    4096   14336  MK,NK  bwd   cublas-lt-matmul.10 native.py:22 swiglu
+     54.03   7.2%     32.0  1666.0 (1644-1699)         -     1556.1    577  hipBLASLt     4096   14336    8192  KM,KN  bwd   dynamic_slice_fusion.3 native.py:22 swiglu
+     51.96   6.9%     32.0  1617.9 (1608-1625)    1617.9          -    595  hipBLASLt     8192    4096   14336  MK,KN  fwd   cublas-lt-matmul.5 native.py:22 swiglu
+     50.98   6.8%     32.0  1587.8 (1582-1598)    1587.8          -    606  hipBLASLt     8192    4096   14336  MK,NK  bwd   custom-call.21 native.py:22 swiglu
+     49.69   6.6%     32.0  1553.5 (1541-1568)    1553.5          -    619  hipBLASLt     4096   14336    8192  KM,KN  bwd   dynamic_slice_fusion.4 native.py:22 swiglu
+     48.90   6.5%     32.0  1530.9 (1521-1539)    1530.9          -    628  hipBLASLt     8192   14336    4096  MK,KN  fwd   custom-call.7 native.py:22 swiglu
+     48.23   6.4%     32.0  1504.3 (1494-1512)    1504.3          -    640  hipBLASLt    14336    4096    8192  KM,KN  bwd   dynamic_slice_fusion.2 native.py:22 swiglu
+     46.18   6.1%     32.0  1444.1 (1437-1448)    1444.1          -    666  hipBLASLt     8192   14336    4096  MK,KN  fwd   custom-call.6 native.py:22 swiglu
+     26.39   3.5%     32.0   822.8 (816-829)     822.8          -    501  hipBLASLt     4096    6144    8192  KM,KN  bwd   dynamic_slice_fusion.5 native.py:27 linear
+     20.90   2.8%     32.0   656.5 (651-662)     656.5          -    628  hipBLASLt     8192    6144    4096  MK,KN  fwd   custom-call.5 native.py:27 linear
+     16.84   2.2%     32.0   525.2 (521-528)     525.2          -    523  hipBLASLt     8192    4096    4096  MK,NK  bwd   custom-call.22 native.py:27 linear
+     16.67   2.2%     32.0   519.6 (513-526)     519.6          -    529  hipBLASLt     4096    4096    8192  KM,KN  bwd   dynamic_slice_fusion.6 native.py:27 linear
+     16.49   2.2%      1.0 16494.7 (16470-16515)   16494.7          -    522  hipBLASLt     8192  128256    4096  MK,KN  fwd   custom-call.33 llama.py:257 stage_forward
+     15.99   2.1%     32.0   497.0 (496-501)     497.0          -    553  hipBLASLt     8192    4096    4096  MK,KN  fwd   cublas-lt-matmul.4 native.py:27 linear
+     15.40   2.0%     32.0   479.2 (477-481)     479.2          -    574  hipBLASLt     8192    4096    4096  MK,NK  bwd   custom-call.24 native.py:27 linear
+      5.67   0.8%     32.0   176.4 (176-178)     176.4          -    389  hipBLASLt     8192    4096    1024  MK,NK  bwd   cublas-lt-matmul.11 native.py:27 linear
+      5.24   0.7%     32.0   163.7 (163-165)     163.7          -    420  hipBLASLt     8192    4096    1024  MK,NK  bwd   custom-call.23 native.py:27 linear
+  measured GEMM time: 752.78 ms per step over 20 of 20 sites
+1 module, in one training step: 547 GEMM launches, 368.9 TFLOP; FLOPs by library: hipBLASLt 100% (547 launches)
+  thunk sequence: 0 of 0 fused GEMM kernels by name, 20 library GEMM thunks for 20 library calls (all launched)
+   count  library    dtype             batch       M       N       K  layout    GFLOP  share  pass      source
+      64  hipBLASLt  bf16                  -    8192   14336    4096  MK,KN       962  16.7%  fwd       native.py:22 swiglu
+      64  hipBLASLt  bf16                  -    8192    4096   14336  MK,NK       962  16.7%  bwd       native.py:22 swiglu
+      64  hipBLASLt  bf16                  -    4096   14336    8192  KM,KN       962  16.7%  bwd       native.py:22 swiglu
+      32  hipBLASLt  bf16                  -    8192    4096   14336  MK,KN       962   8.3%  fwd       native.py:22 swiglu
+      32  hipBLASLt  bf16                  -    8192   14336    4096  MK,NK       962   8.3%  bwd       native.py:22 swiglu
+      32  hipBLASLt  bf16                  -   14336    4096    8192  KM,KN       962   8.3%  bwd       native.py:22 swiglu
+      64  hipBLASLt  bf16                  -    8192    4096    4096  MK,NK       275   4.8%  bwd       native.py:27 linear
+      32  hipBLASLt  bf16                  -    8192    6144    4096  MK,KN       412   3.6%  fwd       native.py:27 linear
+      32  hipBLASLt  bf16                  -    4096    6144    8192  KM,KN       412   3.6%  bwd       native.py:27 linear
+      32  hipBLASLt  bf16                  -    8192    4096    4096  MK,KN       275   2.4%  fwd       native.py:27 linear
+      32  hipBLASLt  bf16                  -    4096    4096    8192  KM,KN       275   2.4%  bwd       native.py:27 linear
+       1  hipBLASLt  bf16->f32             -    8192  128256    4096  MK,KN  8.61e+03   2.3%  fwd       llama.py:257 stage_forward
+       1  hipBLASLt  f32                   -    8192    4096  128256  MK,NK  8.61e+03   2.3%  bwd       llama.py:257 stage_forward
+       1  hipBLASLt  f32                   -    4096  128256    8192  KM,KN  8.61e+03   2.3%  bwd       llama.py:257 stage_forward
+      64  hipBLASLt  bf16                  -    8192    4096    1024  MK,NK      68.7   1.2%  bwd       native.py:27 linear

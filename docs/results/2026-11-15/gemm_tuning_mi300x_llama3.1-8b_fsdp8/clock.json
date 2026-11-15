@@ -1,0 +1,11 @@
+{
+ "ok": true,
+ "smi_gpu": 0,
+ "samples": 23,
+ "clock_mhz_median": 1244.75,
+ "clock_mhz_min": 1239.5,
+ "power_w_median": 750,
+ "power_w_max": 750,
+ "tflops_median": 641.875,
+ "gemm": "8192x8192x8192 NN bf16"
+}

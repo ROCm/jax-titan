@@ -25,6 +25,11 @@ Backends (flags are added to $XLA_FLAGS, so later ones win):
   xla_triton           level 4, Triton GEMMs only, with the exhaustive tiling search
   xla_auto             level 4, XLA picks between Triton and hipBLASLt
   ops:PROVIDER         JAX-Titan's `linear` op from PROVIDER (MK,KN problems only)
+  triton_gemm          AITER's Triton BF16 GEMM through jax-triton, reading either
+                       operand transposed in place, with AITER's tiles for the shape
+  jax_aiter            JAX-AITER's BF16 ASM GEMM, a [M,K] times b [N,K] transposed;
+                       other layouts transpose operands first ("transposes" says how
+                       many), and K must be a multiple of 64
 """
 
 from __future__ import annotations
@@ -35,6 +40,7 @@ import math
 import os
 import pathlib
 import random
+import re
 import statistics
 import subprocess
 import sys
@@ -77,6 +83,25 @@ def _bootstrap(values, n=2000, seed=0):
   return meds[int(0.025 * n)], meds[int(0.975 * n) - 1]
 
 
+def _direct(backend: str, a_layout: str, b_layout: str):
+  """(fn(a, b) for operands in the stored layouts, operands it transposes first)."""
+  if backend == "triton_gemm":
+    from jax_titan.ops.providers import triton  # pylint: disable=g-import-not-at-top
+    params = (a_layout == "KM", b_layout == "NK")
+    return (lambda a, b: triton.triton_matmul(a, b, params)), 0
+  from jax_aiter.gemm import gemm  # pylint: disable=g-import-not-at-top
+  return ((lambda a, b: gemm(a.T if a_layout == "KM" else a, b if b_layout == "NK" else b.T)),
+          (a_layout == "KM") + (b_layout == "KN"))
+
+
+def _direct_skip(backend: str, k: int, batch: int, dtype: str) -> str | None:
+  if batch != 1 or dtype != "bf16":
+    return f"{backend} times bf16 problems without a batch"
+  if backend == "jax_aiter" and k % 64:
+    return "JAX-AITER's ASM GEMM needs K a multiple of 64"
+  return None
+
+
 def _worker(spec_path: str, backend: str, out_path: str, iters: int, rounds: int) -> None:
   import jax  # pylint: disable=g-import-not-at-top
   import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
@@ -86,6 +111,7 @@ def _worker(spec_path: str, backend: str, out_path: str, iters: int, rounds: int
   if provider:
     from jax_titan import ops  # pylint: disable=g-import-not-at-top
     ops.set_policy(f"linear={provider}")
+  direct = backend in ("triton_gemm", "jax_aiter")
   results = []
   for spec in json.loads(pathlib.Path(spec_path).read_text()):
     m, n, k, b = spec["m"], spec["n"], spec["k"], spec.get("batch", 1) or 1
@@ -94,6 +120,9 @@ def _worker(spec_path: str, backend: str, out_path: str, iters: int, rounds: int
     rec = dict(spec, backend=backend)
     if provider and (spec["layout"] != "MK,KN" or b != 1):
       results.append(dict(rec, skipped="ops providers time MK,KN problems without a batch"))
+      continue
+    if direct and (why := _direct_skip(backend, k, b, spec.get("dtype", "bf16"))):
+      results.append(dict(rec, skipped=why))
       continue
     a_shape = (m, k) if a_layout == "MK" else (k, m)
     b_shape = (k, n) if b_layout == "KN" else (n, k)
@@ -108,13 +137,21 @@ def _worker(spec_path: str, backend: str, out_path: str, iters: int, rounds: int
     ws = [jax.random.normal(keys[2 * i + 1], b_shape, jnp.float32).astype(dtype) for i in range(sets)]
     if provider:
       fn = jax.jit(lambda x, w: ops.linear(x, w))
+    elif direct:
+      call, rec["transposes"] = _direct(backend, a_layout, b_layout)
+      fn = jax.jit(call)
     else:
       fn = jax.jit(lambda x, w: lax.dot_general(x, w, dims))
-    compiled = fn.lower(xs[0], ws[0]).compile()
+    try:
+      compiled = fn.lower(xs[0], ws[0]).compile()
+    except Exception as e:  # pylint: disable=broad-except
+      results.append(dict(rec, skipped=f"failed to compile: {str(e).splitlines()[0][:200]}"))
+      continue
     hlo = compiled.as_text()
+    targets = re.findall(r'custom_call_target="([^"]+)"', hlo)
     rec["lowered_to"] = ("hipBLASLt" if "__cublas$lt$matmul" in hlo else
                          "Triton" if "__triton" in hlo else
-                         "custom call" if "custom_call_target" in hlo else "XLA")
+                         targets[0] if targets else "XLA")
     if provider:
       rec["provider_ran"] = [s.provider for s in ops.selections() if s.op == "linear"][-1:]
     out = None
@@ -175,7 +212,7 @@ def run(specs: list[dict], backends: list[str], trials: int, iters: int, rounds:
     timed = [r for r in recs if "ms" in r]
     first = recs[0]
     row = {k: first.get(k) for k in ("id", "m", "n", "k", "batch", "layout", "dtype", "launches_per_step",
-                                     "lowered_to", "skipped", "provider_ran")}
+                                     "lowered_to", "skipped", "provider_ran", "transposes")}
     row.update(problem=pid, backend=backend, trials=len(timed))
     if timed:
       ms = [r["ms"] for r in timed]
@@ -201,7 +238,8 @@ def table(out: dict) -> str:
         cells.append(r.get("skipped", "failed") if r else "")
         continue
       lo, hi = r["ci_ms"]
-      cells.append(f"{r['ms']:.4f} ms ({lo:.4f}-{hi:.4f}), {r['tflops']:.0f} TF/s, {r['lowered_to']}")
+      moved = f" after {r['transposes']} transposes" if r.get("transposes") else ""
+      cells.append(f"{r['ms']:.4f} ms ({lo:.4f}-{hi:.4f}), {r['tflops']:.0f} TF/s, {r['lowered_to']}{moved}")
     lines.append(f"| {pid} | " + " | ".join(cells) + " |")
   return "\n".join(lines)
 
