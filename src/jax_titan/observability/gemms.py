@@ -428,6 +428,9 @@ class _Walker:
           if (fusion, name) in self.sites:
             # A library call in a fusion (dynamic-slice fusion) launches under its own name.
             self.sites[(fusion, name)]["trace_op"] = name
+        else:
+          other = self.module.other_calls
+          other[target] = other.get(target, 0) + count
       elif opcode == "fusion":
         _, attrs = self.module.parts(rest, at)
         for callee in _names(attrs.get("calls")):
