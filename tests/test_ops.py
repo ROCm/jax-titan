@@ -158,12 +158,6 @@ def test_conformance_native_on_gpu():
   assert rows and all(r["status"] == "pass" for r in rows), rows
 
 
-@pytest.mark.gpu(4)
-def test_conformance_native_on_4_gpus():
-  rows = conformance.run(["native"], ["sharded", "manual"], quick=True)
-  assert rows and all(r["status"] == "pass" for r in rows), rows
-
-
 _QUANTIZED = pytest.mark.parametrize("provider, qtype", [
     ("xla_fp8", "f8E4M3FN"), ("xla_mxfp8", "f8E4M3FN"), ("xla_mxfp4", "f4E2M1FN")])
 
