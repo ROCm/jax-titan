@@ -80,9 +80,6 @@ include = ["jax_titan*"]
 
 [tool.pytest.ini_options]
 addopts = "--strict-markers -rfEs"
-# CI runs the tests that carry neither marker on stock JAX from PyPI, and the
-# patched_stack tests too on the JAX built from source.
 markers = [
-    "patched_stack: needs the patched jaxlib and Shardy's MPMD package (docs/getting_started.md)",
-    "gpu: needs a GPU",
+    "gpu(n): needs n GPUs, one by default; runs only with --gpus (tests/conftest.py)",
 ]

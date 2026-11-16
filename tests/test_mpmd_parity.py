@@ -8,8 +8,6 @@ import pytest
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
-pytestmark = pytest.mark.patched_stack
-
 
 def _run(script, *flags):
   result = subprocess.run(

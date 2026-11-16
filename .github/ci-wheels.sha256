@@ -1,0 +1,5 @@
+5dde4075f64e8ca6d31f751847da72cfc5b189bba5bbd0612877b8d9acb19418  wheels/jax-0.12.1.dev0+selfbuilt-py3-none-any.whl
+599755d823708edae813036f7bae58110c8b8ab402c2390253601f542161dd3c  wheels/jaxlib-0.12.1.dev0+selfbuilt-cp312-cp312-manylinux_2_27_x86_64.whl
+1d65b4816f636bd0b4bdfbf948dde0cf99d33b54c45a1d956394c1f62578821e  wheels/jax_rocm10_pjrt-0.12.1.dev0+selfbuilt-py3-none-manylinux_2_27_x86_64.whl
+b6a96f0d6ac9b6f0421c14bce035fc386a6f4694fcfe992db4343f14cfbec769  wheels/jax_rocm10_plugin-0.12.1.dev0+selfbuilt-cp312-cp312-manylinux_2_27_x86_64.whl
+334a36b573d2892713f8d8a130a0490f44e35d590d67268649fd294e50532007  wheels/shardy_mpmd-0.0.1-py3-none-any.whl

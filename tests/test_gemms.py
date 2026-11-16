@@ -303,7 +303,6 @@ def test_runs_without_jax_or_jax_titan(tmp_path):
   assert json.loads(out.read_text())["modules"][0]["platform"] == "rocm"
 
 
-@pytest.mark.patched_stack
 @pytest.mark.parametrize("parallel", ["fsdp", "mpmd"])
 def test_a_trainer_run_spmd_or_mpmd(tmp_path, parallel):
   dump, run = tmp_path / "dump", tmp_path / "run"

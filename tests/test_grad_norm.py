@@ -4,14 +4,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-import pytest
+from shardy.integrations.python.jax import mpmd
 
-# pytest imports this file before `-m` deselects it, also on stock JAX.
-mpmd = pytest.importorskip("shardy.integrations.python.jax.mpmd")
-
-from jax_titan import mpmd as jt_mpmd  # noqa: E402  pylint: disable=g-import-not-at-top
-
-pytestmark = pytest.mark.patched_stack
+from jax_titan import mpmd as jt_mpmd
 
 
 def test_clipped_update_matches_optax_clip():
