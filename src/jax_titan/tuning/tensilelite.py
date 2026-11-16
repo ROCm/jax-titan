@@ -18,9 +18,10 @@ tensile_config_generator.py's pattern predates, and runs the generator: one
 Tensile config per GPU. `tune` runs Tensile on each config on its own GPU.
 `decode` reads, per problem size, the best kernel Tensile found from its
 library logic and sets it beside the stock solutions `hipblaslt.py sweep`
-timed. Tensile times with its own client, so treat its numbers as a ranking:
-under a power cap its short runs end before the clock settles, and on MI300X
-at 750 W they read about 6% faster than the sweep's for the same kernel.
+timed. Tensile times with its own client, on sin(index) inputs: under a power
+cap they draw less power than the sweep's normally distributed ones, so the
+GPU holds a higher clock, and on MI300X at 750 W the client reads about 5%
+faster than the sweep for the same kernel.
 `merge` merges the tuned logic of the problems whose new kernel won (`--only`)
 into a copy of the build's gfx942 logic with TensileMergeLibrary, and
 `library` builds the kernel library from that copy with
@@ -361,16 +362,18 @@ def _rocm_root() -> pathlib.Path:
 def library(out_dir, src, jobs=0, arch="gfx942") -> pathlib.Path:
   """TensileCreateLibrary over OUT/logic, as hipBLASLt's build calls it; returns the path for
   HIPBLASLT_TENSILE_LIBPATH."""
-  out = pathlib.Path(out_dir)
+  out = pathlib.Path(out_dir).resolve()
   rocm = _rocm_root()
   dest = out / "library"
+  dest.mkdir(parents=True, exist_ok=True)
   cmd = [sys.executable, "-m", "Tensile.TensileCreateLibrary", f"--architecture={arch}",
          f"--cxx-compiler={rocm / 'bin' / 'amdclang++'}",
          f"--offload-bundler={rocm / 'llvm' / 'bin' / 'clang-offload-bundler'}",
          f"--jobs={jobs or os.cpu_count()}", "--disable-asm-comments",
          str(out / "logic" / "asm_full"), str(dest), "HIP"]
   env = dict(os.environ, PYTHONPATH=f"{tensilelite_dir(src)}{os.pathsep}{os.environ.get('PYTHONPATH', '')}")
-  subprocess.run(cmd, env=env, check=True)
+  # TensileCreateLibrary writes MatchTable.yaml into its working directory.
+  subprocess.run(cmd, env=env, cwd=dest, check=True)
   # hipBLASLt looks for the per-architecture directory only under its default path, so
   # HIPBLASLT_TENSILE_LIBPATH must name that directory itself.
   return dest / "library" / arch

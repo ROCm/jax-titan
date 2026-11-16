@@ -142,9 +142,14 @@ python $TL compare OUT/problems.json --library LIB --sweep_bin BIN --stock OUT/s
   `HIPBLASLT_TENSILE_LIBPATH`, which must name the per-architecture directory.
   A merged size makes hipBLASLt pick the new kernel for it, faster or not, so
   merge only the winners.
-- **Re-time every winner with `compare`.** Tensile's client reads about 6%
-  faster than the sweep for the same kernel at a 750 W cap: its short runs end
-  before the clock settles. On the proxy's largest GEMM (N,N 14336x8192x4096),
+- **Re-time every winner with `compare`.** Under a power cap the engine clock
+  depends on the power a GEMM draws, and that depends on the input values.
+  Tensile's client fills A and B with sin(index), which draws less than the
+  sweep's normally distributed values: on MI300X at 750 W, the same kernel held
+  a 6% higher clock in the client and read 5% faster, with the client's sleep
+  between timings off and both warmed up. Its numbers don't compare with the
+  sweep's, and its ranking need not hold for real data. On the proxy's largest
+  GEMM (N,N 14336x8192x4096),
   the best of 3,826 new kernels read 1,484 us in Tensile's client against
   1,459 us for the best stock kernel on the sweep.
 - `config` drops the fields hipBLASLt 1.4 logs that tensile_config_generator's
