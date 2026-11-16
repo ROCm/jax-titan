@@ -9,9 +9,12 @@ import pytest
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
-pytestmark = pytest.mark.skipif(
-    importlib.util.find_spec("maxdiffusion") is None, reason="needs MaxDiffusion"
-)
+pytestmark = [
+    pytest.mark.patched_stack,
+    pytest.mark.skipif(
+        importlib.util.find_spec("maxdiffusion") is None, reason="needs MaxDiffusion"
+    ),
+]
 
 
 @pytest.mark.parametrize("flags", [

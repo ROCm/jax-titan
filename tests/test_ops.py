@@ -163,6 +163,7 @@ def test_xla_quantized_on_cpu(provider, qtype):
     assert qtype in jax.jit(lambda x, w: ops.linear(x, w)).lower(x, w).as_text()
 
 
+@pytest.mark.patched_stack
 def test_trainer_records_ops(tmp_path):
   log = tmp_path / "log.jsonl"
   result = subprocess.run(

@@ -1,8 +1,8 @@
 # Copyright Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 #
-# The CPU job installs JAX from PyPI, so it runs only tests that need neither
-# the patched jaxlib nor Shardy's MPMD package (docs/getting_started.md).
+# The CPU job installs stock JAX from PyPI and runs every test that carries
+# neither marker of pyproject.toml, patched_stack or gpu.
 
 name: CI
 
@@ -32,11 +32,12 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install JAX-Titan
-        run: python -m pip install -e ".[test]"
+        # Pinned: a new JAX release must not turn main red. Bump it in its own pull request.
+        run: python -m pip install -e ".[test,plots]" jax==0.12.0.1 jaxlib==0.12.0.1
       - name: Show installed versions
         run: python -m pip freeze
       - name: Run tests
-        run: python -m pytest tests/test_agent_skills.py
+        run: python -m pytest tests/ -m "not patched_stack and not gpu"
 
   gpu-smoke:
     name: GPU smoke test (MI350)

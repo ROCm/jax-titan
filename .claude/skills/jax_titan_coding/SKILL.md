@@ -70,6 +70,10 @@ for a later comparison: do not import from it or edit it.
 ## Testing Rules
 
 - `python -m pytest tests/` (CPU, 8 devices) must pass before every commit.
+- CI runs the tests in `tests/` on stock JAX from PyPI, except those marked
+  `patched_stack` or `gpu`. Mark a test `patched_stack` when it needs the
+  patched jaxlib or Shardy's MPMD package (every test that starts the trainer
+  does), and `gpu` when it needs a GPU; `pyproject.toml` registers both.
 - A new schedule, layout or model gets a case in `tests/test_mpmd_parity.py`:
   the pipeline step must match single-mesh `jax.jit` in fp32 with SGD
   (`rtol=1e-5` over 4 steps).
