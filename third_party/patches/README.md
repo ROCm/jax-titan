@@ -18,7 +18,9 @@ instead of the archive XLA pins.
 CI runs the tests marked `patched_stack` on wheels built with the jaxlib and
 Shardy patches, from the release that `.github/workflows/ci.yml` names. After
 changing one of them, or a revision in `scripts/setup_sources.sh`, build again
-and publish new wheels with `scripts/publish_ci_wheels.sh`.
+and publish new wheels with `scripts/publish_ci_wheels.sh`. The MaxDiffusion
+patches need no such step: every CI run applies them to a new checkout of the
+commit that `PINNED_COMMIT` names in the adapter.
 
 The XLA patch that accepted the ROCm platform in the IFRT IR atom program
 passes is gone: it landed upstream as

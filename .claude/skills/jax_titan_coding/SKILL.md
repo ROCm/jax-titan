@@ -71,10 +71,13 @@ for a later comparison: do not import from it or edit it.
 
 - `python -m pytest tests/` (CPU, 8 devices) must pass before every commit.
 - CI runs the tests in `tests/` twice: on stock JAX from PyPI without those
-  marked `patched_stack`, and on the JAX built from source with them. No job
-  runs a test marked `gpu` yet. Mark a test `patched_stack` when it needs the
-  patched jaxlib or Shardy's MPMD package (every test that starts the trainer
-  does), and `gpu` when it needs a GPU; `pyproject.toml` registers both.
+  marked `patched_stack`, and on the JAX built from source with them. The
+  second run also installs MaxText (the `maxtext` extra) and MaxDiffusion (at
+  the `PINNED_COMMIT` of its adapter, with the patches), so the adapter tests
+  run there. No job runs a test marked `gpu` yet. Mark a test `patched_stack`
+  when it needs the patched jaxlib or Shardy's MPMD package (every test that
+  starts the trainer does), and `gpu` when it needs a GPU; `pyproject.toml`
+  registers both.
 - CI's JAX built from source is a release of wheels named in
   `.github/workflows/ci.yml`. After a change to a revision in
   `scripts/setup_sources.sh` or to a patch, build again and publish new

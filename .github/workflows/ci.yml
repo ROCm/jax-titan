@@ -3,7 +3,8 @@
 #
 # The first CPU job installs stock JAX from PyPI and runs every test that
 # carries neither marker of pyproject.toml, patched_stack or gpu. The second
-# installs the JAX built from source and runs the patched_stack tests too.
+# installs the JAX built from source, MaxText and MaxDiffusion, and runs the
+# patched_stack tests too.
 
 name: CI
 
@@ -64,8 +65,19 @@ jobs:
           599755d823708edae813036f7bae58110c8b8ab402c2390253601f542161dd3c  wheels/jaxlib-0.12.1.dev0+selfbuilt-cp312-cp312-manylinux_2_27_x86_64.whl
           29e924a3e978475af6689cd6ed491e7ecb80c566cb433b9e84058119df0f8410  wheels/shardy_mpmd-0.0.1-py3-none-any.whl
           EOF
+      - name: Check out MaxDiffusion
+        run: |
+          commit=$(sed -n 's/^PINNED_COMMIT = "\(.*\)"$/\1/p' src/jax_titan/models/adapters/maxdiffusion.py)
+          git init --quiet "$RUNNER_TEMP/maxdiffusion"
+          cd "$RUNNER_TEMP/maxdiffusion"
+          git fetch --quiet --depth 1 https://github.com/AI-Hypercomputer/maxdiffusion "${commit:?}"
+          git checkout --quiet FETCH_HEAD
+          git apply "$GITHUB_WORKSPACE"/third_party/patches/maxdiffusion-*.patch
       - name: Install JAX-Titan
-        run: python -m pip install wheels/*.whl -e ".[test,plots]"
+        # --no-deps: MaxDiffusion's own requirements include PyTorch and TensorFlow.
+        run: |
+          python -m pip install wheels/*.whl -e ".[test,plots,maxtext,maxdiffusion]"
+          python -m pip install --no-deps -e "$RUNNER_TEMP/maxdiffusion"
       - name: Show installed versions
         run: python -m pip freeze
       - name: Run tests
