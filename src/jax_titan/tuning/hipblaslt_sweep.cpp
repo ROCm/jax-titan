@@ -2,7 +2,7 @@
 //
 //   hipblaslt_sweep probe
 //   hipblaslt_sweep list     m n k tA tB [--batch B] [--ws BYTES] [--heuristic N]
-//   (every command also takes --types A,B,C and --compute TYPE)
+//   (every command also takes --types A,B,C, --compute TYPE and --a_file/--b_file PATH)
 //   hipblaslt_sweep time     m n k tA tB [--batch B] [--ws BYTES] [--rounds R] [--target_ms T]
 //                                        [--warmup_ms W] [--mode rot|hot] INDEX...
 //   hipblaslt_sweep validate m n k tA tB [--batch B] [--ws BYTES] INDEX...
@@ -16,7 +16,11 @@
 // buffer, as here), and leading dimensions equal to the row counts. INDEX is a solution index, or -1 for the
 // heuristic's first choice (what XLA runs at autotune level 0). A solution is
 // supported if hipBLASLt accepts it for the problem within --ws bytes of
-// workspace, the workspace XLA gives the call.
+// workspace, the workspace XLA gives the call. A and B are normally
+// distributed values; --a_file and --b_file load them instead, as raw values of
+// the operand's type in its column-major layout (a row-major [n, k] array is
+// B for tB = N). Under a power cap the clock, and so the time, depends on the
+// values.
 //
 // Every result is one JSON object per line on stdout.
 //   list:     {"kind": "heuristic", rank, index, workspace} for the first N
@@ -102,6 +106,7 @@ struct Options {
   std::string mode = "rot";
   std::string types = "bf16_r,bf16_r,bf16_r", compute = "f32_r";
   float beta = 0.f;
+  std::string a_file, b_file;
   std::vector<int> indices;
 };
 
@@ -158,6 +163,8 @@ Options parse(int argc, char** argv) {
     else if (a == "--types") o.types = next("--types");
     else if (a == "--compute") o.compute = next("--compute");
     else if (a == "--beta") o.beta = static_cast<float>(atof(next("--beta")));
+    else if (a == "--a_file") o.a_file = next("--a_file");
+    else if (a == "--b_file") o.b_file = next("--b_file");
     else o.indices.push_back(atoi(a.c_str()));
   }
   return o;
@@ -279,10 +286,37 @@ struct Problem {
   }
 };
 
-// Device copies of bf16 operands filled from one random pattern, at different offsets.
+std::vector<uint8_t> read_file(const std::string& path, size_t bytes) {
+  FILE* f = fopen(path.c_str(), "rb");
+  if (!f) {
+    fprintf(stderr, "cannot open %s\n", path.c_str());
+    exit(2);
+  }
+  std::vector<uint8_t> data(bytes);
+  size_t got = fread(data.data(), 1, bytes, f);
+  bool longer = fgetc(f) != EOF;
+  fclose(f);
+  if (got != bytes || longer) {
+    fprintf(stderr, "%s: expected exactly %zu bytes\n", path.c_str(), bytes);
+    exit(2);
+  }
+  return data;
+}
+
+// Device copies of the operands: from --a_file/--b_file, or filled from one random pattern at
+// different offsets.
 struct Operands {
   std::vector<void*> a, b, d;
   Operands(const Problem& p, int sets) {
+    std::vector<uint8_t> file_a, file_b;
+    if (!p.o.a_file.empty()) file_a = read_file(p.o.a_file, p.bytes_a());
+    if (!p.o.b_file.empty()) file_b = read_file(p.o.b_file, p.bytes_b());
+    auto copy = [](const std::vector<uint8_t>& host) {
+      void* ptr;
+      CHECK_HIP(hipMalloc(&ptr, host.size()));
+      CHECK_HIP(hipMemcpy(ptr, host.data(), host.size(), hipMemcpyHostToDevice));
+      return ptr;
+    };
     std::mt19937 gen(1);
     std::normal_distribution<float> normal(0.f, 1.f);
     std::vector<float> pattern((1 << 22) + 7);
@@ -309,8 +343,8 @@ struct Operands {
       return ptr;
     };
     for (int s = 0; s < sets; s++) {
-      a.push_back(fill(p.elements_a(), 1000003ull * s, p.type_a));
-      b.push_back(fill(p.elements_b(), 7777777ull + 1000003ull * s, p.type_b));
+      a.push_back(file_a.empty() ? fill(p.elements_a(), 1000003ull * s, p.type_a) : copy(file_a));
+      b.push_back(file_b.empty() ? fill(p.elements_b(), 7777777ull + 1000003ull * s, p.type_b) : copy(file_b));
       void* ptr;
       CHECK_HIP(hipMalloc(&ptr, p.bytes_d()));
       CHECK_HIP(hipMemset(ptr, 0, p.bytes_d()));
