@@ -4,7 +4,8 @@
 # The first CPU job installs stock JAX from PyPI and runs every test that
 # carries neither marker of pyproject.toml, patched_stack or gpu. The second
 # installs the JAX built from source, MaxText and MaxDiffusion, and runs the
-# patched_stack tests too. Both take the versions of their other packages from
+# patched_stack tests too. The GPU job installs the JAX built from source with
+# its ROCm plugin. All take the versions of their other packages from
 # .github/ci-constraints.txt.
 
 name: CI
@@ -21,6 +22,11 @@ permissions:
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # The release scripts/publish_ci_wheels.sh made of the wheels of docs/getting_started.md;
+  # .github/ci-wheels.sha256 names its wheels.
+  WHEELS: jax-wheels-2026-11-10-6b39d49-rocm
 
 jobs:
   cpu-tests:
@@ -46,9 +52,6 @@ jobs:
     name: CPU tests (JAX built from source)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    env:
-      # The release scripts/publish_ci_wheels.sh made of the wheels of docs/getting_started.md.
-      WHEELS: jax-wheels-2026-11-10-6b39d49
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -60,12 +63,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download "$WHEELS" --repo "$GITHUB_REPOSITORY" --dir wheels --pattern '*.whl'
-          sha256sum --check <<'EOF'
-          5dde4075f64e8ca6d31f751847da72cfc5b189bba5bbd0612877b8d9acb19418  wheels/jax-0.12.1.dev0+selfbuilt-py3-none-any.whl
-          599755d823708edae813036f7bae58110c8b8ab402c2390253601f542161dd3c  wheels/jaxlib-0.12.1.dev0+selfbuilt-cp312-cp312-manylinux_2_27_x86_64.whl
-          29e924a3e978475af6689cd6ed491e7ecb80c566cb433b9e84058119df0f8410  wheels/shardy_mpmd-0.0.1-py3-none-any.whl
-          EOF
+          gh release download "$WHEELS" --repo "$GITHUB_REPOSITORY" --dir wheels \
+            --pattern 'jax-*.whl' --pattern 'jaxlib-*.whl' --pattern 'shardy_mpmd-*.whl'
+          grep -v jax_rocm .github/ci-wheels.sha256 | sha256sum --check
       - name: Check out MaxDiffusion
         run: |
           commit=$(sed -n 's/^PINNED_COMMIT = "\(.*\)"$/\1/p' src/jax_titan/models/adapters/maxdiffusion.py)
@@ -84,8 +84,8 @@ jobs:
       - name: Run tests
         run: python -m pytest tests/ -m "not gpu"
 
-  gpu-smoke:
-    name: GPU smoke test (MI350)
+  gpu-tests:
+    name: GPU tests (MI350)
     runs-on: amd-do-linux.jax-titan.gpu.gfx950.1
     # A pull request from a fork never runs on a self-hosted runner.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -93,9 +93,39 @@ jobs:
     container:
       image: ghcr.io/rocm/jax-base-ubu24.therock-10.1@sha256:9abb85fde7485b89db61f87d5f583bb1c3b980d479fff7d6d7ed988d652c57b3 # latest on 2026-11-13
       options: --device=/dev/kfd --device=/dev/dri --group-add video --shm-size 64G --env-file /etc/podinfo/gha-gpu-isolation-settings
+    defaults:
+      run:
+        shell: bash
+    env:
+      # A GPU memory fault otherwise writes all GPU memory to the working directory as a core dump.
+      HSA_DISABLE_COREDUMP_ON_EXCEPTION: 1
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Show the GPUs
         run: |
           # TheRock images have no /opt/rocm; rocminfo is in the SDK's bin directory.
           export PATH="$(rocm-sdk path --bin):$PATH"
           rocminfo | grep gfx
+      - name: Download the wheels
+        run: |
+          mkdir wheels
+          while read -r _ file; do
+            curl --fail --silent --show-error --location --output "$file" \
+              "https://github.com/$GITHUB_REPOSITORY/releases/download/$WHEELS/$(basename "${file//+/%2B}")"
+          done < .github/ci-wheels.sha256
+          sha256sum --check .github/ci-wheels.sha256
+      - name: Install JAX-Titan
+        # --system-site-packages: the container's ROCm is a set of Python packages.
+        run: |
+          python3 -m venv --system-site-packages venv
+          venv/bin/python -m pip install wheels/*.whl -e ".[test]" -c .github/ci-constraints.txt
+      - name: Show installed versions
+        run: venv/bin/python -m pip freeze
+      - name: Show the devices JAX sees
+        run: |
+          # The ROCm plugin wheels do not bundle ROCm; they load the container's TheRock libraries.
+          root=$(rocm-sdk path --root)
+          export LD_LIBRARY_PATH="$root/lib:$root/lib/rocm_sysdeps/lib"
+          JAX_PLATFORMS=rocm venv/bin/python -c "import jax; print(jax.devices())"
