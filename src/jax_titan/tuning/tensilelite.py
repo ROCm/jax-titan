@@ -369,7 +369,9 @@ def library(out_dir, src, jobs=0, arch="gfx942") -> pathlib.Path:
          str(out / "logic" / "asm_full"), str(dest), "HIP"]
   env = dict(os.environ, PYTHONPATH=f"{tensilelite_dir(src)}{os.pathsep}{os.environ.get('PYTHONPATH', '')}")
   subprocess.run(cmd, env=env, check=True)
-  return dest / "library"
+  # hipBLASLt looks for the per-architecture directory only under its default path, so
+  # HIPBLASLT_TENSILE_LIBPATH must name that directory itself.
+  return dest / "library" / arch
 
 
 def main(argv=None) -> int:
