@@ -66,6 +66,7 @@ examples. The planners, and the tools that read a finished run (`summarize`,
 | Command | What it checks |
 |---|---|
 | `python -m pytest tests/` | On CPU with 8 devices: schedules and layouts against `jax.jit`, exact checkpoint resume, the MaxText and MaxDiffusion adapters (skipped without their extras), the planners, and the agent skills' two copies |
+| `python -m pytest tests/ --gpus=N` | On ROCm, only the tests marked `gpu` that need at most N GPUs: operator conformance of `native`, and of the XLA quantized GEMMs (FP8, MXFP8, MXFP4) at Llama 3.1 8B sizes |
 | `python examples/<name>.py --platform=cpu` | A two-stage MLP step (`mpmd_two_mesh_spike.py`) and a pipeline step, each against one `jax.jit` program; the adapter stages against MaxText's and MaxDiffusion's own models ([getting_started.md](getting_started.md#5-runs)) |
 | `ops.conformance` | Operator providers against native JAX: outputs and gradients on one GPU, under `jax.vmap`, sharded, inside `shard_map` and inside an MPMD step, and their timings ([getting_started.md](getting_started.md#5-runs)) |
 
