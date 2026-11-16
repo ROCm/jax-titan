@@ -70,6 +70,28 @@ examples. The planners, and the tools that read a finished run (`summarize`,
 | `python examples/<name>.py --platform=cpu` | A two-stage MLP step (`mpmd_two_mesh_spike.py`) and a pipeline step, each against one `jax.jit` program; the adapter stages against MaxText's and MaxDiffusion's own models ([getting_started.md](getting_started.md#5-runs)) |
 | `ops.conformance` | Operator providers against native JAX: outputs and gradients on one GPU, under `jax.vmap`, sharded, inside `shard_map` and inside an MPMD step, and their timings ([getting_started.md](getting_started.md#5-runs)) |
 
+A test in `tests/` is a CPU test unless it is marked `gpu`, and each of the two
+pytest commands above runs one kind:
+
+```python
+def test_on_cpu():  # no marker: a CPU test
+  ...
+
+
+@pytest.mark.gpu  # needs one GPU
+def test_on_gpu():
+  ...
+
+
+@pytest.mark.gpu(4)  # needs four GPUs; skipped when --gpus is smaller
+def test_on_4_gpus():
+  ...
+```
+
+CI runs `python -m pytest tests/` on a CPU runner and
+`python -m pytest tests/ --gpus=1` on one gfx950, so a new test joins the right
+job by its marker alone.
+
 ### Measuring a run
 
 [metrics.md](metrics.md#tools) has their options and the metrics they report.
