@@ -80,8 +80,10 @@ for a later comparison: do not import from it or edit it.
 - Mark a test that needs a GPU `gpu`, or `gpu(n)` for n GPUs.
   `python -m pytest tests/` never runs it; `python -m pytest tests/ --gpus=N`
   runs only the `gpu` tests, with JAX on ROCm, and skips those that need more
-  than N. CI's GPU job runs `--gpus=1` on one gfx950, so a test that needs
-  more GPUs runs only by hand on a dev node.
+  than N. Unless `XLA_FLAGS` is set, it turns XLA's GEMM autotuning off
+  (hipBLASLt's first choice for every GEMM): with autotuning the tests take 20
+  minutes instead of 90 seconds. CI's GPU job runs `--gpus=1` on one gfx950,
+  so a test that needs more GPUs runs only by hand on a dev node.
 - CI's JAX built from source is a release of wheels named in
   `.github/workflows/ci.yml`, with their checksums in
   `.github/ci-wheels.sha256`. After a change to a revision in

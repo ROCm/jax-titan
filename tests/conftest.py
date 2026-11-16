@@ -29,6 +29,12 @@ def pytest_configure(config):
   # Also for the processes that tests start. With rocm, JAX raises when it
   # finds no GPU instead of running on CPU.
   os.environ["JAX_PLATFORMS"] = platform
+  if gpus:
+    # hipBLASLt's first choice for every GEMM. By default XLA times its Triton
+    # GEMMs and hipBLASLt's candidates for each GEMM it compiles, which takes
+    # the tests from 90 seconds to 20 minutes.
+    os.environ.setdefault(
+        "XLA_FLAGS", "--xla_gpu_autotune_level=0 --xla_gpu_enable_triton_gemm=false")
   import jax  # pylint: disable=g-import-not-at-top
 
   jax.config.update("jax_platforms", platform)
