@@ -2,12 +2,14 @@
 
 `--model=maxtext:<name>` trains a MaxText model config (e.g.
 `maxtext:llama3.1-8b`) on the token data, and `--model=maxdiffusion:<flavor>`
-trains FLUX.1 (`flux-dev` or `flux-schnell`) on synthetic rectified-flow
-batches until an image pipeline exists. Both run as a Shardy MPMD pipeline
-with data parallelism inside each stage, reducing gradients in every
-microbatch's backward pass, and attention in native JAX unless the ops policy
-names attention. `--parallel=dp` runs the same stages, weights and batches as
-one data-parallel `jax.jit` program, the no-pipeline reference.
+trains FLUX.1 (`flux-dev` or `flux-schnell`) or, from MaxDiffusion's Ideogram
+branch, Ideogram 4 (`ideogram4`) on synthetic rectified-flow batches until an
+image pipeline exists. They run as a Shardy MPMD pipeline with data
+parallelism inside each stage, reducing gradients in every microbatch's
+backward pass, and attention in native JAX unless the ops policy names
+attention. `--parallel=dp` runs the same stages, weights and batches as one
+data-parallel `jax.jit` program, the no-pipeline reference; for Ideogram 4,
+`--parallel=fsdp` also shards parameters and optimizer state.
 """
 
 import functools
@@ -69,19 +71,23 @@ def _shapes(specs):
   return jax.tree.map(lambda v: v[0], specs, is_leaf=_is_pair)
 
 
-def _init_replicated(args, model, optimizer, meshes):
-  """Init and abstract state for stage state replicated on its mesh."""
+def _init_state(args, model, optimizer, meshes, fsdp=False):
+  """Init and abstract state for stage state on its mesh: replicated, or with
+  `fsdp` sharded along the model's logical axes."""
   import jax  # pylint: disable=g-import-not-at-top
+  from jax_titan import parallel  # pylint: disable=g-import-not-at-top
 
-  P = jax.sharding.PartitionSpec  # pylint: disable=invalid-name
-
-  def replicated(tree, mesh):
-    return jax.tree.map(lambda _: jax.sharding.NamedSharding(mesh, P()), tree)
+  def shardings(tree, mesh):
+    if fsdp:
+      specs = parallel.tree_specs(tree, model.logical_axes, mesh.shape, fsdp=True)
+    else:
+      specs = jax.tree.map(lambda _: jax.sharding.PartitionSpec(), tree)
+    return jax.tree.map(lambda s: jax.sharding.NamedSharding(mesh, s), specs)
 
   param_shapes = model.abstract(args.seed)
   opt_shapes = tuple(jax.eval_shape(optimizer.init, p) for p in param_shapes)
-  param_sh = tuple(replicated(p, m) for p, m in zip(param_shapes, meshes))
-  opt_sh = tuple(replicated(s, m) for s, m in zip(opt_shapes, meshes))
+  param_sh = tuple(shardings(p, m) for p, m in zip(param_shapes, meshes))
+  opt_sh = tuple(shardings(s, m) for s, m in zip(opt_shapes, meshes))
 
   def init():
     stage_params = model.load(args.init_from) if args.init_from else model.init(args.seed)
@@ -117,7 +123,7 @@ def _mpmd_layout(args, topology, model, optimizer, inputs, targets, split_batch)
   options = json.loads(args.mpmd_options) if args.mpmd_options else None
   config = jt_mpmd.make_config(topology, args.schedule or None, options, num_stages=num_stages)
   meshes = [topology[jt_mpmd.mesh_name(i % num_meshes)] for i in range(num_stages)]
-  init, abstract_state, param_sh, opt_sh = _init_replicated(args, model, optimizer, meshes)
+  init, abstract_state, param_sh, opt_sh = _init_state(args, model, optimizer, meshes)
 
   in_sh, tgt_sh = _shardings(inputs, meshes[0]), _shardings(targets, meshes[-1])
   stage_fns = [ops.for_stage(fn, i) for i, fn in enumerate(model.stage_fns())]
@@ -149,7 +155,8 @@ def _mpmd_layout(args, topology, model, optimizer, inputs, targets, split_batch)
 
 
 def _spmd_layout(args, mesh, model, optimizer, inputs, targets, split_batch) -> Layout:
-  """No pipeline: every stage in one data-parallel `jax.jit` program on `mesh`.
+  """No pipeline: every stage in one `jax.jit` program on `mesh`, data-parallel
+  or, with `--parallel=fsdp`, with the state sharded too.
 
   The step runs the stages over all microbatches at once, which gives the
   pipeline's loss and gradients when microbatches hold equal token counts, and
@@ -182,8 +189,8 @@ def _spmd_layout(args, mesh, model, optimizer, inputs, targets, split_batch) -> 
   flat_inputs = jax.tree.map(flat_spec, inputs, is_leaf=_is_pair)
   flat_targets = jax.tree.map(flat_spec, targets, is_leaf=_is_pair)
   in_sh, tgt_sh = _shardings(flat_inputs, mesh), _shardings(flat_targets, mesh)
-  init, abstract_state, param_sh, opt_sh = _init_replicated(
-      args, model, optimizer, [mesh] * args.num_stages)
+  init, abstract_state, param_sh, opt_sh = _init_state(
+      args, model, optimizer, [mesh] * args.num_stages, fsdp=args.parallel == "fsdp")
 
   stage_fns = [ops.for_stage(fn, i) for i, fn in enumerate(model.stage_fns())]
   last = len(stage_fns) - 1
@@ -366,10 +373,88 @@ def _maxdiffusion(args, flavor, devices, optimizer):
   return layout, work
 
 
+def _ideogram(args, devices, optimizer):
+  import jax  # pylint: disable=g-import-not-at-top
+  import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+  import numpy as np  # pylint: disable=g-import-not-at-top
+  from jax_titan import mpmd as jt_mpmd  # pylint: disable=g-import-not-at-top
+  from jax_titan.models.adapters import ideogram as ig  # pylint: disable=g-import-not-at-top
+
+  P = jax.sharding.PartitionSpec  # pylint: disable=invalid-name
+
+  overrides = _overrides(args)
+  dtype = jnp.dtype(overrides.pop("dtype", "bfloat16"))
+  cfg = ig.Ideogram4Config(
+      **{k: tuple(v) if isinstance(v, list) else v for k, v in overrides.items()})
+
+  def make_mesh(d):
+    return jax.sharding.Mesh(
+        np.asarray(d).reshape(len(d), 1), (jt_mpmd.DATA_AXIS, jt_mpmd.TENSOR_AXIS))
+
+  mesh = make_mesh(devices)
+  constrain = None
+  if args.parallel == "fsdp":
+    # Keeps the batch sharded, so FSDP gathers the weights and not the activations.
+    constrain = functools.partial(
+        jax.lax.with_sharding_constraint,
+        shardings=jax.sharding.NamedSharding(mesh, P(jt_mpmd.DATA_AXIS)))
+  model = ig.Model(cfg, num_stages=args.num_stages, blocks=_stage_layers(args), dtype=dtype,
+                   remat=args.remat, constrain=constrain)
+
+  side = args.resolution // 16
+  image_tokens = side * side
+  text_tokens = args.text_tokens or 256
+  ids = ig.sequence_ids(side, text_tokens)
+  mb, num_mb = args.microbatch_size, args.microbatches
+  b = (num_mb, mb)
+  latent_shape = b + (image_tokens, cfg.in_channels)
+  text_shape = b + (text_tokens, cfg.llm_features_dim)
+  f32 = jnp.float32
+  batched = P(None, jt_mpmd.DATA_AXIS)
+  inputs = {
+      "img": (jax.ShapeDtypeStruct(latent_shape, f32), batched),
+      "txt": (jax.ShapeDtypeStruct(text_shape, f32), batched),
+      "timestep": (jax.ShapeDtypeStruct(b, f32), batched),
+      **{k: (jax.ShapeDtypeStruct(b + v.shape, v.dtype), batched) for k, v in ids.items()},
+  }
+  targets = (jax.ShapeDtypeStruct(latent_shape, f32), batched)
+  # The text features are the largest input by far, and the same every step.
+  txt = np.random.default_rng(args.seed).standard_normal(text_shape, np.float32)
+
+  def next_batch(step):
+    """Noised random latents and velocity targets, with random text features."""
+    rng = np.random.default_rng((args.seed, step))
+    latents = rng.standard_normal(latent_shape, np.float32)
+    noise = rng.standard_normal(latent_shape, np.float32)
+    t = ig.timesteps(rng.standard_normal(b), args.resolution)
+    x = {
+        "img": (1 - t[..., None, None]) * noise + t[..., None, None] * latents,
+        "txt": txt,
+        "timestep": t,
+        **{k: np.broadcast_to(v, b + v.shape) for k, v in ids.items()},
+    }
+    return x, latents - noise
+
+  if args.parallel == "mpmd":
+    layout = _mpmd_layout(args, _topology(args, devices, make_mesh), model, optimizer,
+                          inputs, targets, lambda batch: batch)
+  else:
+    layout = _spmd_layout(args, mesh, model, optimizer, inputs, targets, lambda batch: batch)
+  samples = num_mb * mb
+  work = Workload(
+      num_params=_num_params(model.abstract(args.seed)),
+      tokens_per_step=samples * (image_tokens + text_tokens),
+      flops_per_step=model.flops_per_sample(image_tokens, text_tokens) * samples,
+      next_batch=next_batch,
+  )
+  return layout, work
+
+
 def build(args, devices, optimizer) -> tuple[Layout, Workload]:
   """The layout and workload of `--model=<provider>:<name>`."""
   provider, _, name = args.model.partition(":")
-  if args.parallel == "fsdp" or args.stage_fsdp or args.tensor_parallel != 1:
+  ideogram = provider == "maxdiffusion" and name == "ideogram4"
+  if args.stage_fsdp or args.tensor_parallel != 1 or (args.parallel == "fsdp" and not ideogram):
     raise NotImplementedError(
         f"{args.model} trains with data parallelism only: as an MPMD pipeline with it inside "
         "stages, or as --parallel=dp"
@@ -378,13 +463,15 @@ def build(args, devices, optimizer) -> tuple[Layout, Workload]:
     raise NotImplementedError(f"{args.model} reduces gradients per microbatch only")
   if args.init_from and provider != "maxtext":
     raise NotImplementedError(f"--init_from loads MaxText parameter checkpoints, not {provider}")
-  if args.parallel == "dp" and (args.microbatches * args.microbatch_size) % len(devices):
+  if args.parallel != "mpmd" and (args.microbatches * args.microbatch_size) % len(devices):
     raise ValueError(
-        f"--parallel=dp splits all {args.microbatches * args.microbatch_size} sequences of a "
-        f"step across {len(devices)} devices"
+        f"--parallel={args.parallel} splits all {args.microbatches * args.microbatch_size} "
+        f"sequences of a step across {len(devices)} devices"
     )
   if provider == "maxtext":
     return _maxtext(args, name, devices, optimizer)
+  if ideogram:
+    return _ideogram(args, devices, optimizer)
   if provider == "maxdiffusion":
     return _maxdiffusion(args, name, devices, optimizer)
   raise ValueError(f"unknown model provider {provider!r}; known: {', '.join(PROVIDERS)}")

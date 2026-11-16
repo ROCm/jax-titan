@@ -3,8 +3,8 @@
   python -m jax_titan.trainer.train --model=llama3.1-8b --num_stages=2
 
 `--model` is a JAX-Titan Llama flavor, `maxtext:<MaxText model>` such as
-`maxtext:llama3.1-8b`, or `maxdiffusion:flux-dev` (see
-`jax_titan.trainer.adapters`).
+`maxtext:llama3.1-8b`, or `maxdiffusion:flux-dev` or `maxdiffusion:ideogram4`
+(see `jax_titan.trainer.adapters`).
 
 `--parallel=dp` and `--parallel=fsdp` train the same Llama on the same batches
 without the pipeline, as one `jax.jit` program over all devices.
@@ -36,7 +36,8 @@ def parse_args(argv=None):
   parser.add_argument(
       "--model", default="llama3.1-8b",
       help="A Llama flavor (llama3.1-8b, llama3-test), maxtext:<MaxText model "
-      "name>, or maxdiffusion:flux-dev or maxdiffusion:flux-schnell.",
+      "name>, maxdiffusion:flux-dev or maxdiffusion:flux-schnell, or "
+      "maxdiffusion:ideogram4 with MaxDiffusion's Ideogram branch.",
   )
   parser.add_argument(
       "--model_overrides", default="",
@@ -53,7 +54,8 @@ def parse_args(argv=None):
       "--parallel", default="mpmd", choices=["mpmd", "dp", "fsdp"],
       help="mpmd: Shardy MPMD pipeline, data parallel inside each stage. "
       "dp, fsdp: no pipeline; one jax.jit program over all devices with "
-      "replicated or sharded parameters and optimizer state.",
+      "replicated or sharded parameters and optimizer state. Of the maxtext: "
+      "and maxdiffusion: models, only ideogram4 has fsdp.",
   )
   parser.add_argument(
       "--num_stages", type=int, default=2,
@@ -111,13 +113,13 @@ def parse_args(argv=None):
   parser.add_argument("--seq_len", type=int, default=2048)
   parser.add_argument(
       "--resolution", type=int, default=1024,
-      help="maxdiffusion: image side in pixels; FLUX.1 sees (resolution / 16)^2 "
+      help="maxdiffusion: image side in pixels; the model sees (resolution / 16)^2 "
       "latent tokens.",
   )
   parser.add_argument(
       "--text_tokens", type=int, default=0,
-      help="maxdiffusion: T5 tokens per sample; default 512 for flux-dev and "
-      "256 for flux-schnell.",
+      help="maxdiffusion: text tokens per sample; default 512 for flux-dev and "
+      "256 for flux-schnell and ideogram4.",
   )
   parser.add_argument("--steps", type=int, default=50)
   parser.add_argument("--lr", type=float, default=3e-4)
