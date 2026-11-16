@@ -6,6 +6,7 @@ import subprocess
 import sys
 
 import numpy as np
+import pytest
 
 from jax_titan.observability import records
 
@@ -15,6 +16,8 @@ FLAGS = [
     "--microbatches=4", "--microbatch_size=4", "--steps=6", "--warmup_steps=2",
     "--checkpoint_every=3",
 ]
+
+pytestmark = pytest.mark.patched_stack
 
 
 def _train(ckpt_dir, log, *flags):

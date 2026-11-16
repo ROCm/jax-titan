@@ -219,6 +219,7 @@ def test_energy_between():
   assert e["energy_j"] == 600.0 and e["mean_power_w"] == 100.0
 
 
+@pytest.mark.patched_stack
 def test_restart_rehearsal(tmp_path):
   run = tmp_path / "run"
   common = [sys.executable, "-m", "jax_titan.trainer.train", "--platform=cpu",
@@ -237,6 +238,7 @@ def test_restart_rehearsal(tmp_path):
   assert m["u0_stages_s"][1]["restore"] > 0
 
 
+@pytest.mark.patched_stack
 def test_trainer_run_dir(tmp_path):
   run = tmp_path / "run"
   result = subprocess.run(

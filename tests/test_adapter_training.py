@@ -38,6 +38,8 @@ MODELS = {
     ],
 }
 
+pytestmark = pytest.mark.patched_stack
+
 
 def _run(provider, log, *flags):
   # os.environ, not the process environment: see conftest's ROCPROFILER note.

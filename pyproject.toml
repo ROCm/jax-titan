@@ -77,3 +77,12 @@ include = ["jax_titan*"]
 # Collective times measured with scripts/bench_collectives.sh, and the model config
 # index (docs/planning.md).
 "jax_titan.planning" = ["data/*.json", "data/models/*.json"]
+
+[tool.pytest.ini_options]
+addopts = "--strict-markers -rfEs"
+# CI runs the tests that carry neither marker on stock JAX from PyPI, and the
+# patched_stack tests too on the JAX built from source.
+markers = [
+    "patched_stack: needs the patched jaxlib and Shardy's MPMD package (docs/getting_started.md)",
+    "gpu: needs a GPU",
+]

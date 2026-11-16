@@ -9,9 +9,12 @@ import pytest
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
-pytestmark = pytest.mark.skipif(
-    importlib.util.find_spec("maxtext") is None, reason="needs the maxtext extra"
-)
+pytestmark = [
+    pytest.mark.patched_stack,
+    pytest.mark.skipif(
+        importlib.util.find_spec("maxtext") is None, reason="needs the maxtext extra"
+    ),
+]
 
 
 @pytest.mark.parametrize("flags", [

@@ -70,6 +70,22 @@ for a later comparison: do not import from it or edit it.
 ## Testing Rules
 
 - `python -m pytest tests/` (CPU, 8 devices) must pass before every commit.
+- CI runs the tests in `tests/` twice: on stock JAX from PyPI without those
+  marked `patched_stack`, and on the JAX built from source with them. The
+  second run also installs MaxText (the `maxtext` extra) and MaxDiffusion (at
+  the `PINNED_COMMIT` of its adapter, with the patches), so the adapter tests
+  run there. No job runs a test marked `gpu` yet. Mark a test `patched_stack`
+  when it needs the patched jaxlib or Shardy's MPMD package (every test that
+  starts the trainer does), and `gpu` when it needs a GPU; `pyproject.toml`
+  registers both.
+- CI's JAX built from source is a release of wheels named in
+  `.github/workflows/ci.yml`. After a change to a revision in
+  `scripts/setup_sources.sh` or to a patch, build again and publish new
+  wheels with `scripts/publish_ci_wheels.sh`, or CI tests the old stack.
+- CI installs every other package at the version `.github/ci-constraints.txt`
+  names, so a new release of a dependency cannot turn CI red. Update the file
+  by hand, as its first lines say; a package it does not name is installed at
+  its newest version.
 - A new schedule, layout or model gets a case in `tests/test_mpmd_parity.py`:
   the pipeline step must match single-mesh `jax.jit` in fp32 with SGD
   (`rtol=1e-5` over 4 steps).
