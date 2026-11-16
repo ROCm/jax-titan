@@ -403,6 +403,16 @@ ENTRY %main (a: bf16[32,8192,4096], i: s32[], g: bf16[8192,1024]) -> (bf16[4096,
 """
 
 
+def test_other_custom_calls_in_a_slice_fusion_are_counted():
+  module = gemms.Module(SLICE_FUSION_MODULE.replace(
+      'ROOT %custom-call.36 = (bf16[4096,1024]{1,0}, s8[1024]{0}) custom-call(%bitcast.1, %p2.2), '
+      'custom_call_target="__cublas$lt$matmul"',
+      'ROOT %custom-call.36 = (bf16[4096,1024]{1,0}, s8[1024]{0}) custom-call(%bitcast.1, %p2.2), '
+      'custom_call_target="attention_ffi"'), platform="rocm")
+  assert gemms.gemms(module) == []
+  assert module.other_calls == {"attention_ffi": 1}
+
+
 def test_library_gemm_in_a_slice_fusion_joins_launches_by_its_own_name():
   (s,) = gemms.gemms(gemms.Module(SLICE_FUSION_MODULE, platform="rocm"))
   assert (s["kernel"], s["trace_op"], s["library"]) == ("dynamic_slice_fusion.2", "custom-call.36", "hipBLASLt")
