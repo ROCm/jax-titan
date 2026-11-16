@@ -37,6 +37,7 @@ processes. The others need the container's TheRock libraries.
 | `container.sh` | host | Starts the TheRock 10.1 development container with all GPUs and a user with your host uid, so files in the workspace keep your owner ([getting_started.md](getting_started.md#1-container)) |
 | `env.sh` | container | Activates the venv; sets TheRock's library path, `PYTHONPATH` and the JAX compilation cache; turns off GPU core dumps; sets `JAX_TITAN_ROCM_XLA_FLAGS` for GPU runs. Source it in every shell |
 | `build_jax_rocm.sh` | container | Builds the jax, jaxlib and ROCm plugin wheels against `${JAX_TITAN_ROOT}/src/xla` and the patched Shardy; `WHEELS=jaxlib` rebuilds only jaxlib ([getting_started.md](getting_started.md#3-build)) |
+| `publish_ci_wheels.sh` | host | Publishes the jax and jaxlib wheels of the last build, with Shardy's MPMD package, as a draft GitHub release for CI's tests marked `patched_stack`, and prints the checksums for `.github/workflows/ci.yml`. Run it after a build with a new revision or patch. Needs `gh` |
 | `build_jax_aiter.sh` | container | Builds JAX-AITER from its submodule against the installed jaxlib, with prebuilt AITER JIT libraries |
 | `build_rccl_inspector.sh` | container | Ports RCCL's Inspector profiler plugin to HIP, for the trainer's `--rccl_inspector` ([metrics.md](metrics.md#recording-a-run)) |
 | `gpus_free.sh` | host | Prints `free` and exits 0 when no process holds a GPU and every GPU is idle; prints what is busy otherwise |

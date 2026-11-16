@@ -1,8 +1,9 @@
 # Copyright Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 #
-# The CPU job installs stock JAX from PyPI and runs every test that carries
-# neither marker of pyproject.toml, patched_stack or gpu.
+# The first CPU job installs stock JAX from PyPI and runs every test that
+# carries neither marker of pyproject.toml, patched_stack or gpu. The second
+# installs the JAX built from source and runs the patched_stack tests too.
 
 name: CI
 
@@ -38,6 +39,37 @@ jobs:
         run: python -m pip freeze
       - name: Run tests
         run: python -m pytest tests/ -m "not patched_stack and not gpu"
+
+  cpu-tests-source:
+    name: CPU tests (JAX built from source)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      # The release scripts/publish_ci_wheels.sh made of the wheels of docs/getting_started.md.
+      WHEELS: jax-wheels-2026-11-10-6b39d49
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Download the wheels
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$WHEELS" --repo "$GITHUB_REPOSITORY" --dir wheels --pattern '*.whl'
+          sha256sum --check <<'EOF'
+          5dde4075f64e8ca6d31f751847da72cfc5b189bba5bbd0612877b8d9acb19418  wheels/jax-0.12.1.dev0+selfbuilt-py3-none-any.whl
+          599755d823708edae813036f7bae58110c8b8ab402c2390253601f542161dd3c  wheels/jaxlib-0.12.1.dev0+selfbuilt-cp312-cp312-manylinux_2_27_x86_64.whl
+          29e924a3e978475af6689cd6ed491e7ecb80c566cb433b9e84058119df0f8410  wheels/shardy_mpmd-0.0.1-py3-none-any.whl
+          EOF
+      - name: Install JAX-Titan
+        run: python -m pip install wheels/*.whl -e ".[test,plots]"
+      - name: Show installed versions
+        run: python -m pip freeze
+      - name: Run tests
+        run: python -m pytest tests/ -m "not gpu"
 
   gpu-smoke:
     name: GPU smoke test (MI350)

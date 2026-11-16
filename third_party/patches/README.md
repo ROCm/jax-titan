@@ -15,6 +15,11 @@ jaxlib compiles Shardy's MPMD partitioner from the Shardy source tree, so
 `scripts/build_jax_rocm.sh` builds against the patched `shardy` worktree
 instead of the archive XLA pins.
 
+CI runs the tests marked `patched_stack` on wheels built with the jaxlib and
+Shardy patches, from the release that `.github/workflows/ci.yml` names. After
+changing one of them, or a revision in `scripts/setup_sources.sh`, build again
+and publish new wheels with `scripts/publish_ci_wheels.sh`.
+
 The XLA patch that accepted the ROCm platform in the IFRT IR atom program
 passes is gone: it landed upstream as
 [openxla/xla#52290](https://github.com/openxla/xla/pull/52290) (`dfca2c9`).
