@@ -4,7 +4,8 @@
 # The first CPU job installs stock JAX from PyPI and runs every test that
 # carries neither marker of pyproject.toml, patched_stack or gpu. The second
 # installs the JAX built from source, MaxText and MaxDiffusion, and runs the
-# patched_stack tests too.
+# patched_stack tests too. Both take the versions of their other packages from
+# .github/ci-constraints.txt.
 
 name: CI
 
@@ -34,8 +35,8 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install JAX-Titan
-        # Pinned: a new JAX release must not turn main red. Bump it in its own pull request.
-        run: python -m pip install -e ".[test,plots]" jax==0.12.0.1 jaxlib==0.12.0.1
+        # Pinned: a new release must not turn main red. Bump a version in its own pull request.
+        run: python -m pip install -e ".[test,plots]" jax==0.12.0.1 jaxlib==0.12.0.1 -c .github/ci-constraints.txt
       - name: Show installed versions
         run: python -m pip freeze
       - name: Run tests
@@ -76,7 +77,7 @@ jobs:
       - name: Install JAX-Titan
         # --no-deps: MaxDiffusion's own requirements include PyTorch and TensorFlow.
         run: |
-          python -m pip install wheels/*.whl -e ".[test,plots,maxtext,maxdiffusion]"
+          python -m pip install wheels/*.whl -e ".[test,plots,maxtext,maxdiffusion]" -c .github/ci-constraints.txt
           python -m pip install --no-deps -e "$RUNNER_TEMP/maxdiffusion"
       - name: Show installed versions
         run: python -m pip freeze

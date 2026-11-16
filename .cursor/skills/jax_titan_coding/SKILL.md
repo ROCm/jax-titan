@@ -82,6 +82,10 @@ for a later comparison: do not import from it or edit it.
   `.github/workflows/ci.yml`. After a change to a revision in
   `scripts/setup_sources.sh` or to a patch, build again and publish new
   wheels with `scripts/publish_ci_wheels.sh`, or CI tests the old stack.
+- CI installs every other package at the version `.github/ci-constraints.txt`
+  names, so a new release of a dependency cannot turn CI red. Update the file
+  by hand, as its first lines say; a package it does not name is installed at
+  its newest version.
 - A new schedule, layout or model gets a case in `tests/test_mpmd_parity.py`:
   the pipeline step must match single-mesh `jax.jit` in fp32 with SGD
   (`rtol=1e-5` over 4 steps).
