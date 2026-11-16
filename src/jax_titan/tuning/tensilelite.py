@@ -18,7 +18,9 @@ tensile_config_generator.py's pattern predates, and runs the generator: one
 Tensile config per GPU. `tune` runs Tensile on each config on its own GPU.
 `decode` reads, per problem size, the best kernel Tensile found from its
 library logic and sets it beside the stock solutions `hipblaslt.py sweep`
-timed. Tensile times with its own client, so treat its numbers as a ranking.
+timed. Tensile times with its own client, so treat its numbers as a ranking:
+under a power cap its short runs end before the clock settles, and on MI300X
+at 750 W they read about 6% faster than the sweep's for the same kernel.
 `merge` merges the tuned logic of the problems whose new kernel won (`--only`)
 into a copy of the build's gfx942 logic with TensileMergeLibrary, and
 `library` builds the kernel library from that copy with

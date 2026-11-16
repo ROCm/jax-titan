@@ -115,6 +115,43 @@ differences into milliseconds per step:
   less power: on MI300X the proxy's f32 GEMMs reach 112 TFLOP/s, more than the
   FP32 peak allows at the bf16 GEMM's capped clock.
 
+## New kernels with TensileLite
+
+A tuning file can only choose among the kernels a hipBLASLt build ships.
+`tuning/tensilelite.py` generates new ones for the captured problems with
+hipBLASLt's own flow, in a Python set up per TensileLite's README (`invoke
+rocisa`, `invoke build-client`) and a hipBLASLt source tree at the revision of
+the library XLA loads:
+
+```bash
+TL=src/jax_titan/tuning/tensilelite.py
+python $TL config "OUT/capture/hipblaslt_*.log" --src HIPBLASLT --out TL_OUT --only REGEX --gpus 8
+python $TL tune TL_OUT --src HIPBLASLT --gpus 0,1,2,3,4,5,6,7
+python $TL decode TL_OUT --stock OUT/sweep/results.json
+python $TL merge TL_OUT --src HIPBLASLT --only WINNERS_REGEX
+python $TL library TL_OUT --src HIPBLASLT --jobs 192      # prints HIPBLASLT_TENSILE_LIBPATH=...
+python $TL compare OUT/problems.json --library LIB --sweep_bin BIN --stock OUT/sweep/results.json --only WINNERS_REGEX
+```
+
+- **Cost on MI300X:** full mode (`config` without `--fast`) times 3,000-5,000
+  kernels per problem, 30-110 minutes per problem on one GPU. `--fast` tries
+  only the smallest tile of each matrix instruction, which loses by about 3x
+  on training-size GEMMs. Building the whole gfx942 kernel library takes about
+  35 minutes on 384 cores.
+- **The stock libhipblaslt loads the built library** through
+  `HIPBLASLT_TENSILE_LIBPATH`, which must name the per-architecture directory.
+  A merged size makes hipBLASLt pick the new kernel for it, faster or not, so
+  merge only the winners.
+- **Re-time every winner with `compare`.** Tensile's client reads about 6%
+  faster than the sweep for the same kernel at a 750 W cap: its short runs end
+  before the clock settles. On the proxy's largest GEMM (N,N 14336x8192x4096),
+  the best of 3,826 new kernels read 1,484 us in Tensile's client against
+  1,459 us for the best stock kernel on the sweep.
+- `config` drops the fields hipBLASLt 1.4 logs that tensile_config_generator's
+  pattern predates, and fixes the config types Tensile's validation rejects.
+  `merge` uses TensileMergeLibrary: the deprecated merge.py reads only the
+  older list form of library logic.
+
 ## Results: Llama 3.1 8B, FSDP over 8 MI300X
 
 8,192 tokens per GPU (`--microbatch_size=32 --seq_len=2048`), TE attention,
