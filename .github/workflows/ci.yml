@@ -5,8 +5,8 @@
 # carries neither marker of pyproject.toml, patched_stack or gpu. The second
 # installs the JAX built from source, MaxText and MaxDiffusion, and runs the
 # patched_stack tests too. The GPU job installs the JAX built from source with
-# its ROCm plugin. All take the versions of their other packages from
-# .github/ci-constraints.txt.
+# its ROCm plugin and runs the gpu tests that need one GPU. All take the
+# versions of their other packages from .github/ci-constraints.txt.
 
 name: CI
 
@@ -46,7 +46,7 @@ jobs:
       - name: Show installed versions
         run: python -m pip freeze
       - name: Run tests
-        run: python -m pytest tests/ -m "not patched_stack and not gpu"
+        run: python -m pytest tests/ -m "not patched_stack"
 
   cpu-tests-source:
     name: CPU tests (JAX built from source)
@@ -82,7 +82,7 @@ jobs:
       - name: Show installed versions
         run: python -m pip freeze
       - name: Run tests
-        run: python -m pytest tests/ -m "not gpu"
+        run: python -m pytest tests/
 
   gpu-tests:
     name: GPU tests (MI350)
@@ -123,9 +123,9 @@ jobs:
           venv/bin/python -m pip install wheels/*.whl -e ".[test]" -c .github/ci-constraints.txt
       - name: Show installed versions
         run: venv/bin/python -m pip freeze
-      - name: Show the devices JAX sees
+      - name: Run tests
         run: |
           # The ROCm plugin wheels do not bundle ROCm; they load the container's TheRock libraries.
           root=$(rocm-sdk path --root)
           export LD_LIBRARY_PATH="$root/lib:$root/lib/rocm_sysdeps/lib"
-          JAX_PLATFORMS=rocm venv/bin/python -c "import jax; print(jax.devices())"
+          venv/bin/python -m pytest tests/ --gpus=1

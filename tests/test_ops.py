@@ -152,15 +152,40 @@ def test_conformance_native_on_cpu():
   assert rows and all(r["status"] == "pass" for r in rows), rows
 
 
-@pytest.mark.parametrize("provider, qtype", [
+@pytest.mark.gpu
+def test_conformance_native_on_gpu():
+  rows = conformance.run(["native"], ["single", "vmap"], quick=True)
+  assert rows and all(r["status"] == "pass" for r in rows), rows
+
+
+@pytest.mark.gpu(4)
+def test_conformance_native_on_4_gpus():
+  rows = conformance.run(["native"], ["sharded", "manual"], quick=True)
+  assert rows and all(r["status"] == "pass" for r in rows), rows
+
+
+_QUANTIZED = pytest.mark.parametrize("provider, qtype", [
     ("xla_fp8", "f8E4M3FN"), ("xla_mxfp8", "f8E4M3FN"), ("xla_mxfp4", "f4E2M1FN")])
-def test_xla_quantized_on_cpu(provider, qtype):
-  rows = conformance.run([provider], ["single", "sharded"], quick=True,
-                         ops_filter={"linear", "swiglu"})
+
+
+def _check_quantized(provider, qtype, modes, quick):
+  rows = conformance.run([provider], modes, quick=quick, ops_filter={"linear", "swiglu"})
   assert rows and all(r["status"] == "pass" for r in rows), rows
   x, w = jnp.ones((64, 256), jnp.bfloat16), jnp.ones((256, 128), jnp.bfloat16)
   with ops.policy(f"linear={provider}"):
     assert qtype in jax.jit(lambda x, w: ops.linear(x, w)).lower(x, w).as_text()
+
+
+@_QUANTIZED
+def test_xla_quantized_on_cpu(provider, qtype):
+  _check_quantized(provider, qtype, ["single", "sharded"], quick=True)
+
+
+@pytest.mark.gpu
+@_QUANTIZED
+def test_xla_quantized_on_gpu(provider, qtype):
+  # The Llama 3.1 8B sizes of the conformance cases.
+  _check_quantized(provider, qtype, ["single"], quick=False)
 
 
 @pytest.mark.patched_stack
