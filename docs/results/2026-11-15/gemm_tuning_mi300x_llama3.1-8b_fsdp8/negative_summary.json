@@ -1,0 +1,27 @@
+{
+ "bad_git": {
+  "rows": 2,
+  "hit": 0,
+  "miss": 2,
+  "absent": 0,
+  "git_mismatch_logged": false,
+  "as_expected": true
+ },
+ "bad_key": {
+  "rows": 2,
+  "hit": 1,
+  "miss": 0,
+  "absent": 1,
+  "git_mismatch_logged": false,
+  "as_expected": true
+ },
+ "cache_hit": {
+  "rows": 2,
+  "hit": 2,
+  "miss": 0,
+  "absent": 0,
+  "git_mismatch_logged": false,
+  "as_expected": true,
+  "log_mentions_cache": true
+ }
+}

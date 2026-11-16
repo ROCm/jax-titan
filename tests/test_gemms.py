@@ -345,3 +345,69 @@ def test_compiled_scan_counts_each_layer():
   assert shapes == [(64, 256, 256, "MK,KN", "fwd", 3), (64, 256, 256, "MK,NK", "bwd", 3),
                     (256, 256, 64, "KM,KN", "bwd", 3)]
   assert all(s["source"].startswith("test_gemms.py:") and s["source"].endswith(".layer") for s in sites)
+
+
+def test_kernel_times_tag_launches_a_collective_overlaps():
+  from jax_titan.observability import profile  # pylint: disable=g-import-not-at-top
+
+  events = {0: [
+      {"name": "Cijk_gemm", "start_ns": 0, "end_ns": 100, "hlo_module": "jit_step", "hlo_op": "custom-call.1"},
+      {"name": "ncclDevKernel_AllGather", "start_ns": 50, "end_ns": 150},
+      {"name": "Cijk_gemm", "start_ns": 200, "end_ns": 300, "hlo_module": "jit_step", "hlo_op": "custom-call.1"},
+      {"name": "loop_fusion", "start_ns": 300, "end_ns": 310, "hlo_module": "jit_step", "hlo_op": "fusion.2"},
+      {"name": "__amd_rocclr_copyBuffer", "start_ns": 310, "end_ns": 320},
+  ]}
+  out = profile.kernel_times(events)
+  assert [(k["kernel"], k["rccl_overlap"]) for k in out] == [
+      ("Cijk_gemm", 0.5), ("Cijk_gemm", 0.0), ("loop_fusion", 0.0)]
+  assert out[0]["hlo_op"] == "custom-call.1" and out[0]["dur_ns"] == 100
+
+
+def test_times_join_launches_to_sites_by_module_and_op():
+  sites = [{"module": "jit_step", "kernel": "custom-call.1", "count": 4, "flops": 2e9},
+           {"module": "jit_step", "kernel": "custom-call.2", "count": 4, "flops": 2e9}]
+  launches = [{"hlo_module": "jit_step", "hlo_op": "custom-call.1", "kernel": "Cijk_a",
+               "dur_ns": d, "rccl_overlap": o}
+              for d, o in ((1000, 0.0), (1100, 0.0), (1500, 0.9), (1600, 0.8))]
+  launches.append({"hlo_module": "jit_step", "hlo_op": "fusion.7", "kernel": "f", "dur_ns": 5,
+                   "rccl_overlap": 0.0})
+  info = gemms.attach_times(sites, {"steps": 2, "launches": launches})
+  t = sites[0]["time"]
+  assert (info["kernels_matched"], info["unmatched_hlo_ops"]) == (1, 1)
+  assert t["launches"] == 4 and t["launches_per_step"] == 2
+  assert t["median_us"] == pytest.approx(1.3)
+  assert t["clean"]["median_us"] == pytest.approx(1.05) and t["overlapped"]["median_us"] == pytest.approx(1.55)
+  assert t["ms_per_step"] == pytest.approx(5.2e-3 / 2)
+  assert "time" not in sites[1]
+
+
+# A weight-gradient GEMM that XLA writes into a slice of the scan's stacked
+# gradients: hipBLASLt inside a dynamic-slice fusion, as XLA dumps it.
+SLICE_FUSION_MODULE = f"""HloModule jit_step, is_scheduled=true
+
+%dynamic-slice-fusion.2 (p0.2: bf16[32,8192,4096], p1.2: s32[], p2.2: bf16[8192,1024]) -> (bf16[4096,1024], s8[1024]) {{
+  %p0.2 = bf16[32,8192,4096]{{2,1,0}} parameter(0)
+  %p1.2 = s32[] parameter(1)
+  %p2.2 = bf16[8192,1024]{{1,0}} parameter(2)
+  %slice.1 = bf16[1,8192,4096]{{2,1,0}} dynamic-slice(%p0.2, %p1.2, %p1.2, %p1.2), dynamic_slice_sizes={{1,8192,4096}}
+  %bitcast.1 = bf16[8192,4096]{{1,0}} bitcast(%slice.1)
+  ROOT %custom-call.36 = (bf16[4096,1024]{{1,0}}, s8[1024]{{0}}) custom-call(%bitcast.1, %p2.2), custom_call_target="__cublas$lt$matmul", metadata={{op_name="jit(step)/transpose(jvp())/while/body/transpose"}}, backend_config={_GEMM_CONFIG % (0, 0, "", "")}
+}}
+
+ENTRY %main (a: bf16[32,8192,4096], i: s32[], g: bf16[8192,1024]) -> (bf16[4096,1024], s8[1024]) {{
+  %a = bf16[32,8192,4096]{{2,1,0}} parameter(0)
+  %i = s32[] parameter(1)
+  %g = bf16[8192,1024]{{1,0}} parameter(2)
+  ROOT %dynamic_slice_fusion.2 = (bf16[4096,1024]{{1,0}}, s8[1024]{{0}}) fusion(%a, %i, %g), kind=kCustom, calls=%dynamic-slice-fusion.2, backend_config={{"fusion_backend_config":{{"kind":"__custom_fusion","custom_fusion_config":{{"name":"dynamic_address_computation"}}}}}}
+}}
+"""
+
+
+def test_library_gemm_in_a_slice_fusion_joins_launches_by_its_own_name():
+  (s,) = gemms.gemms(gemms.Module(SLICE_FUSION_MODULE, platform="rocm"))
+  assert (s["kernel"], s["trace_op"], s["library"]) == ("dynamic_slice_fusion.2", "custom-call.36", "hipBLASLt")
+  assert (s["m"], s["n"], s["k"], s["layout"], s["pass"]) == (4096, 1024, 8192, "KM,KN", "bwd")
+  launches = [{"hlo_module": "jit_step", "hlo_op": "custom-call.36", "kernel": "Cijk_w",
+               "dur_ns": 2000, "rccl_overlap": 0.0}]
+  info = gemms.attach_times([s], {"steps": 1, "launches": launches})
+  assert info["kernels_matched"] == 1 and s["time"]["median_us"] == pytest.approx(2.0)

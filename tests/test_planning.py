@@ -238,3 +238,11 @@ def test_from_run_carries_measured_throughput(tmp_path):
   assert other["mfu"] == pytest.approx(run["mfu"])
   assert other["mfu_source"].startswith("carried over")
   assert math.isclose(same["memory"]["overhead"], run["memory_overhead"])
+
+
+@pytest.mark.parametrize("name, flops_per_clock", [("MI300X", 2048), ("MI325X", 2048),
+                                                   ("MI350X", 4096), ("MI355X", 4096)])
+def test_cus_and_clock_reproduce_the_bf16_peak(name, flops_per_clock):
+  gpu = gpus.get(name)
+  assert gpu.cus * gpu.clock_ghz * 1e9 * flops_per_clock / 1e12 == pytest.approx(gpu.bf16_tflops, rel=1e-3)
+  assert gpu.peak_tflops_at("bf16", gpu.clock_ghz / 2) == pytest.approx(gpu.bf16_tflops / 2)

@@ -1,7 +1,9 @@
 """Triton and Gluon ops through jax-triton, from the third_party/jax-triton submodule.
 
 `aiter()` gives AITER's Triton RMSNorm, SiLU-and-mul (for `swiglu`, after one
-GEMM over the stacked gate and up weights) and RoPE kernels. `gluon()` gives
+GEMM over the stacked gate and up weights), RoPE and BF16 GEMM (for `linear`,
+with AITER's tiles for the shape and the backward GEMMs reading the forward's
+operands in place) kernels. `gluon()` gives
 the gfx950 inter-wave Gluon BF16 GEMM of gfx950-gluon-tutorials for `linear`
 and the three GEMMs of `swiglu`. `_kernel_sources` says where kernels come from.
 
@@ -351,6 +353,84 @@ def gluon_swiglu(x, w_gate, w_up, w_down):
   return linear(jax.nn.silu(linear(x, w_gate)) * linear(x, w_up), w_down)
 
 
+# AITER Triton GEMM: c [m, n] = a [m, k] times b [k, n], either operand stored
+# transposed, with AITER's tiles for the shape.
+
+
+@functools.cache
+def _a16w16_config(m: int, n: int, k: int) -> tuple:
+  """AITER's tiles for this n and k (else its defaults) at m rows, without split-K."""
+  folder = f"{_arch()}/triton/gemm/gemm_a16w16"
+  try:
+    configs = _kernel_sources.aiter_config(f"{folder}/GEMM-A16W16-N={n}-K={k}.json")
+  except FileNotFoundError:
+    configs = _kernel_sources.aiter_config(f"{folder}/DEFAULT.json")
+  leq = sorted(int(key[6:]) for key in configs if key.startswith("M_LEQ_"))
+  geq = sorted((int(key[6:]) for key in configs if key.startswith("M_GEQ_")), reverse=True)
+  key = next((f"M_LEQ_{b}" for b in leq if m <= b), None) or next(
+      (f"M_GEQ_{b}" for b in geq if m >= b), "any")
+  config = dict(configs[key])
+  config["BLOCK_SIZE_K"] = min(config["BLOCK_SIZE_K"], triton.next_power_of_2(k))
+  return tuple(sorted(config.items()))
+
+
+def triton_matmul(a, b, params):
+  """a [m, k] (stored [k, m] if trans_a) times b [k, n] (stored [n, k] if trans_b)."""
+  trans_a, trans_b = params
+  m, k = a.shape[::-1] if trans_a else a.shape
+  n = b.shape[0] if trans_b else b.shape[1]
+  config = dict(_a16w16_config(m, n, k))
+  bm, bn, bk = config["BLOCK_SIZE_M"], config["BLOCK_SIZE_N"], config["BLOCK_SIZE_K"]
+  return jt.triton_call(
+      a, b, kernel=_triton_gemm().a16w16, M=m, N=n, K=k,
+      stride_am=1 if trans_a else k, stride_ak=m if trans_a else 1,
+      stride_bk=1 if trans_b else n, stride_bn=k if trans_b else 1,
+      BLOCK_SIZE_M=bm, BLOCK_SIZE_N=bn, BLOCK_SIZE_K=bk, GROUP_SIZE_M=config["GROUP_SIZE_M"],
+      EVEN_K=k % bk == 0, EVEN_MN=m % bm == 0 and n % bn == 0,
+      cache_modifier=config.get("cache_modifier"), num_warps=config["num_warps"],
+      num_stages=config["num_stages"],
+      backend_options={o: config[o] for o in ("waves_per_eu", "matrix_instr_nonkdim", "kpack")
+                       if o in config},
+      grid=(triton.cdiv(m, bm) * triton.cdiv(n, bn),), out_type=_out((m, n), a.dtype))
+
+
+_mm_nn = partitioned(triton_matmul, (("r", "k"), ("k", "c")), (("r", "c"),))
+_mm_nt = partitioned(triton_matmul, (("r", "k"), ("c", "k")), (("r", "c"),))
+_mm_tn = partitioned(triton_matmul, (("k", "r"), ("k", "c")), (("r", "c"),))
+
+
+@jax.custom_vjp
+def _triton_linear_2d(x, w):
+  return _mm_nn(x, w, (False, False))
+
+
+def _triton_linear_2d_fwd(x, w):
+  return _triton_linear_2d(x, w), (x, w)
+
+
+def _triton_linear_2d_bwd(residuals, dy):
+  x, w = residuals
+  return _mm_nt(dy, w, (False, True)), _mm_tn(x, dy, (True, False))
+
+
+_triton_linear_2d.defvjp(_triton_linear_2d_fwd, _triton_linear_2d_bwd)
+
+
+def triton_linear(x, w):
+  y = _triton_linear_2d(x.reshape(-1, x.shape[-1]), w.astype(x.dtype))
+  return y.reshape(*x.shape[:-1], w.shape[-1])
+
+
+def _triton_linear_supports(x, w):
+  if registry.under_vmap(x, w):
+    return _VMAP
+  if x.dtype != jnp.bfloat16:
+    return f"needs bf16 x, not {x.dtype}"
+  if w.ndim != 2:
+    return "needs a 2-D weight"
+  return None
+
+
 def _rms():
   return _kernel_sources.aiter_kernels("normalization.rmsnorm")
 
@@ -371,6 +451,10 @@ def _gluon_gemm():
   return importlib.import_module("jax_titan.ops.providers._gluon_gemm")
 
 
+def _triton_gemm():
+  return importlib.import_module("jax_titan.ops.providers._triton_gemm")
+
+
 def _require_rocm():
   platform = jax.devices()[0].platform
   if platform != "gpu":
@@ -379,11 +463,12 @@ def _require_rocm():
 
 def aiter():
   _require_rocm()
-  _rms(), _rms_norm_kernels(), _act(), _rope_kernels()
+  _rms(), _rms_norm_kernels(), _act(), _rope_kernels(), _triton_gemm()
   return {
       "rms_norm": Impl(rms_norm, "AITER Triton RMSNorm", _rms_norm_supports),
       "swiglu": Impl(swiglu, "AITER Triton SiLU-and-mul with XLA GEMMs", _swiglu_supports),
       "rope": Impl(rope, "AITER Triton RoPE", _rope_supports),
+      "linear": Impl(triton_linear, "AITER Triton BF16 GEMM", _triton_linear_supports),
   }
 
 

@@ -1,0 +1,7 @@
+Git Version: 39d8d603
+transA,transB,batch_count,m,n,k,a_type,b_type,c_type,compute_type,solution_index
+N,T,1,6144,4096,8192,bf16_r,bf16_r,bf16_r,f32_r,90003
+transA,transB,batch_count,m,n,k,a_type,b_type,c_type,compute_type,solution_index
+N,N,1,128256,8192,4096,bf16_r,bf16_r,f32_r,f32_r,99576
+transA,transB,batch_count,m,n,k,a_type,b_type,c_type,compute_type,solution_index
+T,N,1,4096,8192,1024,bf16_r,bf16_r,bf16_r,f32_r,90495

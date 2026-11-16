@@ -17,6 +17,14 @@ WHEELS=${WHEELS:-jax,jaxlib,jax-rocm-plugin,jax-rocm-pjrt}
 BAZEL_CPUS=${BAZEL_CPUS:-160}
 ROCM_DISTRO_URL=${ROCM_DISTRO_URL:-https://stable.repo.amd.com/rocm/core/tarball/therock-dist-linux-multiarch-10.0.0.tar.gz}
 ROCM_DISTRO_HASH=${ROCM_DISTRO_HASH:-1c5e807875d26a2470ecc7323daa5b5b9009208a55c3290ac255a909cde15fc6}
+# More Bazel options, space separated. XLA from 2026-11-13 builds its Triton as
+# C++20, which needs "--cxxopt=-std=c++20 --host_cxxopt=-std=c++20
+# --repo_env=SYSROOT_DIST=linux_glibc_2_35".
+BAZEL_EXTRA=${BAZEL_EXTRA:-}
+extra=()
+for option in ${BAZEL_EXTRA}; do
+  extra+=("--bazel_options=${option}")
+done
 
 cd "${JAX_SRC}"
 mkdir -p dist
@@ -34,6 +42,7 @@ python3 build/build.py build \
   --bazel_options=--repo_env=ROCM_DISTRO_HASH="${ROCM_DISTRO_HASH}" \
   --bazel_options=--repo_env=TF_ROCM_AMDGPU_TARGETS="${AMDGPU_TARGETS}" \
   --bazel_options=--local_resources=cpu="${BAZEL_CPUS}" \
+  "${extra[@]}" \
   --bazel_startup_options="--bazelrc=build/rocm/rocm.bazelrc" \
   --bazel_startup_options="--output_user_root=${BAZEL_ROOT}"
 
