@@ -1,10 +1,10 @@
 # Copyright Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 #
-# The versions of the packages that the CPU jobs of .github/workflows/ci.yml
-# install, taken from the job "CPU tests (JAX built from source)" on
-# 2026-11-16. jax, jaxlib and shardy-mpmd are pinned in the workflow and
-# MaxDiffusion by its adapter's PINNED_COMMIT.
+# The versions of the packages that the jobs of .github/workflows/ci.yml
+# install, taken from the job "CPU tests" on 2026-11-16. jax, jaxlib and
+# shardy-mpmd are pinned in the workflow and MaxDiffusion by its adapter's
+# PINNED_COMMIT.
 #
 # To update: install as that job does, without -c, in a new Python 3.12
 # environment, and replace the lines below with the output of

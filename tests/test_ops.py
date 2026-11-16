@@ -182,7 +182,6 @@ def test_xla_quantized_on_gpu(provider, qtype):
   _check_quantized(provider, qtype, ["single"], quick=False)
 
 
-@pytest.mark.patched_stack
 def test_trainer_records_ops(tmp_path):
   log = tmp_path / "log.jsonl"
   result = subprocess.run(
