@@ -74,6 +74,18 @@ def test_generated_configs_get_boolean_transposes(tmp_path):
   assert doc["LibraryLogic"]["ArchitectureName"] == "gfx942"
 
 
+def test_a_problem_called_with_beta_1_is_timed_with_beta_1(tmp_path):
+  path = tmp_path / "tuning_template.1.yaml"
+  problem = [{"TransposeA": 0, "TransposeB": 0},
+             {"BenchmarkFinalParameters": [{"ProblemSizes": [{"Exact": [4096, 8192, 1, 14336]}]}]}]
+  path.write_text(yaml.dump({"BenchmarkProblems": [problem], "GlobalParameters": {"DataInitTypeBeta": 0}}))
+  tensilelite._fix_types(path, {(4096, 8192, 1, 14336): 1.0})
+  assert yaml.safe_load(path.read_text())["GlobalParameters"]["DataInitTypeBeta"] == 1
+  path.write_text(yaml.dump({"BenchmarkProblems": [problem], "GlobalParameters": {"DataInitTypeBeta": 0}}))
+  tensilelite._fix_types(path, {(4096, 8192, 1, 14336): 0.0})
+  assert yaml.safe_load(path.read_text())["GlobalParameters"]["DataInitTypeBeta"] == 0
+
+
 def test_config_needs_a_matching_problem(tmp_path):
   log = tmp_path / "hbl_1.log"
   log.write_text(LINE + "\n")

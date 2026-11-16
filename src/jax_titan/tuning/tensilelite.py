@@ -98,22 +98,37 @@ def config(logs, src, out_dir, only="", gpus=8, iters=100, fast=False, cu=304, x
     cmd += ["--fast", "1"]  # the generator's flags are type=bool: any value turns them on
   env = dict(os.environ, GPU_TARGET="gfx942", CU=str(cu), XCC=str(xcc))
   subprocess.run(cmd, cwd=configs, env=env, check=True)
+  betas = {}
+  for line in lines:
+    a = hipblaslt.parse_bench_line(line)
+    betas[(a["m"], a["n"], a["batch_count"], a["k"])] = float(a.get("beta") or 0)
   paths = sorted(configs.glob("tuning_template.*.yaml"))
   for path in paths:
-    _fix_types(path)
+    _fix_types(path, betas)
   return [str(p) for p in paths]
 
 
-def _fix_types(path) -> None:
+def _fix_types(path, betas=None) -> None:
   """Where the generator and Tensile's config validation disagree: transposes as 0 and 1 instead
-  of booleans, and the architecture as {Architecture, CUCount} instead of its name."""
+  of booleans, and the architecture as {Architecture, CUCount} instead of its name. A config
+  whose problems were called with beta 1 (XLA's residual adds) is timed with beta 1, which
+  reads C; the generator's template initializes beta to 0."""
   import yaml  # pylint: disable=g-import-not-at-top
   doc = yaml.safe_load(pathlib.Path(path).read_text())
+  adds_c = False
   for problem in doc.get("BenchmarkProblems", []):
     problem_type = problem[0]
     for flag in ("TransposeA", "TransposeB"):
       if flag in problem_type:
         problem_type[flag] = bool(problem_type[flag])
+    for step in problem[1:]:
+      for final in (step or {}).get("BenchmarkFinalParameters") or []:
+        for size in (final.get("ProblemSizes") or []):
+          exact = size.get("Exact") if isinstance(size, dict) else None
+          if exact and (betas or {}).get(tuple(exact[:4])):
+            adds_c = True
+  if adds_c:
+    doc.setdefault("GlobalParameters", {})["DataInitTypeBeta"] = 1
   logic = doc.get("LibraryLogic", {})
   if isinstance(logic.get("ArchitectureName"), dict):
     logic["ArchitectureName"] = logic["ArchitectureName"]["Architecture"]
