@@ -47,8 +47,19 @@ def test_read_logic_gives_each_exact_size_its_solution(tmp_path):
   path = tmp_path / "logic.yaml"
   path.write_text(yaml.dump(doc))
   (rec,) = tensilelite.read_logic(path)
-  assert rec["id"] == PID and rec["gflops"] == 650000.0
+  assert rec["id"] == PID and rec["perf"] == 650000.0
   assert rec["solution"].endswith("MT256x256x64") and rec["macro_tile"] == [256, 256, 64]
+  # Tensile itself writes the same parts as a mapping.
+  mapping = {"ProblemType": doc[4], "Solutions": doc[5], "ExactLogic": doc[7], "PerfMetric": "DeviceEfficiency"}
+  path.write_text(yaml.dump(mapping))
+  assert tensilelite.read_logic(path)[0]["id"] == PID
+
+
+def test_benchmark_csv_gives_the_fastest_kernel_per_size(tmp_path):
+  path = tmp_path / "Cijk_Ailk_Bljk_BBS_BH_UserArgs_00.csv"
+  path.write_text("GFlops, SizeI, SizeJ, SizeK, SizeL, LDD, LDC, LDA, LDB, TotalFlops, GbpsBW, MT_a, MT_b\n"
+                  "0, 14336, 8192, 1, 4096, 14336, 14336, 14336, 4096, 962072674304, 0, 600000.0, 648000.5\n")
+  assert tensilelite.read_benchmark(path) == {(14336, 8192, 1, 4096): (648000.5, "MT_b")}
 
 
 def test_generated_configs_get_boolean_transposes(tmp_path):

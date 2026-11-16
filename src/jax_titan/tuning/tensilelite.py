@@ -150,31 +150,65 @@ def _key(problem_type: dict, size: list) -> str:
 
 
 def read_logic(path) -> list[dict]:
-  """Per exact size of a Tensile library logic file: problem id, solution and its GFLOP/s."""
+  """Per exact size of a Tensile library logic file: problem id, solution and its perf value.
+
+  Tensile writes a mapping; the logic files hipBLASLt ships are the older list
+  of the same parts. The perf value is the file's PerfMetric (DeviceEfficiency:
+  GFLOP/s per MHz of peak clock), not GFLOP/s.
+  """
   import yaml  # pylint: disable=g-import-not-at-top
   doc = yaml.safe_load(pathlib.Path(path).read_text())
-  problem_type = next(d for d in doc if isinstance(d, dict) and "OperationType" in d)
-  solutions = next(d for d in doc if isinstance(d, list) and d and isinstance(d[0], dict)
-                   and "SolutionIndex" in d[0])
-  exact = next(d for d in reversed(doc) if isinstance(d, list) and d and isinstance(d[0], list)
-               and len(d[0]) == 2 and isinstance(d[0][0], list))
+  if isinstance(doc, dict):
+    problem_type, solutions, exact = doc["ProblemType"], doc["Solutions"], doc["ExactLogic"] or []
+  else:
+    problem_type = next(d for d in doc if isinstance(d, dict) and "OperationType" in d)
+    solutions = next(d for d in doc if isinstance(d, list) and d and isinstance(d[0], dict)
+                     and "SolutionIndex" in d[0])
+    exact = next(d for d in reversed(doc) if isinstance(d, list) and d and isinstance(d[0], list)
+                 and len(d[0]) == 2 and isinstance(d[0][0], list))
   by_index = {s["SolutionIndex"]: s for s in solutions}
   out = []
-  for size, (index, gflops) in exact:
+  for size, (index, perf) in exact:
     s = by_index.get(index, {})
-    out.append({"id": _key(problem_type, size), "size": size, "gflops": gflops,
+    out.append({"id": _key(problem_type, size), "size": size, "perf": perf,
                 "solution": s.get("SolutionNameMin") or s.get("SolutionName"),
                 "macro_tile": [s.get("MacroTile0"), s.get("MacroTile1"), s.get("DepthU")]})
+  return out
+
+
+def read_benchmark(path) -> dict:
+  """{(m, n, batch, k): (GFLOP/s, solution name)}: the fastest kernel per size in a Tensile
+  2_BenchmarkData CSV, one column per kernel, as Tensile's client timed it."""
+  import csv  # pylint: disable=g-import-not-at-top
+  with open(path) as f:
+    rows = [[c.strip() for c in row] for row in csv.reader(f)]
+  header = rows[0]
+  first = header.index("GbpsBW") + 1
+  sizes = [header.index(c) for c in ("SizeI", "SizeJ", "SizeK", "SizeL")]
+  out = {}
+  for row in rows[1:]:
+    timed = []
+    for i in range(first, len(header)):
+      try:
+        timed.append((float(row[i]), header[i]))
+      except (ValueError, IndexError):
+        continue
+    if timed:
+      out[tuple(int(row[i]) for i in sizes)] = max(timed)
   return out
 
 
 def decode(out_dir, stock=None) -> list[dict]:
   """Tensile's best kernel per tuned size, against the stock solutions the sweep timed."""
   best = {}
-  for path in sorted(pathlib.Path(out_dir).glob("tune/*/3_LibraryLogic/*.yaml")):
-    for rec in read_logic(path):
-      if rec["id"] not in best or rec["gflops"] > best[rec["id"]]["gflops"]:
-        best[rec["id"]] = dict(rec, logic=str(path))
+  for logic in sorted(pathlib.Path(out_dir).glob("tune/*/3_LibraryLogic/*.yaml")):
+    timed = {}
+    for csv_path in logic.parent.parent.glob("2_BenchmarkData/*.csv"):
+      timed.update(read_benchmark(csv_path))
+    for rec in read_logic(logic):
+      gflops = timed.get(tuple(rec["size"][:4]), (None,))[0]
+      if rec["id"] not in best or (gflops or 0) > (best[rec["id"]]["gflops"] or 0):
+        best[rec["id"]] = dict(rec, gflops=gflops, logic=str(logic))
   stock_by_id = {r["id"]: r for r in (stock or {}).get("results", [])}
   rows = []
   for pid, rec in best.items():
@@ -194,12 +228,14 @@ def _typed(pid: str) -> list:
 
 
 def decode_table(rows) -> str:
-  lines = ["| problem | Tensile best kernel | macro tile | Tensile us | stock default us | stock best us |",
-           "|---|---|---|---|---|---|"]
+  """One row per problem; the full kernel names are in decode's JSON."""
+  lines = ["| problem | Tensile best kernel | Tensile us | stock default us | stock best us |",
+           "|---|---|---|---|---|"]
   for r in rows:
     fmt = lambda v: f"{v:.1f}" if v else ""  # noqa: E731
-    lines.append(f"| {r['id']} | {r['solution']} | {'x'.join(str(t) for t in r['macro_tile'])} | "
-                 f"{fmt(r['tensile_us'])} | {fmt(r.get('stock_default_us'))} | {fmt(r.get('stock_best_us'))} |")
+    short = re.search(r"MT\d+x\d+x\d+_MI\d+x\d+x\d+", r["solution"] or "")
+    lines.append(f"| {r['id']} | {short.group(0) if short else r['solution']} | {fmt(r['tensile_us'])} | "
+                 f"{fmt(r.get('stock_default_us'))} | {fmt(r.get('stock_best_us'))} |")
   return "\n".join(lines)
 
 
