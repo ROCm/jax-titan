@@ -86,6 +86,19 @@ def test_a_problem_called_with_beta_1_is_timed_with_beta_1(tmp_path):
   assert yaml.safe_load(path.read_text())["GlobalParameters"]["DataInitTypeBeta"] == 0
 
 
+def test_the_stock_arm_never_loads_the_built_library(monkeypatch):
+  monkeypatch.setenv("HIPBLASLT_TENSILE_LIBPATH", "/somewhere/else")
+  assert "HIPBLASLT_TENSILE_LIBPATH" not in tensilelite._library_env(3)
+  env = tensilelite._library_env(3, "/built/library")
+  assert env["HIPBLASLT_TENSILE_LIBPATH"] == "/built/library" and env["HIP_VISIBLE_DEVICES"] == "3"
+
+
+def test_compare_table_reports_the_change_against_stock():
+  row = {"id": PID, "default_ms": 1.8617, "candidate_ms": 1.7428, "separated": True,
+         "library_kernel": "Cijk_Alik_Bljk_BBS_BH_UserArgs_MT256x192x64_MI16x16x1_SN"}
+  assert "| -6.4% | yes | MT256x192x64_MI16x16x1 |" in tensilelite.compare_table([row])
+
+
 def test_config_needs_a_matching_problem(tmp_path):
   log = tmp_path / "hbl_1.log"
   log.write_text(LINE + "\n")
