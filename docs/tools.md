@@ -37,7 +37,7 @@ processes. The others need the container's TheRock libraries.
 | `container.sh` | host | Starts the TheRock 10.1 development container with all GPUs and a user with your host uid, so files in the workspace keep your owner ([getting_started.md](getting_started.md#1-container)) |
 | `env.sh` | container | Activates the venv; sets TheRock's library path, `PYTHONPATH` and the JAX compilation cache; turns off GPU core dumps; sets `JAX_TITAN_ROCM_XLA_FLAGS` for GPU runs. Source it in every shell |
 | `build_jax_rocm.sh` | container | Builds the jax, jaxlib and ROCm plugin wheels against `${JAX_TITAN_ROOT}/src/xla` and the patched Shardy; `WHEELS=jaxlib` rebuilds only jaxlib ([getting_started.md](getting_started.md#3-build)) |
-| `publish_ci_wheels.sh` | host | Publishes the wheels of the last build (jax, jaxlib and the two ROCm plugin wheels), with Shardy's MPMD package, as a draft GitHub release for CI, and writes their checksums to `.github/ci-wheels.sha256`. Run it after a build with a new revision or patch. Needs `gh` |
+| `publish_ci_wheels.sh` | host | Publishes the wheels of the last build (jax, jaxlib and the two ROCm plugin wheels), with Shardy's MPMD package, as a draft GitHub release for CI, and writes their checksums to `.github/ci-wheels.sha256`. Run it after a build with a new revision or patch. Needs `gh` ([ci.md](ci.md#new-wheels)) |
 | `build_jax_aiter.sh` | container | Builds JAX-AITER from its submodule against the installed jaxlib, with prebuilt AITER JIT libraries |
 | `build_rccl_inspector.sh` | container | Ports RCCL's Inspector profiler plugin to HIP, for the trainer's `--rccl_inspector` ([metrics.md](metrics.md#recording-a-run)) |
 | `gpus_free.sh` | host | Prints `free` and exits 0 when no process holds a GPU and every GPU is idle; prints what is busy otherwise |
@@ -71,26 +71,9 @@ examples. The planners, and the tools that read a finished run (`summarize`,
 | `ops.conformance` | Operator providers against native JAX: outputs and gradients on one GPU, under `jax.vmap`, sharded, inside `shard_map` and inside an MPMD step, and their timings ([getting_started.md](getting_started.md#5-runs)) |
 
 A test in `tests/` is a CPU test unless it is marked `gpu`, and each of the two
-pytest commands above runs one kind:
-
-```python
-def test_on_cpu():  # no marker: a CPU test
-  ...
-
-
-@pytest.mark.gpu  # needs one GPU
-def test_on_gpu():
-  ...
-
-
-@pytest.mark.gpu(4)  # needs four GPUs; skipped when --gpus is smaller
-def test_on_4_gpus():
-  ...
-```
-
-CI runs `python -m pytest tests/` on a CPU runner and
-`python -m pytest tests/ --gpus=1` on one gfx950, so a new test joins the right
-job by its marker alone.
+pytest commands above runs one kind. CI runs both, the first on a CPU runner
+and the second on one gfx950: [ci.md](ci.md) has the marker, the two jobs and
+how to update the packages they install.
 
 ### Measuring a run
 
