@@ -124,8 +124,12 @@ jobs:
       - name: Show installed versions
         run: venv/bin/python -m pip freeze
       - name: Run tests
+        env:
+          # Every GEMM on hipBLASLt's first choice. By default XLA times its Triton GEMMs and
+          # hipBLASLt's candidates for each GEMM it compiles: 20 minutes for these tests.
+          XLA_FLAGS: --xla_gpu_autotune_level=0 --xla_gpu_enable_triton_gemm=false
         run: |
           # The ROCm plugin wheels do not bundle ROCm; they load the container's TheRock libraries.
           root=$(rocm-sdk path --root)
           export LD_LIBRARY_PATH="$root/lib:$root/lib/rocm_sysdeps/lib"
-          venv/bin/python -m pytest tests/ --gpus=1
+          venv/bin/python -m pytest tests/ --gpus=1 -rfEsP --durations=0
