@@ -15,12 +15,11 @@ jaxlib compiles Shardy's MPMD partitioner from the Shardy source tree, so
 `scripts/build_jax_rocm.sh` builds against the patched `shardy` worktree
 instead of the archive XLA pins.
 
-CI runs the tests on wheels built with the jaxlib and Shardy patches, from the
-release that `.github/workflows/ci.yml` names. After changing one of them, or
-a revision in `scripts/setup_sources.sh`, build again and publish new wheels
-with `scripts/publish_ci_wheels.sh`. The MaxDiffusion patches need no such
-step: every CI run applies them to a new checkout of the commit that
-`PINNED_COMMIT` names in the adapter.
+CI runs the tests on wheels built with the jaxlib and Shardy patches. After
+changing one of them, or a revision in `scripts/setup_sources.sh`, publish new
+wheels ([docs/ci.md](../../docs/ci.md#new-wheels)), or CI keeps testing the
+old build. The MaxDiffusion patches need no such step: every CI run applies
+them to a new checkout.
 
 The XLA patch that accepted the ROCm platform in the IFRT IR atom program
 passes is gone: it landed upstream as
