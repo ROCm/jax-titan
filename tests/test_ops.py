@@ -4,6 +4,7 @@ import json
 import pathlib
 import subprocess
 import sys
+import types
 
 import jax
 import jax.numpy as jnp
@@ -137,7 +138,10 @@ def test_partitioned_contraction_is_summed_or_gathered():
 
 
 def test_triton_providers_fall_back_off_gpu():
-  ops.set_policy("rms_norm=triton,rope=triton,linear=gluon")
+  ops.set_policy(
+      "rms_norm=triton,rope=triton,"
+      "linear=gluon:gluon_intra_mfma_on:gluon_intra_mfma_off"
+  )
   x = jnp.ones((2, 8, 4, 16))
   ops.rms_norm(x, jnp.ones(16), 1e-6)
   ops.rope(x, jnp.ones((8, 8)), jnp.zeros((8, 8)))
@@ -145,6 +149,99 @@ def test_triton_providers_fall_back_off_gpu():
   for s in ops.selections():
     assert s.provider == "native"
     assert s.skipped[0][0] in ("triton", "gluon") and s.skipped[0][1], s
+
+
+def test_gluon_routes_pass_distinct_compiler_options(monkeypatch):
+  from jax_titan.ops.providers import triton as provider  # pylint: disable=g-import-not-at-top
+
+  kernels = types.SimpleNamespace(a16w16_inter=object(), a16w16_intra=object())
+  monkeypatch.setattr(provider, "_gluon_gemm", lambda: kernels)
+  monkeypatch.setattr(provider.jt, "triton_call", lambda **kwargs: kwargs)
+  a = jax.ShapeDtypeStruct((256, 256), jnp.bfloat16)
+  b = jax.ShapeDtypeStruct((256, 256), jnp.bfloat16)
+
+  inter = provider._gemm_local(a, b, ("inter", ""))
+  assert inter["kernel"] is kernels.a16w16_inter and inter["num_warps"] == 8
+  assert inter["backend_options"]["llvm_fn_attrs"]
+  on = provider._gemm_local(a, b, ("intra", "mfma-schedule"))
+  off = provider._gemm_local(a, b, ("intra", ""))
+  assert on["kernel"] is kernels.a16w16_intra and on["num_warps"] == 4
+  assert on["backend_options"]["schedule_hint"] == "mfma-schedule"
+  assert off["backend_options"]["schedule_hint"] == ""
+
+
+def test_gemm_bench_maps_ops_providers_to_training_roles():
+  from jax_titan.observability import gemm_bench  # pylint: disable=g-import-not-at-top
+
+  provider = types.SimpleNamespace(linear=lambda x, w: x @ w)
+  cases = [
+      ("MK,KN", 3, 5, (3, 4), (4, 5), lambda a, b: a @ b, "forward"),
+      ("MK,NK", 3, 4, (3, 5), (4, 5), lambda a, b: a @ b.T, "dgrad"),
+      ("KM,KN", 4, 5, (3, 4), (3, 5), lambda a, b: a.T @ b, "wgrad"),
+  ]
+  for layout, m, n, a_shape, b_shape, reference, role in cases:
+    a, b = jnp.arange(np.prod(a_shape), dtype=jnp.float32).reshape(a_shape), (
+        jnp.arange(np.prod(b_shape), dtype=jnp.float32).reshape(b_shape)
+    )
+    fn, got_role = gemm_bench._ops_fn(jax, jnp, provider, layout, m, n)
+    np.testing.assert_allclose(jax.jit(fn)(a, b), reference(a, b))
+    assert got_role == role
+
+
+def test_gemm_bench_reports_per_problem_and_weighted_speedups():
+  from jax_titan.observability import gemm_bench  # pylint: disable=g-import-not-at-top
+
+  rows = [
+      {"problem": "a", "backend": "base", "ms": 2.0, "flops": 2e12,
+       "launches_per_step": 3},
+      {"problem": "a", "backend": "candidate", "ms": 1.0, "flops": 2e12,
+       "launches_per_step": 3},
+      {"problem": "b", "backend": "base", "ms": 4.0, "flops": 4e12,
+       "launches_per_step": 1},
+      {"problem": "b", "backend": "candidate", "ms": 8.0, "flops": 4e12,
+       "launches_per_step": 1},
+  ]
+  gemm_bench.annotate_speedups(rows, "base")
+  assert [row["speedup"] for row in rows] == [1.0, 2.0, 1.0, 0.5]
+  summaries = {row["backend"]: row for row in gemm_bench.summarize(
+      rows, ["base", "candidate"], "base"
+  )}
+  candidate = summaries["candidate"]
+  assert candidate["problems"] == candidate["problems_total"] == 2
+  assert candidate["modeled_speedup"] == pytest.approx(10 / 11)
+  assert candidate["effective_tflops"] == pytest.approx(10e12 / 0.011 / 1e12)
+
+
+def test_gemm_bench_requires_distinct_transformed_mfma_ir():
+  from jax_titan.observability import gemm_bench  # pylint: disable=g-import-not-at-top
+
+  compiler = {"revision": "3b0c7f"}
+
+  def row(backend, hint, barriers, digest):
+    return {
+        "problem": "gemm", "backend": backend, "ms": 1.0,
+        "scheduler_proof": {
+            "schedule_hint": hint, "barrier_calls": barriers,
+            "llir_sha256": digest, "compiler": compiler,
+        },
+    }
+
+  rows = [
+      row("ops:gluon_intra_mfma_on", "mfma-schedule", 4, "on"),
+      row("ops:gluon_intra_mfma_off", "", 0, "off"),
+  ]
+  assert gemm_bench.scheduler_ab_checks(rows) == [{
+      "problem": "gemm", "status": "pass", "reason": "",
+      "on_llir_sha256": "on", "off_llir_sha256": "off",
+      "on_barrier_calls": 4, "off_barrier_calls": 0,
+  }]
+
+  rows[1]["scheduler_proof"]["llir_sha256"] = "on"
+  [failed] = gemm_bench.scheduler_ab_checks(rows)
+  assert failed["status"] == "fail"
+  assert "identical" in failed["reason"]
+  gemm_bench._gate_failed_scheduler_pairs(rows, [failed])
+  assert all("ms" not in candidate for candidate in rows)
 
 
 def test_conformance_native_on_cpu():

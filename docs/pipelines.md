@@ -286,7 +286,8 @@ with MaxText's attention (`attention=dot_product`) unless the row says TE:
 
 `--ops` routes semantic ops to ROCm TE (the 2026-11-02 nightly wheel),
 JAX-AITER (the `third_party/jax-aiter` submodule, built by
-`scripts/build_jax_aiter.sh`), or through JAX-Triton 0.5.0 and Triton 3.9.0
+`scripts/build_jax_aiter.sh`), or through JAX-Triton 0.5.0 and the
+`gfx950-tutorial-v3.0` Triton source build
 to AITER's Triton kernels (`triton`) and the inter-wave Gluon BF16 GEMM of
 gfx950-gluon-tutorials (`gluon`); everything else stays native JAX. Before
 any training run, `python -m jax_titan.ops.conformance` checked every op

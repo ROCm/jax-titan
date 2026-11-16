@@ -15,7 +15,7 @@ selection, which needs no code change, is in [gemm_tuning.md](gemm_tuning.md).
 | Vendor library | JAX-AITER BF16 ASM GEMM | `jax_aiter.gemm.gemm`, an FFI call with autodiff and sharding rules | A JAX-AITER build per ROCm and GPU; K a multiple of 64 |
 | Vendor library | Transformer Engine GEMM | `ops` provider `te` (`linear`) | TE wheels per ROCm; hipBLASLt underneath |
 | Own kernel | Triton (AITER's BF16 GEMM) | jax-triton `triton_call`, `ops` provider `triton` (`linear`) | Triton and jax-triton versions; sharding and autodiff rules you write |
-| Own kernel | Gluon | jax-triton, `ops` provider `gluon` (gfx950 only) | As Triton, plus layouts written per architecture |
+| Own kernel | Gluon | jax-triton, `ops` providers `gluon`, `gluon_intra_mfma_on` and `gluon_intra_mfma_off` (gfx950 only) | As Triton, plus layouts written per architecture |
 | Own kernel | FlyDSL | Exported ahead of time to a C object, called through XLA's FFI, `ops` provider `flydsl` | A build step per shape set; your FFI handler; sharding and autodiff rules |
 
 Own kernels pay off only when they beat the library on the shapes that
@@ -32,6 +32,7 @@ not just alone.
 
 ```bash
 source scripts/env.sh
+scripts/install_gfx950_triton.sh
 python -m jax_titan.ops.providers.flydsl build OUT/flydsl --shapes 14336x4096,4096x14336
 OVERRIDE=tuning.txt JAX_TITAN_FLYDSL_LIB=OUT/flydsl/libjax_titan_flydsl.so \
   JAX_AITER_ROOT=third_party/jax-aiter \
@@ -44,7 +45,44 @@ caches, and checks every result against an f32 GEMM. A GEMM stored with an
 operand transposed (an activation or weight gradient) runs in that layout:
 backends that need another layout pay for the transposes in the timed program
 and say how many (`nT` in the table). `flydsl_kernel` converts the inputs
-before timing, for the kernel alone.
+before timing, for the kernel alone. An `ops:<provider>` backend uses
+`ops.linear` directly for `MK,KN`, and its VJP for `MK,NK` activation gradients
+and `KM,KN` weight gradients; fallback to another provider is reported as a
+skip rather than timed under the requested name.
+
+The legacy `gluon` provider is the tutorial's 8-wave inter-wave kernel.
+`gluon_intra_mfma_on` and `gluon_intra_mfma_off` use the same 4-wave
+intra-wave v9 kernel with Triton's `mfma-schedule` hint enabled and disabled.
+The amdgcnas plugin stays off, so this pair changes only MFMASchedule. These
+benchmarks require Triton tag `gfx950-tutorial-v3.0` at revision `3b0c7f081`;
+PyPI Triton 3.9.0 accepts the hint but does not run the pass.
+
+Every intra-wave specialization is gated on its post-pass LLVM IR. The enabled
+artifact must contain `llvm.amdgcn.sched.barrier` calls, the disabled artifact
+must contain none, and their SHA-256 hashes must differ. The barrier counts,
+hashes, compiler version and compiler revision are stored under
+`scheduler_proof` in every row of `backends.json`; `scheduler_ab` records the
+cross-provider check. A missing or ineffective transformation is reported as a
+skip and makes `compare_gemm_backends.sh` fail instead of publishing a timing.
+
+`backends.md` lists every problem's median, trial interval, TFLOP/s and
+speedup against `BASELINE` (`xla_hipblaslt` by default). Its final table
+combines the same rows with the actual HLO `launches_per_step`:
+
+```text
+modeled speedup = sum(baseline_ms * launches) / sum(candidate_ms * launches)
+effective TFLOP/s = sum(FLOPs * launches) / sum(candidate_seconds * launches)
+```
+
+Coverage is printed beside each overall result; a provider missing a problem
+is never compared as if it covered the full step. To remove cross-GPU clock
+variation, put the desired backends in one semicolon group so they run
+sequentially on one GPU:
+
+```bash
+BACKEND_GROUPS='xla_hipblaslt,ops:te,ops:gluon,ops:gluon_intra_mfma_on,ops:gluon_intra_mfma_off' \
+  scripts/compare_gemm_backends.sh problems.json OUT/backends
+```
 
 ## Putting a kernel into a model
 

@@ -11,6 +11,7 @@
 #   BACKEND_GROUPS  semicolon-separated backend groups, one GPU each (default below)
 #   TRIALS          trials per backend (default 3); TRIALS_SLOW for XLA's Triton
 #                   backends, whose exhaustive tiling search compiles slowly (default 2)
+#   BASELINE        backend for per-problem and modeled speedups (default xla_hipblaslt)
 #   OVERRIDE        hipBLASLt override file: without it xla_hipblaslt_tuned is dropped
 #   JAX_TITAN_FLYDSL_LIB  library from `python -m jax_titan.ops.providers.flydsl build`
 #                   covering the problems: without it the flydsl backends are dropped
@@ -25,9 +26,11 @@ PROBLEMS=$(realpath "$1")
 OUT=$(realpath -m "$2")
 TRIALS=${TRIALS:-3}
 TRIALS_SLOW=${TRIALS_SLOW:-2}
-GROUPS_DEFAULT="xla_hipblaslt,xla_hipblaslt_tuned;xla_autotune;xla_triton;xla_auto;triton_gemm;jax_aiter;flydsl,flydsl_kernel;ops:te"
+BASELINE=${BASELINE:-xla_hipblaslt}
+GROUPS_DEFAULT="xla_hipblaslt,xla_hipblaslt_tuned;xla_autotune;xla_triton;xla_auto;triton_gemm;jax_aiter;flydsl,flydsl_kernel;ops:te,ops:gluon,ops:gluon_intra_mfma_on,ops:gluon_intra_mfma_off"
 IFS=';' read -r -a GROUPS_IN <<< "${BACKEND_GROUPS:-${GROUPS_DEFAULT}}"
 mkdir -p "${OUT}"
+rm -f "${OUT}"/group*.json "${OUT}"/group*.log
 
 groups=()
 for g in "${GROUPS_IN[@]}"; do
@@ -50,6 +53,13 @@ if [[ -n ${JAX_AITER_ROOT:-} ]]; then
 fi
 export TRITON_DEFAULT_FP_FUSION=${TRITON_DEFAULT_FP_FUSION:-1}
 
+for g in "${groups[@]}"; do
+  if [[ ,${g}, == *,triton_gemm,* || ,${g}, == *,ops:triton,* || ${g} == *ops:gluon* ]]; then
+    python -m jax_titan.ops.providers._triton_build
+    break
+  fi
+done
+
 pids=()
 for i in "${!groups[@]}"; do
   g=${groups[$i]}
@@ -57,7 +67,8 @@ for i in "${!groups[@]}"; do
   [[ ${g} == *xla_triton* || ${g} == *xla_auto* ]] && trials=${TRIALS_SLOW}
   echo "GPU ${i}: ${g} (${trials} trials)"
   python -m jax_titan.observability.gemm_bench "${PROBLEMS}" --backends "${g}" --trials "${trials}" \
-    --gpu "${i}" ${OVERRIDE:+--override "${OVERRIDE}"} --json "${OUT}/group${i}.json" \
+    --gpu "${i}" --baseline "${BASELINE}" ${OVERRIDE:+--override "${OVERRIDE}"} \
+    --json "${OUT}/group${i}.json" \
     > "${OUT}/group${i}.log" 2>&1 &
   pids+=($!)
 done
@@ -65,33 +76,54 @@ rc=0
 for p in "${pids[@]}"; do wait "${p}" || rc=1; done
 [[ ${rc} == 0 ]] || echo "a group failed; see ${OUT}/group*.log" >&2
 
-python3 - "${OUT}" <<'EOF'
+python3 - "${OUT}" "${BASELINE}" <<'EOF'
 import json, pathlib, sys
+from jax_titan.observability import gemm_bench
 out = pathlib.Path(sys.argv[1])
+baseline = sys.argv[2]
 runs = [json.loads(p.read_text()) for p in sorted(out.glob("group*.json"))]
 backends = [b for r in runs for b in r["backends"]]
 rows = [row for r in runs for row in r["rows"]]
-by_problem = {}
-for row in rows:
-  by_problem.setdefault(row["problem"], {})[row["backend"]] = row
-lines = ["| problem | " + " | ".join(backends) + " |", "|---|" + "---|" * len(backends)]
-for pid, cells in by_problem.items():
-  base = cells.get("xla_hipblaslt", {}).get("ms")
-  text = []
-  for b in backends:
-    r = cells.get(b)
-    if not r or "ms" not in r:
-      text.append((r or {}).get("skipped", "failed")[:60] if r else "")
-      continue
-    rel = f" ({r['ms'] / base - 1:+.0%})" if base and b != "xla_hipblaslt" else ""
-    moved = f", {r['transposes']}T" if r.get("transposes") else ""
-    text.append(f"{r['ms']:.3f}{rel}{moved}")
-  lines.append(f"| {pid} | " + " | ".join(text) + " |")
-note = ("Milliseconds per GEMM, median over trials; in brackets, against xla_hipblaslt (hipBLASLt's "
-        "first choice at level 0); nT: operands transposed in the timed program.")
-(out / "backends.md").write_text(note + "\n\n" + "\n".join(lines) + "\n")
-(out / "backends.json").write_text(json.dumps({"backends": backends, "rows": rows}, indent=1) + "\n")
+gemm_bench.annotate_speedups(rows, baseline)
+child_checks = [check for r in runs for check in r.get("scheduler_ab", [])]
+if all(backend in backends for backend in gemm_bench._MFMA_BACKENDS):
+    checks = gemm_bench.scheduler_ab_checks(rows)
+    checked = {check["problem"] for check in checks}
+    expected = {row["problem"] for row in rows}
+    expected.update(check["problem"] for check in child_checks)
+    for problem in sorted(expected - checked):
+        checks.append({
+            "problem": problem, "status": "fail",
+            "reason": "missing both on and off benchmark rows",
+            "on_llir_sha256": None, "off_llir_sha256": None,
+            "on_barrier_calls": None, "off_barrier_calls": None,
+        })
+    if not checks:
+        checks.append({
+            "problem": "all requested problems", "status": "fail",
+            "reason": "no on/off benchmark rows were produced",
+            "on_llir_sha256": None, "off_llir_sha256": None,
+            "on_barrier_calls": None, "off_barrier_calls": None,
+        })
+else:
+    checks = child_checks
+gemm_bench._gate_failed_scheduler_pairs(rows, checks)
+report = {
+    "backends": backends, "baseline": baseline, "rows": rows,
+    "summaries": gemm_bench.summarize(rows, backends, baseline),
+    "scheduler_ab": checks,
+    "scheduler_ab_ok": all(check["status"] == "pass" for check in checks),
+}
+table = gemm_bench.table(report)
+note = (
+    "Per problem: median milliseconds, 95% trial interval, TFLOP/s, and speedup "
+    f"against {baseline}. Overall: dispatch-weighted by launches_per_step."
+)
+(out / "backends.md").write_text(note + "\n\n" + table + "\n")
+(out / "backends.json").write_text(json.dumps(report, indent=1) + "\n")
 print(note)
-print("\n".join(lines))
+print(table)
+if not report["scheduler_ab_ok"]:
+    raise SystemExit(2)
 EOF
 exit ${rc}

@@ -83,14 +83,21 @@ def _modules_while_importing(**modules):
       del sys.modules[name]
 
 
-def gluon_gemm(kind: str) -> types.ModuleType:
-  """The inter-wave Gluon GEMM module for `kind` ("a16w16", "a8w8" or "a4w4")."""
-  name = f"jax_titan_gluon_gemm_{kind}"
+def gluon_gemm(kind: str, route: str = "inter_wave") -> types.ModuleType:
+  """A Gluon GEMM module from the inter- or intra-wave tutorial route."""
+  if route not in ("inter_wave", "intra_wave"):
+    raise ValueError(f"unknown Gluon GEMM route {route!r}")
+  name = f"jax_titan_gluon_gemm_{route}_{kind}"
   if name in sys.modules:
     return sys.modules[name]
   gemm = _root("JAX_TITAN_GLUON_TUTORIALS",
                _REPO / "third_party/gfx950-gluon-tutorials") / "kernels" / "gemm"
+  path = gemm / route / kind
+  if route == "intra_wave":
+    if kind != "a16w16":
+      raise ValueError(f"the JAX-Titan intra-wave provider supports a16w16, not {kind}")
+    path /= "v9_beyond_hotloop"
   common = _load("jax_titan_gluon_gemm_common", gemm / "utils" / "common.py")
   # The kernel files import their shared helpers as `common`.
   with _modules_while_importing(common=common, torch=_torch_placeholder()):
-    return _load(name, gemm / "inter_wave" / kind / "matmul_kernel.py")
+    return _load(name, path / "matmul_kernel.py")

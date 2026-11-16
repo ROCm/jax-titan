@@ -27,9 +27,11 @@ dependencies = [
 test = ["chex", "pytest"]
 # Figures of training runs (jax_titan.observability.plot).
 plots = ["matplotlib>=3.8"]
-# The `triton` and `gluon` operator providers. JAX-Triton itself comes from the
-# third_party/jax-triton submodule; see docs/getting_started.md.
-triton = ["triton>=3.7"]
+# The `triton` and `gluon` operator providers. Triton must be the source build
+# installed by scripts/install_gfx950_triton.sh; an unconstrained PyPI package
+# silently disables the gfx950 MFMASchedule experiment. JAX-Triton itself comes
+# from the third_party/jax-triton submodule.
+triton = []
 # MaxText models (jax_titan.models.adapters.maxtext). The maxtext package
 # declares no dependencies; these are what its model code imports.
 maxtext = [

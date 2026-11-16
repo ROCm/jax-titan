@@ -78,11 +78,17 @@ pip install --no-deps "https://github.com/ROCm/maxtext/releases/download/te-rocm
 # (prebuilt AITER JIT libraries, about two minutes).
 git submodule update --init --recursive third_party/jax-aiter
 scripts/build_jax_aiter.sh
-# Optional, for the Triton and Gluon operators: Triton from PyPI, which has the
-# AMD backend and Gluon, and JAX-Triton from its submodule.
-pip install "triton==3.9.0"
-pip install --no-deps -e third_party/jax-triton
+# Optional, for the Triton and Gluon operators: the exact Triton source used by
+# gfx950-gluon-tutorials, plus JAX-Triton from its submodule. This builds tag
+# gfx950-tutorial-v3.0 (3b0c7f081) with TRITON_EXT_ENABLED=1 and keeps its
+# checkout under ${JAX_TITAN_ROOT}/src for compiler debugging.
+scripts/install_gfx950_triton.sh
 ```
+
+Do not replace that build with PyPI Triton 3.9.0 for kernel benchmarks. Its
+`schedule_hint` field is present but does not invoke the gfx950 MFMASchedule
+pass. Verify an environment at any time with
+`python -m jax_titan.ops.providers._triton_build`.
 
 `--system-site-packages` exposes the container's TheRock `rocm` wheels. In
 every new shell, run `source scripts/env.sh`.
@@ -142,7 +148,9 @@ python -m pytest tests/
 # timings. Run TE and JAX-AITER in separate processes (see docs/pipelines.md).
 python -m jax_titan.ops.conformance --providers=te,te_mxfp8,te_fp8
 python -m jax_titan.ops.conformance --providers=aiter --modes=bench
-python -m jax_titan.ops.conformance --providers=triton,gluon --modes=single,sharded,manual,mpmd,bench
+python -m jax_titan.ops.conformance \
+  --providers=triton,gluon,gluon_intra_mfma_on,gluon_intra_mfma_off \
+  --modes=single,sharded,manual,mpmd,bench
 
 # Llama 3.1 8B, 2 stages x 4 MI355X, zero-bubble schedule, WikiText-103.
 XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" python -m jax_titan.trainer.train \

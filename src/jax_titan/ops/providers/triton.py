@@ -5,7 +5,10 @@ GEMM over the stacked gate and up weights), RoPE and BF16 GEMM (for `linear`,
 with AITER's tiles for the shape and the backward GEMMs reading the forward's
 operands in place) kernels. `gluon()` gives
 the gfx950 inter-wave Gluon BF16 GEMM of gfx950-gluon-tutorials for `linear`
-and the three GEMMs of `swiglu`. `_kernel_sources` says where kernels come from.
+and the three GEMMs of `swiglu`; `gluon_intra_mfma_on()` and
+`gluon_intra_mfma_off()` expose the tutorial's intra-wave v9 kernel with its
+MFMA scheduler enabled and disabled. `_kernel_sources` says where kernels come
+from.
 
 jax-triton has no autodiff or sharding rules, so every kernel launch here is a
 custom_partitioning op inside a custom_vjp.
@@ -286,10 +289,12 @@ def _rope_supports(x, cos, sin):
   return None
 
 
-# Gluon GEMM: a [m, k] times b_t [n, k] transposed, 256x256x64 tiles, two waves per SIMD.
+# Gluon GEMMs: a [m, k] times b_t [n, k] transposed, in 256x256x64 tiles.
 
-_GEMM = {"BLOCK_M": 256, "BLOCK_N": 256, "BLOCK_K": 64, "WARPS_M": 2, "WARPS_N": 4,
-         "NUM_XCDS": 8, "GROUP_SIZE_M": 4}
+_GEMM = {
+    "BLOCK_M": 256, "BLOCK_N": 256, "BLOCK_K": 64,
+    "NUM_XCDS": 8, "GROUP_SIZE_M": 4,
+}
 _GEMM_OPTIONS = {"llvm_fn_attrs": (("amdgpu-agpr-alloc", "0,0"),)}
 
 
@@ -299,40 +304,61 @@ def _gemm_fits(m: int, n: int, k: int) -> bool:
 
 
 def _gemm_local(a, b_t, params):
-  del params
+  route, schedule_hint = params
   (m, k), n = a.shape, b_t.shape[0]
   if not _gemm_fits(m, n, k):
-    return jax.lax.dot_general(a, b_t, (((1,), (1,)), ((), ())))
+    raise ValueError(
+        f"local Gluon GEMM {m}x{n}x{k} is not in 256x256 tiles "
+        "with K a multiple of 128"
+    )
   grid_mn = (m // 256) * (n // 256)
+  source = _gluon_gemm()
+  if route == "inter":
+    kernel = source.a16w16_inter
+    route_args = {"WARPS_M": 2, "WARPS_N": 4}
+    num_warps = 8
+    backend_options = _GEMM_OPTIONS
+  else:
+    kernel = source.a16w16_intra
+    route_args = {}
+    num_warps = 4
+    backend_options = {"schedule_hint": schedule_hint}
   return jt.triton_call(
-      kernel=_gluon_gemm().a16w16, a_ptr=a, b_ptr=b_t, M=m, N=n, K=k, GRID_MN=grid_mn,
-      **_GEMM, num_warps=8, backend_options=_GEMM_OPTIONS, grid=(grid_mn,),
+      kernel=kernel, a_ptr=a, b_ptr=b_t, M=m, N=n, K=k, GRID_MN=grid_mn,
+      **_GEMM, **route_args, num_warps=num_warps, backend_options=backend_options,
+      grid=(grid_mn,),
       out_type=_out((m, n), a.dtype))
 
 
 _gemm = partitioned(_gemm_local, (("r", "k"), ("c", "k")), (("r", "c"),))
 
 
-@jax.custom_vjp
-def _linear_2d(x, w):
-  return _gemm(x, w.T, ())
+def _make_linear(route: str, schedule_hint: str):
+  params = (route, schedule_hint)
+
+  @jax.custom_vjp
+  def linear_2d(x, w):
+    return _gemm(x, w.T, params)
+
+  def linear_2d_fwd(x, w):
+    return linear_2d(x, w), (x, w)
+
+  def linear_2d_bwd(residuals, dy):
+    x, w = residuals
+    return _gemm(dy, w, params), _gemm(x.T, dy.T, params)
+
+  linear_2d.defvjp(linear_2d_fwd, linear_2d_bwd)
+
+  def linear_fn(x, w):
+    y = linear_2d(x.reshape(-1, x.shape[-1]), w.astype(x.dtype))
+    return y.reshape(*x.shape[:-1], w.shape[-1])
+
+  return linear_fn
 
 
-def _linear_2d_fwd(x, w):
-  return _linear_2d(x, w), (x, w)
-
-
-def _linear_2d_bwd(residuals, dy):
-  x, w = residuals
-  return _gemm(dy, w, ()), _gemm(x.T, dy.T, ())
-
-
-_linear_2d.defvjp(_linear_2d_fwd, _linear_2d_bwd)
-
-
-def linear(x, w):
-  y = _linear_2d(x.reshape(-1, x.shape[-1]), w.astype(x.dtype))
-  return y.reshape(*x.shape[:-1], w.shape[-1])
+_LINEAR_INTER = _make_linear("inter", "")
+_LINEAR_INTRA_MFMA_ON = _make_linear("intra", "mfma-schedule")
+_LINEAR_INTRA_MFMA_OFF = _make_linear("intra", "")
 
 
 def _linear_supports(x, *ws):
@@ -349,8 +375,17 @@ def _linear_supports(x, *ws):
   return None
 
 
-def gluon_swiglu(x, w_gate, w_up, w_down):
-  return linear(jax.nn.silu(linear(x, w_gate)) * linear(x, w_up), w_down)
+def _make_gluon_swiglu(linear_fn):
+  def gluon_swiglu(x, w_gate, w_up, w_down):
+    return linear_fn(
+        jax.nn.silu(linear_fn(x, w_gate)) * linear_fn(x, w_up), w_down
+    )
+  return gluon_swiglu
+
+
+_SWIGLU_INTER = _make_gluon_swiglu(_LINEAR_INTER)
+_SWIGLU_INTRA_MFMA_ON = _make_gluon_swiglu(_LINEAR_INTRA_MFMA_ON)
+_SWIGLU_INTRA_MFMA_OFF = _make_gluon_swiglu(_LINEAR_INTRA_MFMA_OFF)
 
 
 # AITER Triton GEMM: c [m, n] = a [m, k] times b [k, n], either operand stored
@@ -463,6 +498,8 @@ def _require_rocm():
 
 def aiter():
   _require_rocm()
+  from jax_titan.ops.providers import _triton_build  # pylint: disable=g-import-not-at-top
+  _triton_build.require_tutorial_build()
   _rms(), _rms_norm_kernels(), _act(), _rope_kernels(), _triton_gemm()
   return {
       "rms_norm": Impl(rms_norm, "AITER Triton RMSNorm", _rms_norm_supports),
@@ -472,13 +509,35 @@ def aiter():
   }
 
 
-def gluon():
+def _gluon(linear_fn, swiglu_fn, origin):
   _require_rocm()
+  from jax_titan.ops.providers import _triton_build  # pylint: disable=g-import-not-at-top
+  _triton_build.require_tutorial_build()
   if _arch() != "gfx950":
     raise RuntimeError(f"the Gluon GEMM is written for gfx950, not {_arch()}")
   _gluon_gemm()
   return {
-      "linear": Impl(linear, "Gluon inter-wave BF16 GEMM", _linear_supports),
-      "swiglu": Impl(gluon_swiglu, "Gluon inter-wave BF16 GEMMs with XLA SiLU-and-mul",
-                     _linear_supports),
+      "linear": Impl(linear_fn, f"{origin} BF16 GEMM", _linear_supports),
+      "swiglu": Impl(
+          swiglu_fn, f"{origin} BF16 GEMMs with XLA SiLU-and-mul", _linear_supports
+      ),
   }
+
+
+def gluon_intra_mfma_on():
+  return _gluon(
+      _LINEAR_INTRA_MFMA_ON, _SWIGLU_INTRA_MFMA_ON,
+      "Gluon intra-wave (MFMASchedule on)",
+  )
+
+
+def gluon_intra_mfma_off():
+  return _gluon(
+      _LINEAR_INTRA_MFMA_OFF, _SWIGLU_INTRA_MFMA_OFF,
+      "Gluon intra-wave (MFMASchedule off)",
+  )
+
+
+def gluon():
+  """The inter-wave Gluon provider, preserving the original provider name."""
+  return _gluon(_LINEAR_INTER, _SWIGLU_INTER, "Gluon inter-wave")
