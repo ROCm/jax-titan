@@ -383,7 +383,9 @@ scale layout, one run per configuration, and they are not a performance
 comparison with the MI355X tables above. Rows are in
 [results/2026-11-11](results/2026-11-11).
 
-The comparison with MaxText's recipes, in throughput and in loss, is in
+The MX recipe, and how to turn it on and check its kernels, is in
+[mx_quantization.md](mx_quantization.md). The comparison with MaxText's
+recipes, in throughput and in loss, is in
 [quantization_vs_maxtext.md](quantization_vs_maxtext.md).
 
 | Op | Provider | One GPU | vmap | Sharded | shard_map | MPMD step | Forward plus backward |
