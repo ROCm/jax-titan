@@ -37,6 +37,13 @@ This is the target design; [What works](#what-works) lists what runs today.
   double- and single-stream blocks, with its flow-matching loss, matching
   MaxDiffusion's transformer; `--model=maxdiffusion:flux-dev` trains it on
   synthetic batches.
+- Ideogram 4 as JAX-Titan's own model on `jax_titan.ops`, written after
+  diffusers' transformer and training example and matching diffusers' model;
+  `--model=ideogram4` trains it on synthetic batches as a pipeline, with data
+  parallelism or with FSDP
+  ([docs/recipes/ideogram4.md](docs/recipes/ideogram4.md)). The stages of
+  MaxDiffusion's Ideogram branch run the same way as
+  `--model=maxdiffusion:ideogram4`, and the two models match.
 - Operator providers chosen per op with `--ops`: ROCm TE fused attention and
   FP8/MXFP8 GEMMs, JAX-AITER flash attention, RMSNorm, SiLU-and-mul and GEMMs,
   AITER's Triton RMSNorm, SiLU-and-mul and RoPE and a gfx950 Gluon GEMM through
@@ -47,8 +54,8 @@ This is the target design; [What works](#what-works) lists what runs today.
   in loss and parameters, over 100 steps for 1F1B.
 - A baseline without the pipeline (`--parallel=dp` or `--parallel=fsdp`): the
   same model, weights and batches as one `jax.jit` program on all devices,
-  for MaxText and MaxDiffusion models too (`--parallel=dp`), as the Gate 0
-  reference.
+  for MaxText and MaxDiffusion models too (`--parallel=dp`, and
+  `--parallel=fsdp` for Ideogram 4), as the Gate 0 reference.
 - One gradient norm over all stages for clipping, with no update and no
   checkpoint after a non-finite norm or loss, and a step watchdog.
 - The ROCm scaling book's training metrics: a run directory (`--run_dir`)

@@ -427,3 +427,76 @@ step, WikiText-103, 40 steps:
   flushes to zero, so the block divides 0 by 0. A train step has such blocks;
   in causal attention, for example, the query gradient of the first token is
   zero. GPUs keep subnormals, and MXFP4 hides the NaN because E2M1 has none.
+
+## Ideogram 4 (2026-11-17, 4x MI350X)
+
+`--model=ideogram4` is JAX-Titan's own Ideogram 4 (`models/ideogram.py`, 9.28B
+parameters), written after diffusers' `Ideogram4Transformer2DModel` and its
+training example. `--model=maxdiffusion:ideogram4` builds the same stages from
+MaxDiffusion's Ideogram branch, a port of the same model, as an adapter. Both
+train on synthetic batches through the layouts of
+`jax_titan.trainer.adapters`. The runs here are FSDP without a pipeline on 4
+MI350X: 8 images of 1024x1024 per step, each 256 text and 4,096 latent tokens
+(34,816 tokens), AdamW at 1e-5 after 10 warmup steps, bf16 compute and every
+op on native JAX. Another job held a GPU of the node, so these runs check
+that the model is right, and their step times are not throughput of record.
+Per-step records are in [results/2026-11-17](results/2026-11-17), and
+[recipes/ideogram4.md](recipes/ideogram4.md) has the model's own recipe.
+
+The model against its references, with the same weights on both sides:
+
+| Reference | Where | Largest difference |
+|---|---|---|
+| diffusers' model | CPU, 4 blocks of width 64, fp32 | velocity 4.8e-7 |
+| the branch's model | CPU, the same sizes | hidden states after every stage 9.5e-7; loss and every gradient within the tests' 1e-5 and 1e-4 |
+| the branch's model | one MI350X, full size, fp32, 2 images, one with padded text | velocity 6.6e-6 (relative l2); loss and gradient norm 7.9e-8; every gradient 1.4e-5 (relative l2) |
+| one step of the branch's trainer | CPU, small sizes, the same batch and random key | loss, gradient norm and the parameters after a clipped SGD step within the test's 1e-5, 1e-4 and 1e-4 |
+
+Training in bf16 from the adapter's initial weights and on its batches. The
+table gives the largest relative difference between two runs over their first
+10 steps, which Gate 0 compares with a tolerance of 2e-3 in loss, and over 30:
+
+| Runs | Loss, 10 steps | Loss, 30 steps | Gradient norm, 10 steps | Gradient norm, 30 steps |
+|---|---|---|---|---|
+| JAX-Titan's model against the adapter, both on 4 GPUs | 3.1e-4 | 6.9e-4 | 1.9e-3 | 2.8e-3 |
+| The adapter on 4 GPUs against the adapter on 8 | 4.5e-4 | 4.5e-4 | 1.7e-3 | 1.8e-3 |
+| Two identical runs of the adapter on 8 GPUs | 1.8e-4 | 2.8e-4 | 8.1e-4 | 1.5e-3 |
+
+Over 1,000 steps, JAX-Titan's model on 4 GPUs against the adapter on 8, from
+the same weights and on the same batches (means over 100 steps, and the
+validation loss after the window's last step; the floor of the validation
+batches is 1.5895):
+
+| Steps | 0-99 | 100-199 | 200-299 | 300-399 | 400-499 | 500-599 | 600-699 | 700-799 | 800-899 | 900-999 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Training loss, adapter | 2.6328 | 1.7046 | 1.6211 | 1.5918 | 1.5820 | 1.5421 | 1.5720 | 1.5611 | 1.5965 | 1.5529 |
+| Training loss, JAX-Titan's model | 2.6309 | 1.7038 | 1.6212 | 1.5917 | 1.5820 | 1.5421 | 1.5721 | 1.5612 | 1.5965 | 1.5530 |
+| Validation loss, adapter | 1.9729 | 1.6741 | 1.6363 | 1.6193 | 1.6113 | 1.6066 | 1.6024 | 1.5979 | 1.5969 | 1.5963 |
+| Validation loss, JAX-Titan's model | 1.9706 | 1.6732 | 1.6364 | 1.6191 | 1.6109 | 1.6067 | 1.6024 | 1.5979 | 1.5970 | 1.5964 |
+
+- **JAX-Titan's model is the branch's model.** At full size in fp32 every
+  gradient agrees to 1.4e-5. In bf16 the two round differently, and their
+  runs differ by as much as the adapter differs from itself on another number
+  of GPUs.
+- **Both train to the optimum of the synthetic task.** After 1,000 steps the
+  validation loss is 0.0068 above its floor for both. From step 200 on the
+  training losses agree to 0.0001 in every window, and from step 300 on the
+  validation losses to 0.0005 at every pass. JAX-Titan's model from its own
+  initializer and with its default timesteps ends 0.0070 above the floor of
+  its batches ([recipes/ideogram4.md](recipes/ideogram4.md)).
+- **On these 4 GPUs JAX-Titan's model ran at 6.1k tokens/s per GPU and the
+  adapter at 7.2k,** with 47.6 against 70.8 GiB in use per GPU, 47-54 s
+  against 74 s to compile, and 2.1 s against 27 s to initialize. The
+  difference in speed has not been looked into, and the node was shared.
+- **The rotary frequencies are computed on the host.** Inside a compiled
+  program XLA folds `1 / theta^(i/d)` to other last bits than an eager
+  computation gives: 3 of 16 frequencies at the tests' size, which moved the
+  outputs by 3e-5 against the branch's model, and 34 of 128 at full size
+  against diffusers' table. Image positions start at 65536, where one unit in
+  the last place of a frequency moves an angle by up to 0.004 rad. The host
+  computes every step in fp32 as diffusers rounds it, which leaves 1 of the
+  128 entries different from diffusers'.
+- **The trainer's energy figures count every GPU of the node.** For a run on
+  4 of 8 GPUs, `results.json` reported 4,293 W and 0.185 J/token, with the
+  idle GPUs and another job's GPU in them; the run's own GPUs drew 3,325 W,
+  0.144 J/token.

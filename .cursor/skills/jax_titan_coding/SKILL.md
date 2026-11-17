@@ -58,6 +58,15 @@ for a later comparison: do not import from it or edit it.
   `third_party/patches/maxdiffusion-*.patch` patches. Stage boundaries carry
   a tuple (image and text tokens, conditioning, rotary embeddings), so these
   stages reduce gradients per microbatch.
+- **Ideogram 4:** `models/ideogram.py` is JAX-Titan's own model, written after
+  diffusers' `Ideogram4Transformer2DModel` and its training example. It
+  trains through the layouts of `trainer/adapters.py` (`--model=ideogram4`),
+  so with gradients reduced per microbatch. `models/adapters/ideogram.py`
+  builds the same stages from MaxDiffusion's Ideogram branch
+  (`maxdiffusion:ideogram4`), and its `native_params` maps those weights onto
+  `models/ideogram.py`. Compute the rotary frequencies on the host: a compiled
+  program folds the same expression to other last bits, and image positions
+  start at 65536.
 - **Precision:** parameters and optimizer state are fp32; compute casts to
   bf16 before the layer scan. Casting inside the rematerialized layer was
   measured slower; do not move it back without a new A/B.
@@ -99,6 +108,12 @@ for a later comparison: do not import from it or edit it.
   model (it is skipped without the `maxtext` extra).
   `tests/test_maxdiffusion_adapter.py` does the same for FLUX.1 against
   MaxDiffusion's transformer (skipped without MaxDiffusion).
+- `tests/test_ideogram.py` checks `models/ideogram.py` against diffusers'
+  model (skipped without `torch` and `diffusers`), its stages against one
+  stage, and its layouts against `--parallel=dp`.
+  `tests/test_ideogram_adapter.py` checks it against the Ideogram branch's
+  model and against one step of that branch's trainer (skipped without the
+  branch).
 - A performance claim needs a GPU run on an idle node against the
   no-pipeline baseline from the same stack (see `jax_titan_training`), with
   its JSONL in `docs/results/<date>/`.

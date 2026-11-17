@@ -111,6 +111,13 @@ pip install -e ".[maxdiffusion]" "jax==$(python -c 'import jax; print(jax.__vers
   "jaxlib==$(python -c 'import jaxlib; print(jaxlib.__version__)')"
 ```
 
+JAX-Titan's own Ideogram 4 (`--model=ideogram4`) needs none of these. Its test
+against diffusers' model runs when `torch` and `diffusers` 0.39 or later are
+installed, and is skipped otherwise. `--model=maxdiffusion:ideogram4` needs
+MaxDiffusion's Ideogram branch in place of the pinned commit:
+`yaomingamd/maxdiffusion` at `6db5c172` (branch `ymmu/ideogram_v4_training`),
+which is not upstream.
+
 ## 5. Runs
 
 The node is shared, so check it is idle on the host first:
@@ -212,6 +219,12 @@ python -m jax_titan.observability.summarize --gate0 runs/mt_dp runs/mt_pp2 \
 XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" python -m jax_titan.trainer.train \
   --model=maxdiffusion:flux-dev --num_stages=4 \
   --microbatches=8 --microbatch_size=4 --steps=20 --lr=1e-5
+
+# JAX-Titan's own Ideogram 4 (9.3B) on synthetic 1024x1024 batches, with FSDP
+# over all GPUs and no pipeline; docs/recipes/ideogram4.md has the recipe.
+XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" python -m jax_titan.trainer.train \
+  --model=ideogram4 --parallel=fsdp --num_stages=1 \
+  --microbatches=1 --microbatch_size=8 --steps=30 --lr=1e-5
 ```
 
 `--model_overrides` takes a JSON object of MaxText config or FLUX.1
