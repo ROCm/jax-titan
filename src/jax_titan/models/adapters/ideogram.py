@@ -14,7 +14,8 @@ the sequence after projecting them, which is what the branch's transformer
 computes from features zero-padded over the image positions. Every stage
 boundary carries the hidden states, the segment ids, the rotary embeddings
 and the conditioning, and the last stage returns the branch's flow-matching
-loss over the image tokens.
+loss over the image tokens. `native_params` maps the stage parameters onto
+`jax_titan.models.ideogram`, JAX-Titan's own model.
 """
 
 from collections.abc import Callable, Sequence
@@ -67,6 +68,63 @@ def sequence_ids(image_side: int, text_tokens: int) -> dict[str, np.ndarray]:
           np.full(tokens - text_tokens, constants.OUTPUT_IMAGE_INDICATOR),
       ]).astype(np.int32),
   }
+
+
+def native_params(stage_params: Sequence[dict]) -> tuple[dict, ...]:
+  """Stage parameters in the `jax_titan.models.ideogram` layout.
+
+  Stacks the blocks along a leading layer axis and splits the branch's one
+  query, key and value kernel into three.
+  """
+  out = []
+  for p in stage_params:
+    blocks = [p["layers"][j] for j in range(len(p["layers"]))]
+    e = blocks[0]["attention"]["o"]["kernel"].shape[0]
+
+    def stack(leaf, blocks=blocks):
+      return jnp.stack([leaf(b) for b in blocks])
+
+    stage = {"layers": {
+        "attn_norm": stack(lambda b: b["attention_norm1"]["scale"]),
+        "wq": stack(lambda b: b["attention"]["qkv"]["kernel"][:, :e]),
+        "wk": stack(lambda b: b["attention"]["qkv"]["kernel"][:, e:2 * e]),
+        "wv": stack(lambda b: b["attention"]["qkv"]["kernel"][:, 2 * e:]),
+        "q_norm": stack(lambda b: b["attention"]["norm_q"]["scale"]),
+        "k_norm": stack(lambda b: b["attention"]["norm_k"]["scale"]),
+        "wo": stack(lambda b: b["attention"]["o"]["kernel"]),
+        "attn_out_norm": stack(lambda b: b["attention_norm2"]["scale"]),
+        "mlp_norm": stack(lambda b: b["ffn_norm1"]["scale"]),
+        "w_gate": stack(lambda b: b["feed_forward"]["w1"]["kernel"]),
+        "w_up": stack(lambda b: b["feed_forward"]["w3"]["kernel"]),
+        "w_down": stack(lambda b: b["feed_forward"]["w2"]["kernel"]),
+        "mlp_out_norm": stack(lambda b: b["ffn_norm2"]["scale"]),
+        "w_mod": stack(lambda b: b["adaln_modulation"]["kernel"]),
+        "b_mod": stack(lambda b: b["adaln_modulation"]["bias"]),
+    }}
+    if "input_proj" in p:
+      stage.update({
+          "w_in": p["input_proj"]["kernel"],
+          "b_in": p["input_proj"]["bias"],
+          "text_norm": p["llm_cond_norm"]["scale"],
+          "w_text": p["llm_cond_proj"]["kernel"],
+          "b_text": p["llm_cond_proj"]["bias"],
+          "w_time_in": p["t_embedding"]["mlp_in"]["kernel"],
+          "b_time_in": p["t_embedding"]["mlp_in"]["bias"],
+          "w_time_out": p["t_embedding"]["mlp_out"]["kernel"],
+          "b_time_out": p["t_embedding"]["mlp_out"]["bias"],
+          "w_cond": p["adaln_proj"]["kernel"],
+          "b_cond": p["adaln_proj"]["bias"],
+          "image_embed": p["embed_image_indicator"]["embedding"],
+      })
+    if "final_layer" in p:
+      stage.update({
+          "w_final_mod": p["final_layer"]["adaln_modulation"]["kernel"],
+          "b_final_mod": p["final_layer"]["adaln_modulation"]["bias"],
+          "w_out": p["final_layer"]["linear"]["kernel"],
+          "b_out": p["final_layer"]["linear"]["bias"],
+      })
+    out.append(stage)
+  return tuple(out)
 
 
 class Model:

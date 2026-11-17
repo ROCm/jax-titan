@@ -1,4 +1,5 @@
-"""Ideogram 4 stages match the Ideogram branch of MaxDiffusion, and its layouts match each other."""
+"""Ideogram 4 stages match the Ideogram branch of MaxDiffusion, its layouts match each other,
+and JAX-Titan's own Ideogram 4 matches the branch's model and its trainer's step."""
 
 import importlib.util
 import json
@@ -75,6 +76,168 @@ def test_stages_match_the_transformer(num_stages, blocks):
 
   pred = jax.jit(chain)(stage_params, x)
   np.testing.assert_allclose(np.asarray(pred), np.asarray(ref), rtol=1e-5, atol=1e-5)
+
+
+def _models(num_stages=1, blocks=None):
+  """The branch's model as stages, JAX-Titan's own, and one set of weights in both layouts."""
+  import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+  from jax_titan.models import ideogram  # pylint: disable=g-import-not-at-top
+  from jax_titan.models.adapters import ideogram as ig  # pylint: disable=g-import-not-at-top
+
+  cfg = ig.Ideogram4Config(**CONFIG)
+  adapter = ig.Model(cfg, num_stages=num_stages, blocks=blocks, dtype=jnp.float32)
+  native = ideogram.Model(
+      ideogram.IdeogramConfig(
+          in_channels=cfg.in_channels, num_layers=cfg.num_layers,
+          attention_head_dim=cfg.emb_dim // cfg.num_heads, num_attention_heads=cfg.num_heads,
+          intermediate_size=cfg.intermediate_size, adaln_dim=cfg.adanln_dim,
+          llm_features_dim=cfg.llm_features_dim, rope_theta=cfg.rope_theta,
+          mrope_section=cfg.mrope_section, norm_eps=cfg.norm_eps),
+      num_stages=num_stages, blocks=blocks, dtype=jnp.float32)
+  params = adapter.init(0)
+  return adapter, native, params, ig.native_params(params)
+
+
+def _batch(cfg, batch=2, side=4, text_tokens=8):
+  """Inputs whose second sample's text is left-padded by three positions, and clean latents."""
+  import numpy as np  # pylint: disable=g-import-not-at-top
+  from jax_titan.models.adapters import ideogram as ig  # pylint: disable=g-import-not-at-top
+
+  rng = np.random.default_rng(0)
+  ids = {k: np.stack([v] * batch) for k, v in ig.sequence_ids(side, text_tokens).items()}
+  ids["segment_ids"][1, :3] = ig.constants.SEQUENCE_PADDING_INDICATOR
+  ids["indicator"][1, :3] = 0
+  x = {
+      "img": rng.normal(size=(batch, side * side, cfg.in_channels)).astype(np.float32),
+      "txt": rng.normal(size=(batch, text_tokens, cfg.llm_features_dim)).astype(np.float32),
+      "timestep": rng.uniform(size=batch).astype(np.float32),
+      **ids,
+  }
+  return x, rng.normal(size=x["img"].shape).astype(np.float32)
+
+
+def _loss_and_grads(model, stage_params, x, target):
+  import jax  # pylint: disable=g-import-not-at-top
+
+  def loss(stage_params):
+    fns, h = model.stage_fns(), x
+    for fn, p in zip(fns[:-1], stage_params[:-1]):
+      h = fn(p, h)
+    return fns[-1](stage_params[-1], h, target)
+
+  return jax.jit(jax.value_and_grad(loss))(stage_params)
+
+
+def _assert_trees_close(a, b, rtol=1e-4, atol=1e-6):
+  import jax  # pylint: disable=g-import-not-at-top
+  import numpy as np  # pylint: disable=g-import-not-at-top
+
+  jax.tree.map(lambda x, y: np.testing.assert_allclose(x, y, rtol=rtol, atol=atol), a, b)
+
+
+@pytest.mark.parametrize("num_stages,blocks", [(1, None), (3, (1, 2, 1))])
+def test_native_model_matches(num_stages, blocks):
+  import jax  # pylint: disable=g-import-not-at-top
+  import numpy as np  # pylint: disable=g-import-not-at-top
+  from jax_titan.models.adapters import ideogram as ig  # pylint: disable=g-import-not-at-top
+
+  adapter, native, params, native_params = _models(num_stages, blocks)
+  x, target = _batch(adapter.config)
+
+  def boundaries(model, stage_params):
+    out, h = [], x
+    for i in range(num_stages):
+      h = model.forward(i, stage_params[i], h)
+      out.append(h if i == num_stages - 1 else (h[0], h[-1]))
+    return out
+
+  # The hidden states and the conditioning after every stage, and the velocity after the last.
+  _assert_trees_close(jax.jit(lambda p: boundaries(native, p))(native_params),
+                      jax.jit(lambda p: boundaries(adapter, p))(params), rtol=1e-5, atol=1e-5)
+
+  ref_loss, ref_grads = _loss_and_grads(adapter, params, x, target)
+  loss, grads = _loss_and_grads(native, native_params, x, target)
+  np.testing.assert_allclose(loss, ref_loss, rtol=1e-5)
+  _assert_trees_close(grads, ig.native_params(ref_grads))
+
+
+def test_train_step_matches_the_trainer():
+  """One step of the branch's trainer against the step JAX-Titan's layouts run, for both models."""
+  trainer = pytest.importorskip("maxdiffusion.trainers.ideogram_trainer")
+  import types  # pylint: disable=g-import-not-at-top
+
+  import jax  # pylint: disable=g-import-not-at-top
+  import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+  import numpy as np  # pylint: disable=g-import-not-at-top
+  import optax  # pylint: disable=g-import-not-at-top
+  from flax import nnx  # pylint: disable=g-import-not-at-top
+  from jax_titan import mpmd as jt_mpmd  # pylint: disable=g-import-not-at-top
+  from jax_titan.models import ideogram  # pylint: disable=g-import-not-at-top
+  from jax_titan.models.adapters import ideogram as ig  # pylint: disable=g-import-not-at-top
+  from jax_titan.trainer import adapters  # pylint: disable=g-import-not-at-top
+
+  adapter, native, params, native_params = _models()
+  cfg = adapter.config
+  x, latents = _batch(cfg)
+  text_tokens, image_tokens = x["txt"].shape[1], x["img"].shape[1]
+  side = int(image_tokens ** 0.5)
+  resolution, max_grad_norm = 16 * side, 0.5
+  optimizer = optax.sgd(0.1)
+
+  # The branch's step: its model, its random draws, its loss, clipping and update.
+  transformer = ig.Ideogram4Transformer(nnx.Rngs(0), cfg, dtype=jnp.float32)
+  graphdef, state_params, rest = nnx.split(transformer, nnx.Param, ...)
+  state = trainer.TrainState.create(
+      apply_fn=graphdef.apply, params=state_params, tx=optimizer, graphdef=graphdef,
+      rest_of_state=rest)
+  state = jax.tree.map(trainer._to_array, state)
+  data = {
+      "latents": latents,
+      "llm_features": np.pad(x["txt"], ((0, 0), (0, image_tokens), (0, 0))),
+      **{k: x[k] for k in ("position_ids", "segment_ids", "indicator")},
+  }
+  config = types.SimpleNamespace(
+      global_batch_size_to_train_on=latents.shape[0], ideogram_max_text_tokens=text_tokens,
+      activations_dtype=jnp.float32, max_grad_norm=max_grad_norm)
+  schedule = ig.scheduler.get_schedule_for_resolution((resolution, resolution), known_mean=0.5)
+  key = jax.random.key(7)
+  new_state, metrics, _ = jax.jit(
+      lambda state, data, key: trainer.train_step(state, data, key, config, schedule))(
+          state, data, key)
+  ref_loss = metrics["scalar"]["learning/loss"]
+  ref_norm = metrics["scalar"]["learning/max_grad_norm"]
+  ref_params = ig.native_params(adapter.split(new_state.params.to_pure_dict()))
+  assert ref_norm > max_grad_norm, "the step must clip to test clipping"
+
+  # The same draws, as the branch's step makes them from its key.
+  _, noise_key, time_key, _ = jax.random.split(key, num=4)
+  u = jax.random.uniform(time_key, (latents.shape[0],), minval=1e-4, maxval=1.0 - 1e-4)
+  noise = np.asarray(jax.random.normal(noise_key, latents.shape, jnp.float32))
+  z = np.asarray(jax.scipy.special.ndtri(u))
+  t = ig.timesteps(z, resolution)
+  np.testing.assert_allclose(t, schedule(u), rtol=1e-5)
+  np.testing.assert_allclose(ideogram.timesteps(z, resolution, mean=0.5, std=1.0), t, rtol=1e-5)
+
+  img, target = adapters.ideogram_noised(latents, noise, t)
+  x = {**x, "img": img, "timestep": t}
+
+  def step(model, stage_params):
+    loss, grads = _loss_and_grads(model, stage_params, x, target)
+    norm = jt_mpmd.global_grad_norm(grads)
+    updated = tuple(
+        jt_mpmd.clipped_update(optimizer, p, g, optimizer.init(p), norm, max_grad_norm)[0]
+        for p, g in zip(stage_params, grads))
+    return loss, norm, updated
+
+  loss, norm, updated = step(adapter, params)
+  np.testing.assert_allclose(loss, ref_loss, rtol=1e-5)
+  np.testing.assert_allclose(norm, ref_norm, rtol=1e-4)
+  _assert_trees_close(ig.native_params(updated), ref_params)
+
+  loss, norm, updated = step(native, native_params)
+  np.testing.assert_allclose(loss, ref_loss, rtol=1e-5)
+  np.testing.assert_allclose(norm, ref_norm, rtol=1e-4)
+  _assert_trees_close(updated, ref_params)
 
 
 def _run(log, *flags):

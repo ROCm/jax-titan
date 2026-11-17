@@ -376,6 +376,13 @@ def _maxdiffusion(args, flavor, devices, optimizer):
   return layout, work
 
 
+def ideogram_noised(latents, noise, t):
+  """Ideogram 4's input and velocity target for latents [..., tokens, channels]
+  noised at timesteps `t` [...], where 0 is noise and 1 is data."""
+  t = t[..., None, None]
+  return (1 - t) * noise + t * latents, latents - noise
+
+
 def _ideogram(args, devices, optimizer, native: bool):
   """Ideogram 4, JAX-Titan's own (`native`) or from MaxDiffusion's Ideogram branch.
 
@@ -444,13 +451,14 @@ def _ideogram(args, devices, optimizer, native: bool):
     latents = rng.standard_normal(latent_shape, np.float32)
     noise = rng.standard_normal(latent_shape, np.float32)
     t = ig.timesteps(rng.standard_normal(b), args.resolution, **schedule)
+    img, target = ideogram_noised(latents, noise, t)
     x = {
-        "img": (1 - t[..., None, None]) * noise + t[..., None, None] * latents,
+        "img": img,
         "txt": txt,
         "timestep": t,
         **{k: np.broadcast_to(v, b + v.shape) for k, v in ids.items()},
     }
-    return x, latents - noise
+    return x, target
 
   if args.parallel == "mpmd":
     layout = _mpmd_layout(args, _topology(args, devices, make_mesh), model, optimizer,
