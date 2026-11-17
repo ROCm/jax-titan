@@ -11,9 +11,13 @@ def rms_norm(x: jax.Array, weight: jax.Array, eps: float) -> jax.Array:
 
 
 def attention(q: jax.Array, k: jax.Array, v: jax.Array, *, causal: bool = True,
-              scale: float | None = None) -> jax.Array:
-  """Attention over [batch, seq, heads, head_dim]; k/v may have fewer heads."""
-  return jax.nn.dot_product_attention(q, k, v, scale=scale, is_causal=causal)
+              scale: float | None = None, mask: jax.Array | None = None) -> jax.Array:
+  """Attention over [batch, seq, heads, head_dim]; k/v may have fewer heads.
+
+  `mask` is boolean, [batch or 1, heads or 1, seq, seq], true where a query
+  position attends to a key position.
+  """
+  return jax.nn.dot_product_attention(q, k, v, mask=mask, scale=scale, is_causal=causal)
 
 
 def swiglu(
@@ -30,9 +34,10 @@ def linear(x: jax.Array, w: jax.Array) -> jax.Array:
 def rope(x: jax.Array, cos: jax.Array, sin: jax.Array) -> jax.Array:
   """Rotary embedding on [batch, seq, heads, head_dim], split-halves layout.
 
-  `cos` and `sin` are [seq, head_dim // 2].
+  `cos` and `sin` are [seq, head_dim // 2], or [batch, seq, head_dim // 2]
+  when positions differ between samples.
   """
-  c = cos.astype(jnp.float32)[None, :, None, :]
-  s = sin.astype(jnp.float32)[None, :, None, :]
+  c = jnp.expand_dims(cos.astype(jnp.float32), -2)
+  s = jnp.expand_dims(sin.astype(jnp.float32), -2)
   x1, x2 = jnp.split(x.astype(jnp.float32), 2, axis=-1)
   return jnp.concatenate([x1 * c - x2 * s, x2 * c + x1 * s], axis=-1).astype(x.dtype)
