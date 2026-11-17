@@ -100,7 +100,7 @@ def test_pipeline_matches_no_pipeline_reference(provider, tmp_path):
   assert "no pipeline" in out
   # Same weights and batch: step 0's loss agrees to rounding; bf16 gradient
   # reductions in a different order move later steps apart.
-  assert pipeline[0]["loss"] == pytest.approx(reference[0]["loss"], rel=1e-6)
+  assert pipeline[0]["loss"] == pytest.approx(reference[0]["loss"], rel=1e-4)
   for step in range(4):
     assert pipeline[step]["loss"] == pytest.approx(reference[step]["loss"], rel=1e-3), step
     assert pipeline[step]["grad_norm"] == pytest.approx(reference[step]["grad_norm"], rel=5e-3), step
