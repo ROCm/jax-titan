@@ -47,8 +47,9 @@ def hardware(gpu: gpus_lib.GPU, clock_ghz: float | None = None):
 
 
 def problem(key: dict):
-  """Origami's `problem_t` for a hipBLASLt problem key, whose matrix
-  instructions run at the narrower of the two input types."""
+  """Origami's `problem_t` for a hipBLASLt problem key. Matrix instructions
+  run at XFloat32 for xf32 compute on f32 inputs, otherwise at the narrower
+  of the two input types."""
   import origami  # pylint: disable=g-import-not-at-top
   types = {}
   for name in ("a", "b", "c"):
@@ -62,7 +63,10 @@ def problem(key: dict):
   p.b_transpose = getattr(origami.transpose_t, key["transB"].upper())
   p.a_dtype, p.b_dtype = types["a"], types["b"]
   p.c_dtype = p.d_dtype = types["c"]
-  p.mi_dtype = min(types["a"], types["b"], key=origami.datatype_to_bits)
+  if key["compute_type"] == "xf32_r" and key["a_type"] == key["b_type"] == "f32_r":
+    p.mi_dtype = origami.data_type_t.XFloat32
+  else:
+    p.mi_dtype = min(types["a"], types["b"], key=origami.datatype_to_bits)
   return p
 
 

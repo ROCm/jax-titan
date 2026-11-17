@@ -23,13 +23,14 @@ def _fake_origami(calls: dict) -> types.ModuleType:
   """Origami's bindings as far as origami_bound uses them; the largest tile wins at 2.6e6 cycles."""
   o = types.ModuleType("origami")
   o.architecture_t = types.SimpleNamespace(gfx942="gfx942")
-  o.data_type_t = types.SimpleNamespace(BFloat16="bf16", Half="f16", Float="f32", Float8_fnuz="f8")
+  o.data_type_t = types.SimpleNamespace(BFloat16="bf16", Half="f16", Float="f32", Float8_fnuz="f8",
+                                        XFloat32="xf32")
   o.transpose_t = types.SimpleNamespace(N="N", T="T")
   o.grid_selection_t = types.SimpleNamespace(data_parallel="data_parallel")
   o.model_t = types.SimpleNamespace(gemm="gemm")
   o.dim3_t = _Dim3
   o.problem_t = o.config_t = types.SimpleNamespace
-  o.datatype_to_bits = {"bf16": 16, "f16": 16, "f32": 32, "f8": 8}.get
+  o.datatype_to_bits = {"bf16": 16, "f16": 16, "f32": 32, "f8": 8, "xf32": 32}.get
 
   def get_hardware_for_arch(*args):
     calls["hardware"] = args
@@ -77,6 +78,17 @@ def test_matrix_instructions_run_at_the_narrower_input_type_and_the_peak_clock_b
   origami_bound.attainable(dict(_KEY, a_type="f8_fnuz_r"), gpus.get("MI325X"))
   assert calls["problem"].mi_dtype == "f8"
   assert calls["hardware"][-1] == 2100000
+
+
+def test_xf32_compute_uses_xfloat32_instructions_with_float_storage(monkeypatch):
+  calls = {}
+  monkeypatch.setitem(sys.modules, "origami", _fake_origami(calls))
+  key = dict(_KEY, a_type="f32_r", b_type="f32_r", c_type="f32_r", compute_type="xf32_r")
+  origami_bound.attainable(key, gpus.get("MI300X"))
+  p = calls["problem"]
+  assert (p.a_dtype, p.b_dtype, p.c_dtype, p.d_dtype) == ("f32", "f32", "f32", "f32")
+  assert p.mi_dtype == "xf32"
+  assert {c.mi for c in calls["configs"]} == {("mi", "xf32")}
 
 
 def test_gpus_and_types_without_origami_constants_are_refused(monkeypatch):
