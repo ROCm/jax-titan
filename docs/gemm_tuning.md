@@ -51,8 +51,15 @@ Each stage writes into `OUT`:
 | `cost` | `cost.md` | Per problem and per step: selection, contention, in-step other, and ceiling (below) |
 | `negative` | `negative/summary.json` | Each way the file can fail shows up: a wrong git version (no hits), a wrong key field (the row goes unused), too much workspace (no hit), and an executable from the compilation cache built without the file (all hits) |
 
-A solution that wins alone can still lose in the step: beside a collective
-that shares the GPU, one kernel can slow down more than another. With traces
+A solution that wins alone can still lose in the step. Beside a collective
+that shares the GPU, one kernel can slow down more than another. And under a
+power cap the step can run its GEMMs at a lower clock than a GEMM gets alone,
+even with nothing alongside, because the step's communication draws from the
+same power budget. A kernel that wins at the isolated clock by waiting less on
+memory can then tie. `observability.power` beside the step shows how much of
+it each GPU spends held by its power limit, and `observability/counters.py`
+gives each launch's engine clock and matrix-unit use from hardware counters
+(GRBM_GUI_ACTIVE per chiplet over the launch's duration). With traces
 of the step without and with the file (`profile`), `hipblaslt.py instep`
 compares each row's in-step launches and writes the rows that are not slower,
 for a second A/B:

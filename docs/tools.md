@@ -92,6 +92,7 @@ how to update the packages they install.
 | `tuning/hipblaslt.py` | hipBLASLt problems from logs (`capture`), joined to GEMM sites (`join`), swept with confidence intervals (`sweep`), written as an override file (`write`), checked in a run (`verify`), carried to another build (`map`), and the clock a GPU sustains (`clock`). Standard library only ([gemm_tuning.md](gemm_tuning.md)) |
 | `planning.gemm_cost RESULTS` | Per GEMM problem and per step: the time a tuning file recovers, what collectives cost, the rest of the in-step gap, and the ceiling below the best kernel ([gemm_tuning.md](gemm_tuning.md#where-the-gemm-time-goes)) |
 | `observability.power OUT.jsonl` | GPU power, energy, clocks and throttling, sampled beside any job |
+| `observability/counters.py run OUT -- CMD`, `report OUT` | Per-launch hardware counters from rocprofv3: each kernel's engine clock, matrix-unit use, L2 hit rate and traffic past L2. Counting serializes the counted launches. Standard library only |
 | `observability.env OUT.json` | What a run ran on: packages, commits, flags, GPUs and the rank map |
 | `observability.ceilings OUT.json` | The GEMM and HBM rates XLA reaches on one GPU, for MFU against an attainable peak (needs a GPU) |
 | `observability.detectors OUT -- ARGS` | The step-time cost of each failure detector; runs the trainer once per detector |
