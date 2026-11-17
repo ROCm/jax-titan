@@ -1,15 +1,16 @@
-"""Trainer layouts for models from MaxText and MaxDiffusion.
+"""Trainer layouts for models from MaxText and MaxDiffusion, and for Ideogram 4.
 
 `--model=maxtext:<name>` trains a MaxText model config (e.g.
 `maxtext:llama3.1-8b`) on the token data, and `--model=maxdiffusion:<flavor>`
 trains FLUX.1 (`flux-dev` or `flux-schnell`) or, from MaxDiffusion's Ideogram
 branch, Ideogram 4 (`ideogram4`) on synthetic rectified-flow batches until an
-image pipeline exists. They run as a Shardy MPMD pipeline with data
-parallelism inside each stage, reducing gradients in every microbatch's
-backward pass, and attention in native JAX unless the ops policy names
-attention. `--parallel=dp` runs the same stages, weights and batches as one
-data-parallel `jax.jit` program, the no-pipeline reference; for Ideogram 4,
-`--parallel=fsdp` also shards parameters and optimizer state.
+image pipeline exists. `--model=ideogram4` trains JAX-Titan's own Ideogram 4
+(`jax_titan.models.ideogram`) on the same batches. They run as a Shardy MPMD
+pipeline with data parallelism inside each stage, reducing gradients in every
+microbatch's backward pass, and attention in native JAX unless the ops policy
+names attention. `--parallel=dp` runs the same stages, weights and batches as
+one data-parallel `jax.jit` program, the no-pipeline reference; for Ideogram
+4, `--parallel=fsdp` also shards parameters and optimizer state.
 """
 
 import functools
@@ -18,6 +19,8 @@ import json
 from jax_titan.trainer.layout import Layout, Workload, abstract, placement
 
 PROVIDERS = ("maxtext", "maxdiffusion")
+# JAX-Titan's own models that train through these layouts.
+MODELS = ("ideogram4",)
 
 
 def _overrides(args) -> dict:
@@ -373,19 +376,33 @@ def _maxdiffusion(args, flavor, devices, optimizer):
   return layout, work
 
 
-def _ideogram(args, devices, optimizer):
+def _ideogram(args, devices, optimizer, native: bool):
+  """Ideogram 4, JAX-Titan's own (`native`) or from MaxDiffusion's Ideogram branch.
+
+  Besides config fields, `--model_overrides` takes `dtype` and, for the native
+  model, `timestep_mean` and `timestep_std` of the training timesteps.
+  """
   import jax  # pylint: disable=g-import-not-at-top
   import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
   import numpy as np  # pylint: disable=g-import-not-at-top
   from jax_titan import mpmd as jt_mpmd  # pylint: disable=g-import-not-at-top
-  from jax_titan.models.adapters import ideogram as ig  # pylint: disable=g-import-not-at-top
 
   P = jax.sharding.PartitionSpec  # pylint: disable=invalid-name
 
   overrides = _overrides(args)
   dtype = jnp.dtype(overrides.pop("dtype", "bfloat16"))
-  cfg = ig.Ideogram4Config(
-      **{k: tuple(v) if isinstance(v, list) else v for k, v in overrides.items()})
+  schedule = {}
+  if native:
+    from jax_titan.models import ideogram as ig  # pylint: disable=g-import-not-at-top
+
+    config = ig.IdeogramConfig
+    schedule = {k: overrides.pop(f"timestep_{k}") for k in ("mean", "std")
+                if f"timestep_{k}" in overrides}
+  else:
+    from jax_titan.models.adapters import ideogram as ig  # pylint: disable=g-import-not-at-top
+
+    config = ig.Ideogram4Config
+  cfg = config(**{k: tuple(v) if isinstance(v, list) else v for k, v in overrides.items()})
 
   def make_mesh(d):
     return jax.sharding.Mesh(
@@ -426,7 +443,7 @@ def _ideogram(args, devices, optimizer):
     rng = np.random.default_rng((args.seed, step))
     latents = rng.standard_normal(latent_shape, np.float32)
     noise = rng.standard_normal(latent_shape, np.float32)
-    t = ig.timesteps(rng.standard_normal(b), args.resolution)
+    t = ig.timesteps(rng.standard_normal(b), args.resolution, **schedule)
     x = {
         "img": (1 - t[..., None, None]) * noise + t[..., None, None] * latents,
         "txt": txt,
@@ -451,9 +468,10 @@ def _ideogram(args, devices, optimizer):
 
 
 def build(args, devices, optimizer) -> tuple[Layout, Workload]:
-  """The layout and workload of `--model=<provider>:<name>`."""
+  """The layout and workload of `--model=<provider>:<name>`, or of one of `MODELS`."""
   provider, _, name = args.model.partition(":")
-  ideogram = provider == "maxdiffusion" and name == "ideogram4"
+  native = args.model in MODELS
+  ideogram = native or (provider == "maxdiffusion" and name == "ideogram4")
   if args.stage_fsdp or args.tensor_parallel != 1 or (args.parallel == "fsdp" and not ideogram):
     raise NotImplementedError(
         f"{args.model} trains with data parallelism only: as an MPMD pipeline with it inside "
@@ -461,8 +479,8 @@ def build(args, devices, optimizer) -> tuple[Layout, Workload]:
     )
   if args.parallel == "mpmd" and args.reduce_grads != "microbatch":
     raise NotImplementedError(f"{args.model} reduces gradients per microbatch only")
-  if args.init_from and provider != "maxtext":
-    raise NotImplementedError(f"--init_from loads MaxText parameter checkpoints, not {provider}")
+  if args.init_from and provider != "maxtext" and not native:
+    raise NotImplementedError(f"--init_from loads parameters of maxtext: models and {MODELS[0]}")
   if args.parallel != "mpmd" and (args.microbatches * args.microbatch_size) % len(devices):
     raise ValueError(
         f"--parallel={args.parallel} splits all {args.microbatches * args.microbatch_size} "
@@ -471,7 +489,7 @@ def build(args, devices, optimizer) -> tuple[Layout, Workload]:
   if provider == "maxtext":
     return _maxtext(args, name, devices, optimizer)
   if ideogram:
-    return _ideogram(args, devices, optimizer)
+    return _ideogram(args, devices, optimizer, native)
   if provider == "maxdiffusion":
     return _maxdiffusion(args, name, devices, optimizer)
   raise ValueError(f"unknown model provider {provider!r}; known: {', '.join(PROVIDERS)}")

@@ -2,9 +2,9 @@
 
   python -m jax_titan.trainer.train --model=llama3.1-8b --num_stages=2
 
-`--model` is a JAX-Titan Llama flavor, `maxtext:<MaxText model>` such as
-`maxtext:llama3.1-8b`, or `maxdiffusion:flux-dev` or `maxdiffusion:ideogram4`
-(see `jax_titan.trainer.adapters`).
+`--model` is a JAX-Titan Llama flavor, `ideogram4`, `maxtext:<MaxText model>`
+such as `maxtext:llama3.1-8b`, or `maxdiffusion:flux-dev` or
+`maxdiffusion:ideogram4` (see `jax_titan.trainer.adapters`).
 
 `--parallel=dp` and `--parallel=fsdp` train the same Llama on the same batches
 without the pipeline, as one `jax.jit` program over all devices.
@@ -21,12 +21,14 @@ import socket
 import time
 
 from jax_titan import paths
+from jax_titan.trainer import adapters
 from jax_titan.trainer.layout import Layout
 from jax_titan.trainer.layout import Workload
 from jax_titan.trainer.layout import abstract
 from jax_titan.trainer.layout import placement as layout_placement
 
-_NORM_PARAMS = ("attn_norm", "mlp_norm", "final_norm")
+_NORM_PARAMS = ("attn_norm", "mlp_norm", "final_norm", "attn_out_norm", "mlp_out_norm", "q_norm",
+                "k_norm", "text_norm")
 # Synthetic validation batches come from steps no training run reaches.
 _EVAL_STEPS = 10**9
 
@@ -35,14 +37,14 @@ def parse_args(argv=None):
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument(
       "--model", default="llama3.1-8b",
-      help="A Llama flavor (llama3.1-8b, llama3-test), maxtext:<MaxText model "
-      "name>, maxdiffusion:flux-dev or maxdiffusion:flux-schnell, or "
+      help="A Llama flavor (llama3.1-8b, llama3-test), ideogram4, maxtext:<MaxText "
+      "model name>, maxdiffusion:flux-dev or maxdiffusion:flux-schnell, or "
       "maxdiffusion:ideogram4 with MaxDiffusion's Ideogram branch.",
   )
   parser.add_argument(
       "--model_overrides", default="",
-      help="JSON object of model config overrides for maxtext: and "
-      "maxdiffusion: models, e.g. '{\"base_num_decoder_layers\": 4}'.",
+      help="JSON object of model config overrides for ideogram4 and for maxtext: "
+      "and maxdiffusion: models, e.g. '{\"base_num_decoder_layers\": 4}'.",
   )
   parser.add_argument(
       "--ops", default="",
@@ -54,8 +56,8 @@ def parse_args(argv=None):
       "--parallel", default="mpmd", choices=["mpmd", "dp", "fsdp"],
       help="mpmd: Shardy MPMD pipeline, data parallel inside each stage. "
       "dp, fsdp: no pipeline; one jax.jit program over all devices with "
-      "replicated or sharded parameters and optimizer state. Of the maxtext: "
-      "and maxdiffusion: models, only ideogram4 has fsdp.",
+      "replicated or sharded parameters and optimizer state. Besides the Llama "
+      "flavors, only ideogram4 and maxdiffusion:ideogram4 have fsdp.",
   )
   parser.add_argument(
       "--num_stages", type=int, default=2,
@@ -87,7 +89,7 @@ def parse_args(argv=None):
       help="When mpmd stages sum gradients across their data-parallel ranks: "
       "in every microbatch's backward pass, or once per step from per-rank "
       "parameter copies. Default: step for Llama flavors, microbatch for "
-      "maxtext: and maxdiffusion: models, which support only that.",
+      "the other models, which support only that.",
   )
   parser.add_argument(
       "--per_device", default="vmap", choices=["vmap", "shard_map"],
@@ -113,13 +115,13 @@ def parse_args(argv=None):
   parser.add_argument("--seq_len", type=int, default=2048)
   parser.add_argument(
       "--resolution", type=int, default=1024,
-      help="maxdiffusion: image side in pixels; the model sees (resolution / 16)^2 "
+      help="Image models: image side in pixels; the model sees (resolution / 16)^2 "
       "latent tokens.",
   )
   parser.add_argument(
       "--text_tokens", type=int, default=0,
-      help="maxdiffusion: text tokens per sample; default 512 for flux-dev and "
-      "256 for flux-schnell and ideogram4.",
+      help="Image models: text tokens per sample; default 512 for flux-dev and "
+      "256 for flux-schnell and Ideogram 4.",
   )
   parser.add_argument("--steps", type=int, default=50)
   parser.add_argument("--lr", type=float, default=3e-4)
@@ -131,8 +133,8 @@ def parse_args(argv=None):
   parser.add_argument(
       "--data",
       default=str(paths.work_dir() / "data/wikitext103_train.llama3.bin"),
-      help="uint32 token file, or 'synthetic'. maxdiffusion: models always "
-      "train on synthetic batches.",
+      help="uint32 token file, or 'synthetic'. Image models always train on "
+      "synthetic batches.",
   )
   parser.add_argument("--remat", action=argparse.BooleanOptionalAction, default=True)
   parser.add_argument(
@@ -181,6 +183,7 @@ def parse_args(argv=None):
       "--init_from", default="",
       help="maxtext: models start from this MaxText parameter checkpoint, e.g. "
       "pretrained weights converted with MaxText's checkpoint_conversion/to_maxtext.py, "
+      "and ideogram4 from parameters that jax_titan.trainer.checkpoint.save_params wrote, "
       "instead of a random initialization. A checkpoint in --checkpoint_dir wins.",
   )
   parser.add_argument(
@@ -502,7 +505,7 @@ def main(argv=None):
   )
 
   ops.set_policy(args.ops)
-  adapter = ":" in args.model
+  adapter = ":" in args.model or args.model in adapters.MODELS
   if args.reduce_grads is None:
     args.reduce_grads = "microbatch" if adapter else "step"
   tp = f", tensor parallel {args.tensor_parallel}" if args.tensor_parallel > 1 else ""
@@ -530,12 +533,10 @@ def main(argv=None):
 
   mb, num_mb, seq = args.microbatch_size, args.microbatches, args.seq_len
   if adapter:
-    from jax_titan.trainer import adapters  # pylint: disable=g-import-not-at-top
-
     layout, work = adapters.build(args, devices, optimizer)
   else:
     if args.init_from:
-      raise NotImplementedError("--init_from loads MaxText parameter checkpoints for maxtext: models")
+      raise NotImplementedError("--init_from loads parameters of maxtext: models and ideogram4")
     cfg = llama.FLAVORS[args.model]
     build = _build_mpmd if args.parallel == "mpmd" else _build_spmd
     layout = build(args, cfg, devices, optimizer)
