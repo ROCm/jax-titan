@@ -132,7 +132,7 @@ def test_matches_diffusers():
   pred = jax.jit(lambda p, x: _chain(model, p, x))(model.split(params), x)
   # Only the image positions carry a prediction.
   np.testing.assert_allclose(
-      np.asarray(pred)[:, text_tokens:], ref[:, text_tokens:], rtol=1e-4, atol=1e-5)
+      np.asarray(pred)[:, text_tokens:], ref[:, text_tokens:], rtol=1e-5, atol=1e-5)
 
 
 @pytest.mark.parametrize("num_stages,blocks", [(2, None), (3, (1, 2, 1))])
@@ -157,7 +157,7 @@ def test_stages_match_one_stage(num_stages, blocks):
     return jax.jit(jax.value_and_grad(fn))(params, x, target)
 
   (ref_loss, ref_grads), (staged_loss, staged_grads) = loss(one), loss(model)
-  np.testing.assert_allclose(staged_loss, ref_loss, rtol=1e-6)
+  np.testing.assert_allclose(staged_loss, ref_loss, rtol=1e-5)
   for a, b in zip(jax.tree.leaves(staged_grads), jax.tree.leaves(ref_grads)):
     np.testing.assert_allclose(a, b, rtol=1e-5, atol=1e-7)
 

@@ -202,6 +202,20 @@ def sequence_ids(image_side: int, text_tokens: int) -> dict[str, np.ndarray]:
   }
 
 
+def _rope_frequencies(cfg: IdeogramConfig) -> np.ndarray:
+  """The rotary frequencies, [head_dim // 2] in fp32.
+
+  Computed on the host, every step rounded to fp32 as diffusers rounds it.
+  A compiled program folds the same expression to other last bits, and at the
+  image positions one unit in the last place of a frequency moves an angle by
+  up to 0.004.
+  """
+  d = cfg.attention_head_dim
+  exponent = np.arange(0, d, 2, dtype=np.float32) / np.float32(d)
+  power = np.power(np.float64(cfg.rope_theta), exponent.astype(np.float64)).astype(np.float32)
+  return np.float32(1.0) / power
+
+
 def _rope_tables(cfg: IdeogramConfig, position_ids: jax.Array) -> tuple[jax.Array, jax.Array]:
   """cos and sin of the rotary angles, [batch, tokens, head_dim // 2] in fp32.
 
@@ -209,9 +223,8 @@ def _rope_tables(cfg: IdeogramConfig, position_ids: jax.Array) -> tuple[jax.Arra
   axis's share of `mrope_section` reaches, and use the first axis after that.
   """
   d = cfg.attention_head_dim
-  freqs = 1.0 / (cfg.rope_theta ** (jnp.arange(0, d, 2, dtype=jnp.float32) / d))
   # fp32, not the compute dtype: bf16 cannot tell neighbouring image positions apart.
-  angles = position_ids[..., None].astype(jnp.float32) * freqs
+  angles = position_ids[..., None].astype(jnp.float32) * _rope_frequencies(cfg)
   i = np.arange(d // 2)
   second = (i % 3 == 1) & (i < 3 * cfg.mrope_section[1])
   third = (i % 3 == 2) & (i < 3 * cfg.mrope_section[2])
