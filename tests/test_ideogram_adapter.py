@@ -258,3 +258,22 @@ def test_layout_matches_data_parallel_reference(flags, tmp_path):
   for step in range(4):
     assert layout[step]["loss"] == pytest.approx(reference[step]["loss"], rel=1e-5), step
     assert layout[step]["grad_norm"] == pytest.approx(reference[step]["grad_norm"], rel=1e-4), step
+
+
+def test_native_model_trains_like_the_adapter(tmp_path):
+  """From the adapter's initial weights and on its batches, JAX-Titan's own model trains alike."""
+  import dataclasses  # pylint: disable=g-import-not-at-top
+
+  from jax_titan.trainer import checkpoint  # pylint: disable=g-import-not-at-top
+
+  _, native, _, native_params = _models()
+  checkpoint.save_params(tmp_path / "init", native_params[0])
+  # The branch's training timesteps, not the native model's defaults.
+  overrides = dataclasses.asdict(native.config) | {
+      "dtype": "float32", "timestep_mean": 0.5, "timestep_std": 1.0}
+  reference = _run(tmp_path / "adapter.jsonl", "--parallel=dp")
+  trained = _run(tmp_path / "native.jsonl", "--parallel=dp", "--model=ideogram4",
+                 "--model_overrides=" + json.dumps(overrides), f"--init_from={tmp_path / 'init'}")
+  for step in range(4):
+    assert trained[step]["loss"] == pytest.approx(reference[step]["loss"], rel=1e-5), step
+    assert trained[step]["grad_norm"] == pytest.approx(reference[step]["grad_norm"], rel=1e-4), step
