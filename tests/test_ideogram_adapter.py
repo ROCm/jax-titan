@@ -13,9 +13,10 @@ import pytest
 from jax_titan.observability import records
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
+# The rotary sections end below the head's 16 frequencies, as they do at full size.
 CONFIG = {
     "emb_dim": 64, "num_heads": 2, "in_channels": 16, "llm_features_dim": 48, "adanln_dim": 32,
-    "intermediate_size": 128, "num_layers": 4,
+    "intermediate_size": 128, "num_layers": 4, "mrope_section": (4, 3, 2),
 }
 FLAGS = [
     "--platform=cpu", "--model=maxdiffusion:ideogram4", "--resolution=64", "--text_tokens=8",

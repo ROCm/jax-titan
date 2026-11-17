@@ -17,9 +17,11 @@ from jax_titan.observability import records
 from jax_titan.trainer import checkpoint
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
+# The rotary sections end below the head's 16 frequencies, as they do at full size, so the
+# frequencies past them take the first position axis.
 CONFIG = {
     "attention_head_dim": 32, "num_attention_heads": 2, "in_channels": 16, "llm_features_dim": 48,
-    "adaln_dim": 32, "intermediate_size": 128, "num_layers": 4, "mrope_section": (6, 5, 5),
+    "adaln_dim": 32, "intermediate_size": 128, "num_layers": 4, "mrope_section": (4, 3, 2),
 }
 FLAGS = [
     "--platform=cpu", "--model=ideogram4", "--resolution=64", "--text_tokens=8",
