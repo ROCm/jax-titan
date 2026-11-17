@@ -77,6 +77,31 @@ an adapter: in tests with small sizes, at full size on one GPU, and step by
 step over 1,000 training steps from the same weights
 ([pipelines.md](../pipelines.md#ideogram-4-2026-11-17-4x-mi350x)).
 
+<p align="center">
+  <img src="../images/ideogram4_loss.png" width="880" alt="Training loss over 1,000 steps of the adapter and of JAX-Titan's own Ideogram 4, and the difference of the two step by step">
+</p>
+
+The figure has the training loss of three runs of 1,000 steps, drawn from
+their records in [results/2026-11-17](../results/2026-11-17).
+
+- **The adapter and JAX-Titan's own model draw one line.** The adapter ran on
+  8 GPUs, the own model on 4 from the adapter's weights and on its batches.
+  Step by step their losses differ by at most 0.0097, at step 76, and by at
+  most 0.0031 from step 200 on, where the loss of a run varies by 0.10 from
+  batch to batch.
+- **The third line is this recipe's run,** from the model's own
+  initialization and with its own timesteps.
+- **The floor of the task** is the mean of `1 / (t^2 + (1 - t)^2)` over the
+  training timesteps: 1.558 with the branch's timesteps and 1.572 with the
+  model's own. The floor of a batch moves with its timesteps, and the loss
+  with it.
+- **The branch's own trainer is not in the figure,** because its run is
+  another experiment. It starts from the pretrained weights, which JAX-Titan
+  does not load yet, and at the commit the adapter pins its step returns the
+  random key it was given, so every step draws the same noise and the same
+  timesteps. One step of it is compared with the step of these runs in a test
+  with small sizes (`tests/test_ideogram_adapter.py`).
+
 ## Known limits
 
 - Synthetic batches only: no dataset, no text encoder and no VAE.
