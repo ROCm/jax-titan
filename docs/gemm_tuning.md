@@ -53,13 +53,17 @@ Each stage writes into `OUT`:
 
 A solution that wins alone can still lose in the step. Beside a collective
 that shares the GPU, one kernel can slow down more than another. And under a
-power cap the step can run its GEMMs at a lower clock than a GEMM gets alone,
-even with nothing alongside, because the step's communication draws from the
-same power budget. A kernel that wins at the isolated clock by waiting less on
-memory can then tie. `observability.power` beside the step shows how much of
-it each GPU spends held by its power limit, and `observability/counters.py`
-gives each launch's engine clock and matrix-unit use from hardware counters
-(GRBM_GUI_ACTIVE per chiplet over the launch's duration). With traces
+power cap the step can run every GEMM at a lower clock than a GEMM gets alone,
+even with nothing alongside. On MI300X at 750 W, incoming xGMI traffic lowers
+the engine clock within a second, and it stays low for about 3 s after the
+traffic stops; a step with collectives every few milliseconds never leaves
+that state. A kernel that wins at the isolated clock by waiting less on memory
+can then tie. `observability.power` beside the step shows how much of it each
+GPU spends held by its power limit, and `observability/counters.py` gives each
+launch's engine clock and matrix-unit use from hardware counters
+(GRBM_GUI_ACTIVE per chiplet over the launch's duration). Counting runs the
+counted launches one at a time, which changes the step's clocks, so compare
+launches counted the same way. With traces
 of the step without and with the file (`profile`), `hipblaslt.py instep`
 compares each row's in-step launches and writes the rows that are not slower,
 for a second A/B:
