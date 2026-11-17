@@ -97,8 +97,9 @@ python3 src/jax_titan/tuning/hipblaslt.py verify "v_*.log" --override tuning.txt
 ```
 
 `tuning/hipblaslt.py`, `observability/gemms.py` and `planning/gemm_cost.py`
-use only the standard library, so they run in any container, including one
-with an older JAX than JAX-Titan's. `map` carries winners to another hipBLASLt
+use only the standard library (and Origami for `gemm_cost.py --bound
+origami`), so they run in any container, including one with an older JAX than
+JAX-Titan's. `map` carries winners to another hipBLASLt
 build by solution and kernel name, ignoring tokens that only the library
 version changes. `observability/gemm_bench.py` times problems in isolation
 through JAX under named XLA flag sets (hipBLASLt default or tuned, XLA's
@@ -121,6 +122,17 @@ differences into milliseconds per step:
   peak (where `planning/gpus.py` has one) and the peak clock, since they draw
   less power: on MI300X the proxy's f32 GEMMs reach 112 TFLOP/s, more than the
   FP32 peak allows at the bf16 GEMM's capped clock.
+
+With `--bound origami`, the ceiling is t_best − t_attainable instead.
+t_attainable is the time Origami predicts for the fastest of its candidate
+tiles at the same clock (`planning/origami_bound.py`). Origami, in
+rocm-libraries' `shared/origami` (`pip install shared/origami/python`), models
+each tile's compute and memory latencies with tile and wave quantization over
+the CUs, so this ceiling is what a better kernel could recover. The
+candidates are the tiles TraceLens and tritonBLAS sweep; where hipBLASLt's
+kernel uses another tile and beats the prediction, the ceiling is negative.
+Origami needs each GPU's LDS, register file and L2 sizes, which
+`origami_bound.py` lists for MI300X and MI325X only.
 
 ## New kernels with TensileLite
 
