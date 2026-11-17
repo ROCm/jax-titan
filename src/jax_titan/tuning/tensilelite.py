@@ -8,8 +8,9 @@ tool generates new ones for the captured problems, with hipBLASLt's own flow
       [--iters 100] [--fast] [--cu 304] [--xcc 8]
   python3 tensilelite.py tune DIR --src HIPBLASLT [--gpus 0,1,...]
   python3 tensilelite.py decode DIR [--stock SWEEP/results.json] [--json OUT]
-  python3 tensilelite.py merge DIR --src HIPBLASLT
+  python3 tensilelite.py merge DIR --src HIPBLASLT [--only REGEX]
   python3 tensilelite.py library DIR --src HIPBLASLT [--jobs N]
+  python3 tensilelite.py compare problems.json --library LIB --sweep_bin BIN [--stock RESULTS]
 
 `config` keeps the mask-32 log lines of the problems to tune (by `--only`, a
 regex on hipblaslt.py's problem ids), drops the fields hipBLASLt 1.4 logs that
@@ -17,13 +18,20 @@ tensile_config_generator.py's pattern predates, and runs the generator: one
 Tensile config per GPU. `tune` runs Tensile on each config on its own GPU.
 `decode` reads, per problem size, the best kernel Tensile found from its
 library logic and sets it beside the stock solutions `hipblaslt.py sweep`
-timed. Tensile times with its own client, so treat its numbers as a ranking.
-`merge` merges the tuned logic into a copy of the build's gfx942 logic with
-merge.py, and `library` builds the kernel library from that copy with
+timed. Tensile times with its own client, on sin(index) inputs: under a power
+cap they draw less power than the sweep's normally distributed ones, so the
+GPU holds a higher clock, and on MI300X at 750 W the client reads about 5%
+faster than the sweep for the same kernel.
+`merge` merges the tuned logic of the problems whose new kernel won (`--only`)
+into a copy of the build's gfx942 logic with TensileMergeLibrary, and
+`library` builds the kernel library from that copy with
 TensileCreateLibrary, with the options hipBLASLt's build uses. With
 HIPBLASLT_TENSILE_LIBPATH naming the result, the stock libhipblaslt serves
 problems from it, and `hipblaslt.py sweep` and `verify` and a step A/B measure
-the new kernels the way they measure stock ones.
+the new kernels the way they measure stock ones. `compare` times each problem
+on the stock library (its sweep winner) and on the built one (its first
+choice) in alternating processes on the sweep's timer, which settles what
+Tensile's own client measured.
 
 HIPBLASLT is a hipBLASLt source tree (a rocm-libraries checkout, or its
 projects/hipblaslt) at the revision of the library XLA loads, so the library
@@ -43,6 +51,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import hipblaslt  # noqa: E402  pylint: disable=g-import-not-at-top
@@ -254,8 +263,12 @@ def decode_table(rows) -> str:
   return "\n".join(lines)
 
 
-def merge(out_dir, src, schedule="aquavanjaram", arch_dir="gfx942") -> pathlib.Path:
-  """The build's logic for `schedule` with the tuned Equality logic merged in, under OUT/logic."""
+def merge(out_dir, src, only="", schedule="aquavanjaram", arch_dir="gfx942") -> pathlib.Path:
+  """The build's logic for `schedule` with the tuned Equality logic merged in, under OUT/logic.
+
+  `only` (a regex on problem ids) keeps the tuned files of the problems whose new kernel won:
+  a merged size makes hipBLASLt pick the tuned kernel for it, faster or not.
+  """
   out = pathlib.Path(out_dir)
   stock = hipblaslt_dir(src) / LOGIC / schedule
   dest = out / "logic" / "asm_full" / schedule
@@ -263,13 +276,80 @@ def merge(out_dir, src, schedule="aquavanjaram", arch_dir="gfx942") -> pathlib.P
     shutil.rmtree(dest)
   shutil.copytree(stock, dest)
   tuned = out / "tuned_logic"
-  tuned.mkdir(parents=True, exist_ok=True)
-  for path in out.glob("tune/*/3_LibraryLogic/*.yaml"):
-    shutil.copy(path, tuned / f"{path.parent.parent.name}_{path.name}")
+  if tuned.exists():
+    shutil.rmtree(tuned)
+  tuned.mkdir(parents=True)
   equality = dest / arch_dir / "Equality"
-  subprocess.run([sys.executable, str(tensilelite_dir(src) / "Tensile" / "Utilities" / "merge.py"),
-                  "--no_eff", str(equality), str(tuned), str(equality)], check=True)
+  # TensileMergeLibrary, not the deprecated merge.py, which reads only the older list form.
+  merger = tensilelite_dir(src) / "Tensile" / "bin" / "TensileMergeLibrary"
+  for path in sorted(out.glob("tune/*/3_LibraryLogic/*.yaml")):
+    if only and not any(re.search(only, rec["id"]) for rec in read_logic(path)):
+      continue
+    shutil.copy(path, tuned / f"{path.parent.parent.name}_{path.name}")
+    # The merger pairs an incremental file with the stock file of the same name, so each tuned
+    # file goes in under its own name, one run at a time: runs can share a problem type.
+    with tempfile.TemporaryDirectory() as incremental:
+      shutil.copy(path, pathlib.Path(incremental) / path.name)
+      subprocess.run([sys.executable, str(merger), "--no_eff", str(equality), incremental, str(equality)],
+                     cwd=tensilelite_dir(src), check=True)
   return equality
+
+
+def _library_env(gpu, library=None) -> dict:
+  env = hipblaslt._gpu_env(gpu)  # pylint: disable=protected-access
+  env.pop("HIPBLASLT_TENSILE_LIBPATH", None)
+  if library:
+    env["HIPBLASLT_TENSILE_LIBPATH"] = str(library)
+  return env
+
+
+def compare(problems, library, sweep_bin, stock=None, only="", gpu=0, trials=5, rounds=5,
+            target_ms=100.0, warmup_ms=1000.0) -> list[dict]:
+  """Each problem on the stock library and on `library` (HIPBLASLT_TENSILE_LIBPATH), on the
+  sweep's timer: the stock winner (hipBLASLt's first choice if none was adopted) against the
+  library's first choice, in alternating processes of interleaved rounds."""
+  winners = {r["id"]: r.get("winner") for r in (stock or {}).get("results", [])}
+  rows = []
+  for p in problems["problems"]:
+    if only and not re.search(only, p["id"]):
+      continue
+    ws = p.get("workspace_bytes") or 32 * 2**20
+    stock_index = winners.get(p["id"])
+    arms = {"stock": (_library_env(gpu), -1 if stock_index is None else stock_index),
+            "library": (_library_env(gpu, library), -1)}
+    samples = {name: [] for name in arms}
+    for trial in range(trials):
+      for name in (list(arms) if trial % 2 == 0 else list(arms)[::-1]):
+        env, index = arms[name]
+        cmd = [sweep_bin, "time", *hipblaslt._sweep_args(p), "--ws", str(ws), "--rounds", str(rounds),  # pylint: disable=protected-access
+               "--target_ms", str(target_ms), "--warmup_ms", str(warmup_ms), str(index)]
+        timed = hipblaslt._json_lines(hipblaslt._run(cmd, env=env).stdout)  # pylint: disable=protected-access
+        ms = [r["ms"] for r in timed if r.get("kind") == "time"]
+        if ms:
+          samples[name].append(sorted(ms)[len(ms) // 2])
+    listing = hipblaslt.list_solutions(p, sweep_bin, ws, heuristic=1, env={"HIPBLASLT_TENSILE_LIBPATH": str(library)},
+                                       gpu=gpu)
+    first = listing["heuristic"][0]["index"] if listing["heuristic"] else None
+    row = {"id": p["id"], "stock_index": arms["stock"][1], "library_index": first,
+           "library_kernel": listing["solutions"].get(first, {}).get("kernel"), "samples_ms": samples}
+    if samples["stock"] and samples["library"]:
+      row.update(hipblaslt.decide(samples["stock"], samples["library"], min_gain=0.0))
+    rows.append(row)
+  return rows
+
+
+def compare_table(rows) -> str:
+  lines = ["| problem | stock us | library us | change | separated | library's first choice |",
+           "|---|---|---|---|---|---|"]
+  for r in rows:
+    if "default_ms" not in r:
+      lines.append(f"| {r['id']} | | | not timed | | |")
+      continue
+    short = re.search(r"MT\d+x\d+x\d+_MI\d+x\d+x\d+", r.get("library_kernel") or "")
+    lines.append(f"| {r['id']} | {r['default_ms'] * 1e3:.1f} | {r['candidate_ms'] * 1e3:.1f} | "
+                 f"{r['candidate_ms'] / r['default_ms'] - 1:+.1%} | {'yes' if r['separated'] else 'no'} | "
+                 f"{short.group(0) if short else r.get('library_kernel')} |")
+  return "\n".join(lines)
 
 
 def _rocm_root() -> pathlib.Path:
@@ -282,17 +362,21 @@ def _rocm_root() -> pathlib.Path:
 def library(out_dir, src, jobs=0, arch="gfx942") -> pathlib.Path:
   """TensileCreateLibrary over OUT/logic, as hipBLASLt's build calls it; returns the path for
   HIPBLASLT_TENSILE_LIBPATH."""
-  out = pathlib.Path(out_dir)
+  out = pathlib.Path(out_dir).resolve()
   rocm = _rocm_root()
   dest = out / "library"
+  dest.mkdir(parents=True, exist_ok=True)
   cmd = [sys.executable, "-m", "Tensile.TensileCreateLibrary", f"--architecture={arch}",
          f"--cxx-compiler={rocm / 'bin' / 'amdclang++'}",
          f"--offload-bundler={rocm / 'llvm' / 'bin' / 'clang-offload-bundler'}",
          f"--jobs={jobs or os.cpu_count()}", "--disable-asm-comments",
          str(out / "logic" / "asm_full"), str(dest), "HIP"]
   env = dict(os.environ, PYTHONPATH=f"{tensilelite_dir(src)}{os.pathsep}{os.environ.get('PYTHONPATH', '')}")
-  subprocess.run(cmd, env=env, check=True)
-  return dest / "library"
+  # TensileCreateLibrary writes MatchTable.yaml into its working directory.
+  subprocess.run(cmd, env=env, cwd=dest, check=True)
+  # hipBLASLt looks for the per-architecture directory only under its default path, so
+  # HIPBLASLT_TENSILE_LIBPATH must name that directory itself.
+  return dest / "library" / arch
 
 
 def main(argv=None) -> int:
@@ -319,10 +403,21 @@ def main(argv=None) -> int:
   p = sub.add_parser("merge", help="Merge tuned logic into a copy of the build's gfx942 logic.")
   p.add_argument("out")
   p.add_argument("--src", required=True)
+  p.add_argument("--only", default="", help="Regex on problem ids: merge only these problems' kernels.")
   p = sub.add_parser("library", help="Build the kernel library from the merged logic.")
   p.add_argument("out")
   p.add_argument("--src", required=True)
   p.add_argument("--jobs", type=int, default=0)
+  p = sub.add_parser("compare", help="Problems on the stock library and on a built one, same timer.")
+  p.add_argument("problems", help="hipblaslt.py capture/join output.")
+  p.add_argument("--library", required=True, help="The HIPBLASLT_TENSILE_LIBPATH `library` printed.")
+  p.add_argument("--sweep_bin", default="hipblaslt_sweep")
+  p.add_argument("--stock", default="", help="hipblaslt.py sweep's results.json, for the stock winners.")
+  p.add_argument("--only", default="")
+  p.add_argument("--gpu", type=int, default=0)
+  p.add_argument("--trials", type=int, default=5)
+  p.add_argument("--rounds", type=int, default=5)
+  p.add_argument("--json", default="")
   args = parser.parse_args(argv)
   if args.command == "config":
     for path in config(args.logs, args.src, args.out, args.only, args.gpus, args.iters, args.fast,
@@ -336,10 +431,17 @@ def main(argv=None) -> int:
       pathlib.Path(args.json).write_text(json.dumps(rows, indent=1) + "\n")
     print(decode_table(rows))
   elif args.command == "merge":
-    print(merge(args.out, args.src))
+    print(merge(args.out, args.src, args.only))
   elif args.command == "library":
     path = library(args.out, args.src, args.jobs)
     print(f"HIPBLASLT_TENSILE_LIBPATH={path}")
+  elif args.command == "compare":
+    rows = compare(json.loads(pathlib.Path(args.problems).read_text()), args.library, args.sweep_bin,
+                   json.loads(pathlib.Path(args.stock).read_text()) if args.stock else None, args.only,
+                   args.gpu, args.trials, args.rounds)
+    if args.json:
+      pathlib.Path(args.json).write_text(json.dumps(rows, indent=1) + "\n")
+    print(compare_table(rows))
   return 0
 
 
