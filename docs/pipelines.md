@@ -582,3 +582,100 @@ loss on the held-out image after the window's last step:
 
 The record of the fine-tuning run is
 [results/2026-11-18/ideogram4_finetune-yarn512_fsdp4.jsonl](results/2026-11-18/ideogram4_finetune-yarn512_fsdp4.jsonl).
+
+## Command A+ (2026-11-18, 4x and 8x MI350X)
+
+JAX-Titan's own Command A+ (`models/command_a.py`): Cohere's sparse
+mixture-of-experts language model with its SigLIP vision tower and projector,
+the published checkpoint's layout read and written, preprocessing with the
+published chat template, tokenizer and image settings (`data/command_a.py`),
+generation (`models/command_a_generate.py`) and `--model=command-a-plus` in
+the trainer, as one stage with data parallelism or FSDP. Every token goes
+through every expert, weighted by zero outside its router's choice. These runs
+check that the model is right on GPUs at reduced sizes; the published weights
+were not loaded, and no time here is throughput of record.
+[recipes/command_a_plus.md](recipes/command_a_plus.md) has the commands.
+
+The model against transformers' PyTorch implementation (`cohere2_moe` and
+`cohere2_vision`, 5.23.0), with a config that keeps every branch of the
+published one, 2.2M parameters, on text, on text padded on the left and on
+text with image tiles:
+
+| What | Where | Largest difference |
+|---|---|---|
+| Logits | CPU, fp32 | 4.5e-6, of logits up to 4.5 |
+| Loss and the gradient of every parameter | CPU, fp32 | 2e-7 of the loss; 2.1e-7, of gradients up to 0.24 |
+| Logits, from a checkpoint transformers wrote | one MI350X, fp32 | 1.4e-5, of logits up to 18.6 |
+| Loss and gradients, the same checkpoint | one MI350X, fp32 | 2e-7 of the loss; 9.8e-7, of gradients up to 0.75 |
+| Greedy generation, 8 tokens after a prompt | CPU and one MI350X, fp32 | none: 16 of 16 tokens, with and without tiles |
+| Checkpoints, written by one and read by the other | CPU | none, bit for bit |
+| Rendered conversations and token ids | the published tokenizer and chat template | none, four conversations |
+| Tiles of a 1000x700 picture | Pillow here, torchvision there | 2 of 255 levels; 99.8% of values equal |
+
+In bf16 single logits move far more than their mean, in transformers' model
+as in this one: a router's choice between near-equal experts can flip. On the
+checkpoint with logits up to 18.6, on CPU:
+
+| bf16 against fp32 | Mean difference | Largest | Same top token |
+|---|---|---|---|
+| transformers' model | 0.07-0.09 | 0.8-1.8 | 94-98% |
+| This model | 0.08-0.09 | 1.4-1.9 | 95-98% |
+| This model on one MI350X | 0.07-0.09 | 1.3-1.9 | 95-100% |
+
+The trainer on 4 MI350X in fp32, a model of 8 layers and width 256 on 16
+sequences of 128 random tokens, 10 steps:
+
+| Runs compared | Loss | Gradient norm |
+|---|---|---|
+| FSDP against data parallelism, text | within 4.3e-7 | within 2.1e-5 |
+| FSDP against data parallelism, with 2 image tiles per sequence | within 4.4e-7 | within 3.3e-5 |
+| 4 GPUs against 8 CPU devices, first step | within 1.1e-7 | within 1.1e-7 |
+| 4 GPUs against 8 CPU devices, 10 steps, with tiles | within 1.6e-5 | within 2.5e-4 |
+
+A loss curve: a Command A+ of 2.11B parameters (16 layers of width 1,024, 32
+query heads of 128 on 8 key heads, 32 experts of which a token takes 8, a
+shared MLP 4 wide, a sliding window of 256) on WikiText-103 as Llama 3 tokens,
+with FSDP and bf16 compute: 16 sequences of 1,024 tokens per step, AdamW at
+3e-4 after 100 warmup steps with a cosine decay, 3,000 steps, 49M of the
+text's 120M tokens. Means over 250 steps, and the loss on held-out text after
+the window's last step:
+
+| Steps | 0-249 | 250-499 | 500-749 | 750-999 | 1000-1249 | 1250-1499 | 1500-1749 | 1750-1999 | 2000-2249 | 2250-2499 | 2500-2749 | 2750-2999 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Training, 4 GPUs | 6.6162 | 5.1107 | 4.7200 | 4.4438 | 4.2515 | 4.0758 | 3.9265 | 3.8152 | 3.7159 | 3.6576 | 3.5953 | 3.5813 |
+| Training, 8 GPUs | 6.6137 | 5.1087 | 4.7183 | 4.4414 | 4.2440 | 4.0698 | 3.9238 | 3.8146 | 3.7161 | 3.6585 | 3.5963 | 3.5822 |
+| Validation, 4 GPUs | 5.3735 | 4.8104 | 4.5336 | 4.3177 | 4.1323 | 3.9766 | 3.8480 | 3.7597 | 3.6912 | 3.6405 | 3.6023 | 3.5828 |
+| Validation, 8 GPUs | 5.3714 | 4.8081 | 4.5361 | 4.3185 | 4.1227 | 3.9742 | 3.8481 | 3.7633 | 3.6951 | 3.6430 | 3.6027 | 3.5839 |
+
+| | 4x MI350X | 8x MI350X |
+|---|---|---|
+| Step time, median | 0.148 s | 0.092 s |
+| Tokens/s per GPU | 27.6k | 22.2k |
+| Memory in use per GPU, peak | 14.0 GiB on one, 11.2 GiB | 12.0 GiB on one, 5.7 GiB |
+| Compiling | 37.6 s | 55.5 s |
+| Steps with a non-finite loss | 0 | 0 |
+
+- **The model trains.** The loss starts at 12.30, above the 11.76 of a uniform
+  guess over the 128,256 tokens, and ends at 3.58 on held-out text. Predicting
+  every token by its frequency in the training text gives 7.36, so the model
+  uses context. Training and validation loss stay together: in 3,000 steps
+  the model sees less than half of the text once.
+- **4 and 8 GPUs draw one curve.** Both runs take the same batches. The means
+  over 250 steps differ by at most 0.0075 and the validation losses by at
+  most 0.0096, where the loss of a step varies by 0.13 from batch to batch.
+- **The gradient norm settles.** It falls from 7.2 to about 0.5 and stays
+  there; 90 steps, all early, exceed the clipping norm of 1.0.
+- **The trained parameters write text.** Saved by `--save_params` after the
+  8-GPU run and loaded on one GPU in 2.7 s, the model continues
+  ` = Mount Everest = \n \n Mount Everest is the` with
+  ` second largest city in the United States . It is located in the U.S. state
+  of California .`: the grammar of the training text, and none of its facts.
+- **Image tiles train on GPUs too.** With one random 512x512 tile per
+  sequence, the vision tower and the projector at their published sizes join
+  the trained state (2.59B parameters): 30 steps with FSDP on 4 GPUs take
+  0.355 s each with 31.5 GiB in use per GPU, the loss on random tokens moves
+  from 12.25 to 12.11 and the gradient norm falls from 2.8 to 0.38.
+- **Generation gives the same tokens on a GPU and on CPU:** 12 of 12 after a
+  prompt with a picture, in bf16 and in fp32, for a checkpoint of toy size.
+
+Records: `docs/results/2026-11-18/command-a-plus_*`.

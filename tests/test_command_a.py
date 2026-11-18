@@ -7,6 +7,8 @@ import command_a_checkpoint
 import jax
 import jax.numpy as jnp
 import numpy as np
+import optax
+import pytest
 
 from jax_titan.models import command_a
 
@@ -39,6 +41,30 @@ def _loss(cfg, params, tokens, pixels, valid):
   logits = command_a.forward(cfg, params, tokens, pixels, valid, jnp.float32)
   targets = np.where(tokens == cfg.image_token_id, -100, tokens)
   return command_a.cross_entropy(logits[:, :-1], targets[:, 1:]), logits
+
+
+def _loss_and_gradient_norm(name):
+  """Of `_params()` on a batch of `_batches()`, in fp32."""
+  tokens, pixels, valid = dict(_batches())[name]
+  params = _params(images=pixels is not None)
+  (loss, _), grads = jax.value_and_grad(_loss, argnums=1, has_aux=True)(
+      CONFIG, params, tokens, pixels, valid)
+  return float(loss), float(optax.global_norm(grads))
+
+
+# What `_loss_and_gradient_norm` gives on CPU, where the model matches transformers.
+RECORDED = {"text": (6.657514, 5.484844), "image": (7.171245, 6.391755)}
+
+
+@pytest.mark.parametrize("name", sorted(RECORDED))
+def test_loss_and_gradient_are_the_recorded_ones(name):
+  assert _loss_and_gradient_norm(name) == pytest.approx(RECORDED[name], rel=1e-6)
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("name", sorted(RECORDED))
+def test_a_gpu_gives_the_loss_and_gradient_of_cpu(name):
+  assert _loss_and_gradient_norm(name) == pytest.approx(RECORDED[name], rel=1e-5)
 
 
 @needs_reference

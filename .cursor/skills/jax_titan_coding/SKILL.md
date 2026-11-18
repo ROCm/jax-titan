@@ -146,7 +146,10 @@ for a later comparison: do not import from it or edit it.
 - `tests/test_command_a.py` checks `models/command_a.py` against
   transformers' model in logits, loss and gradients, and the checkpoint
   layout both ways (skipped without `torch` and a `transformers` with
-  `cohere2_moe`); `tests/test_command_a_generate.py` checks preprocessing and
+  `cohere2_moe`). It also holds the loss and gradient norm of the test model
+  as recorded on CPU, which a `gpu` test repeats on ROCm: after a change that
+  moves them, check against transformers again before recording new ones.
+  `tests/test_command_a_generate.py` checks preprocessing and
   generation, and `tests/test_command_a_training.py` its layouts against
   `--parallel=dp`. `tests/command_a_checkpoint.py` writes a checkpoint in the
   published layout at toy size.

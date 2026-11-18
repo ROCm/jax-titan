@@ -53,7 +53,8 @@ This is the target design; [What works](#what-works) lists what runs today.
   with FSDP, and `jax_titan.models.command_a_generate` answers prompts of text
   and images from a checkpoint in the published layout
   ([docs/recipes/command_a_plus.md](docs/recipes/command_a_plus.md)). It has
-  run on CPU only, and not with the published weights.
+  run at reduced sizes, up to 2.11B parameters on 8 GPUs, and not with the
+  published weights.
 - Operator providers chosen per op with `--ops`: ROCm TE fused attention and
   FP8/MXFP8 GEMMs, JAX-AITER flash attention, RMSNorm, SiLU-and-mul and GEMMs,
   AITER's Triton RMSNorm, SiLU-and-mul and RoPE and a gfx950 Gluon GEMM through
