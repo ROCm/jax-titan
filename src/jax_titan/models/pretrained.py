@@ -70,9 +70,9 @@ def read(path) -> dict[str, np.ndarray]:
   return tensors
 
 
-def write(path, tensors: dict[str, np.ndarray]) -> None:
-  """Writes `tensors` as one safetensors file."""
-  header, offset, blobs = {}, 0, []
+def write(path, tensors: dict[str, np.ndarray], metadata: dict[str, str] | None = None) -> None:
+  """Writes `tensors` as one safetensors file, with `metadata` in its header."""
+  header, offset, blobs = ({"__metadata__": metadata} if metadata else {}), 0, []
   for name, value in tensors.items():
     value = np.asarray(value, order="C")
     blob = value.tobytes()
