@@ -87,7 +87,7 @@ how to update the packages they install.
 |---|---|
 | `data.ideogram --checkpoint=CKPT --images=DIR --out=CACHE` | Caches Ideogram 4's training samples of a directory of images with captions: the autoencoder's image tokens and the text encoder's features, for the trainer's `--data=CACHE` ([recipes/ideogram4.md](recipes/ideogram4.md#fine-tuning-on-images)) |
 | `models.ideogram_generate --checkpoint=CKPT --prompt=@FILE --out=PNG` | Draws pictures with Ideogram 4 from a checkpoint in diffusers' layout, with `--transformer` from fine-tuned parameters, on one GPU ([recipes/ideogram4.md](recipes/ideogram4.md#pictures-from-the-published-weights)) |
-| `models.command_a_generate --checkpoint=CKPT --prompt=TEXT --image=FILE` | Answers a prompt, with pictures or without, with Command A+ from a checkpoint in the published layout, with `--params` from trained parameters, on one device ([recipes/command_a_plus.md](recipes/command_a_plus.md#text-from-a-checkpoint)) |
+| `models.command_a_generate --checkpoint=CKPT --prompt=TEXT --image=FILE` | Answers a prompt, with pictures or without, with Command A+ from a checkpoint in the published layout, with `--params` from trained parameters, its layers spread over the visible GPUs ([recipes/command_a_plus.md](recipes/command_a_plus.md#text-from-a-checkpoint)) |
 
 ### Measuring a run
 

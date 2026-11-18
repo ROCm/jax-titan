@@ -583,7 +583,7 @@ loss on the held-out image after the window's last step:
 The record of the fine-tuning run is
 [results/2026-11-18/ideogram4_finetune-yarn512_fsdp4.jsonl](results/2026-11-18/ideogram4_finetune-yarn512_fsdp4.jsonl).
 
-## Command A+ (2026-11-18, 4x and 8x MI350X)
+## Command A+ (2026-11-18, MI350X)
 
 JAX-Titan's own Command A+ (`models/command_a.py`): Cohere's sparse
 mixture-of-experts language model with its SigLIP vision tower and projector,
@@ -592,8 +592,8 @@ published chat template, tokenizer and image settings (`data/command_a.py`),
 generation (`models/command_a_generate.py`) and `--model=command-a-plus` in
 the trainer, as one stage with data parallelism or FSDP. Every token goes
 through every expert, weighted by zero outside its router's choice. These runs
-check that the model is right on GPUs at reduced sizes; the published weights
-were not loaded, and no time here is throughput of record.
+check that the model is right on GPUs, at reduced sizes and with the published
+weights; no time here is throughput of record.
 [recipes/command_a_plus.md](recipes/command_a_plus.md) has the commands.
 
 The model against transformers' PyTorch implementation (`cohere2_moe` and
@@ -677,5 +677,67 @@ the window's last step:
   from 12.25 to 12.11 and the gradient norm falls from 2.8 to 0.38.
 - **Generation gives the same tokens on a GPU and on CPU:** 12 of 12 after a
   prompt with a picture, in bf16 and in fp32, for a checkpoint of toy size.
+
+The published weights, `CohereLabs/command-a-plus-05-2026-bf16` at revision
+`5fb6fde5fd12`: 9 safetensors files of 437.5 GB whose SHA-256 equals what
+Hugging Face records. `command_a.load_stages` reads them stage by stage onto
+several GPUs, a run of layers on each: the host copies the stored tensors side
+by side, and the device transposes, reorders and casts them.
+`command_a_generate` runs over the stages, with only hidden states passing
+between GPUs. The reference is transformers with the same files on CPU in
+fp32, 875 GB of memory: loaded in 133 s, it answers a question of 122 tokens
+with 98 tokens in 333 s and a question about a picture, 1,407 tokens with 5
+tiles, with 138 tokens in 480 s. JAX-Titan takes the reference's token ids and
+tiles:
+
+| Prompt | Precision, GPUs | Last-position logits: largest and mean difference | Likeliest token equal | Greedy tokens equal from the start |
+|---|---|---|---|---|
+| Question, 122 tokens | fp32, 7 | 3.6e-5 and 4.5e-6, of logits up to 25.0 | 122 of 122 positions | 98 of 98 |
+| Picture, 1,407 tokens | fp32, 7 | 1.6e-4 and 2.2e-5, of logits up to 24.4 | 1,407 of 1,407 | 138 of 138 |
+| Question, 122 tokens | bf16, 4 | 0.52 and 0.065 | 120 of 122 | 35 of 98 |
+| Picture, 1,407 tokens | bf16, 4 | 1.03 and 0.087 | 1,156 of 1,407 | 9 of 138 |
+
+| | bf16 on 4 GPUs | fp32 on 7 GPUs |
+|---|---|---|
+| Loading | 65-102 s | 70 s |
+| Weights per GPU | 109 GB | 109-137 GB |
+| The question: tokens, time | 98 in 50 s | 98 in 142 s |
+| The picture: tokens, time | 114 in 143 s | 138 in 924 s |
+
+- **In fp32 the published weights give transformers' answers token for
+  token,** for the question and for the picture.
+- **In bf16 the answers say the same in other words.** After the first 35
+  and 9 tokens the greedy answers take other words than transformers', and
+  describe the same riddle and the same picture: a golden retriever on a red
+  skateboard on a sidewalk, trees, bushes and a white picket fence behind it.
+- **A bf16 answer also depends on the length it may take.** Later positions
+  hold padding, which no earlier position attends to, but the arrays have
+  another shape and bf16 rounds differently: the question's answer equals
+  transformers' word for word in a run of up to 256 new tokens, and leaves it
+  after 35 tokens in a run of up to 98.
+- **The loading times are not those of a first read.** Every load here
+  followed the download or another load on the same host; reading the files
+  from the shared disk for the first time was not timed.
+
+The trainer against a PyTorch loop on transformers' model, both from the same
+weights of a 64M-parameter Command A+ (8 layers of width 256, 16 experts of
+which a token takes 4) on the same batches, 16 sequences of 128 tokens of
+WikiText-103, 1,000 steps in fp32. The loop mirrors the trainer's optimizer:
+AdamW with its decay mask, the warmup and cosine learning rates, the clipping
+by the global norm.
+
+| | JAX-Titan's trainer, FSDP on 4 GPUs | PyTorch loop, CPU |
+|---|---|---|
+| Loss, steps 0-9 | 12.2500 | 12.2500 |
+| Loss, steps 10-99 | 9.8365 | 9.8365 |
+| Loss, steps 100-299 | 6.8050 | 6.8049 |
+| Loss, steps 300-599 | 6.2851 | 6.2848 |
+| Loss, steps 900-999 | 6.0178 | 6.0174 |
+| Validation loss after 1,000 steps | 6.0223 | 6.0234 |
+| Time of the 1,000 steps | 11 s | 1,050 s |
+
+The losses of a step differ by at most 9.5e-7 over the first 10 steps, 9.5e-4
+over the first 100 and 0.0061 over all, where the loss varies by 0.17 from
+batch to batch.
 
 Records: `docs/results/2026-11-18/command-a-plus_*`.

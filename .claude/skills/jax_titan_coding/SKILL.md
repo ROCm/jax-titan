@@ -88,7 +88,10 @@ for a later comparison: do not import from it or edit it.
   (`--model=command-a-plus`) as one stage, since its output head is its
   embedding matrix. `data/command_a.py` applies the checkpoint's chat
   template, tokenizer and image settings, and `models/command_a_generate.py`
-  generates text.
+  generates text. The published model is too large for one device:
+  `load_stages` reads its checkpoint stage by stage onto several, a run of
+  layers on each, with the transposing and casting done on the device, and
+  generation runs over these stages.
 - **Precision:** parameters and optimizer state are fp32; compute casts to
   bf16 before the layer scan. Casting inside the rematerialized layer was
   measured slower; do not move it back without a new A/B.

@@ -88,6 +88,8 @@ def main(argv=None):
   parser.add_argument("--temperature", type=float, default=0.0,
                       help="0 takes the likeliest token; above 0, tokens are drawn.")
   parser.add_argument("--seed", type=int, default=0)
+  parser.add_argument("--dtype", choices=["bfloat16", "float32"], default="bfloat16",
+                      help="The precision the model computes in; float32 takes twice the memory.")
   parser.add_argument("--params", default="",
                       help="Parameters that the trainer's --save_params wrote, instead of the "
                       "checkpoint's.")
@@ -113,17 +115,18 @@ def main(argv=None):
   preprocessor = data.Preprocessor.open(args.checkpoint)
   tokens, tiles = preprocessor.encode(messages, images)
   start = time.time()
+  dtype = jax.numpy.dtype(args.dtype)
   if args.params:
     # The trainer saves the language model, and the vision tower only when it trained on images.
-    cfg, params = command_a.load(args.checkpoint, images=bool(images))
+    cfg, params = command_a.load(args.checkpoint, dtype, images=bool(images))
     trained = command_a.Model(cfg, images="vision" in checkpoint.saved_keys(args.params))
-    params = command_a.to_stages(cfg, params | trained.load(args.params)[0], jax.devices())
+    params = command_a.to_stages(cfg, params | trained.load(args.params)[0], jax.devices(), dtype)
   else:
-    cfg, params = command_a.load_stages(args.checkpoint, jax.devices(), images=bool(images))
-  print(f"loaded on {len(params)} devices after {time.time() - start:.0f} s; "
-        f"the prompt is {len(tokens)} tokens" + (f" with {len(tiles)} image tiles" if images else ""))
+    cfg, params = command_a.load_stages(args.checkpoint, jax.devices(), dtype, bool(images))
+  print(f"loaded on {len(params)} devices after {time.time() - start:.0f} s; the prompt is "
+        f"{len(tokens)} tokens" + (f" with {len(tiles)} image tiles" if images else ""))
   start = time.time()
-  new = generate(cfg, params, tokens[None], None if tiles is None else tiles[None],
+  new = generate(cfg, params, tokens[None], None if tiles is None else tiles[None], dtype=dtype,
                  new_tokens=args.max_new_tokens, temperature=args.temperature, seed=args.seed)[0]
   print(f"generated {len(new)} tokens in {time.time() - start:.0f} s")
   print(preprocessor.decode(new))

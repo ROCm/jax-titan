@@ -48,13 +48,12 @@ This is the target design; [What works](#what-works) lists what runs today.
   from Ideogram's published weights and is fine-tuned on images.
 - Command A+, Cohere's sparse mixture-of-experts language model with a vision
   tower, as JAX-Titan's own model, written after transformers' implementation
-  and matching it in logits, loss and gradients at a small size;
-  `--model=command-a-plus` trains it as one stage, with data parallelism or
-  with FSDP, and `jax_titan.models.command_a_generate` answers prompts of text
-  and images from a checkpoint in the published layout
-  ([docs/recipes/command_a_plus.md](docs/recipes/command_a_plus.md)). It has
-  run at reduced sizes, up to 2.11B parameters on 8 GPUs, and not with the
-  published weights.
+  and matching it in logits, loss and gradients.
+  `jax_titan.models.command_a_generate` answers prompts of text and pictures
+  with the published weights of 218.75B parameters on 4 GPUs, in fp32 token
+  for token as transformers does, and `--model=command-a-plus` trains the
+  model as one stage, with data parallelism or with FSDP, so far at reduced
+  sizes ([docs/recipes/command_a_plus.md](docs/recipes/command_a_plus.md)).
 - Operator providers chosen per op with `--ops`: ROCm TE fused attention and
   FP8/MXFP8 GEMMs, JAX-AITER flash attention, RMSNorm, SiLU-and-mul and GEMMs,
   AITER's Triton RMSNorm, SiLU-and-mul and RoPE and a gfx950 Gluon GEMM through

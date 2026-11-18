@@ -1,0 +1,72 @@
+{
+ "dtype": "float32",
+ "devices": 7,
+ "load_seconds": 70,
+ "layers_per_device": [
+  4,
+  5,
+  4,
+  5,
+  4,
+  5,
+  5
+ ],
+ "prompts": {
+  "text": {
+   "tokens": 122,
+   "forward_seconds_with_compilation": 37.1,
+   "last_logits_abs_max": 25.01357650756836,
+   "last_logits_abs_diff_max": 3.62396240234375e-05,
+   "last_logits_abs_diff_mean": 4.477149104786804e-06,
+   "last_top5_ours": [
+    669,
+    1905,
+    2110,
+    2632,
+    45
+   ],
+   "last_top5_theirs": [
+    669,
+    1905,
+    2110,
+    2632,
+    45
+   ],
+   "likeliest_equal": "122 of 122",
+   "generated_tokens": 98,
+   "reference_generated_tokens": 98,
+   "generated_equal_from_the_start": 98,
+   "generate_seconds": 142.1,
+   "continuation": "The user asks a riddle: \"What has keys but can't open locks?\" This is a classic riddle answer: a piano (or keyboard). The user is asking a riddle, which is educational/creative content, not harmful. So we can answer. Provide answer and maybe explanation.<|END_THINKING|><|START_TEXT|>A piano (or a keyboard) has keys but can’t open locks. The “keys” refer to the musical keys you press to play notes, not the metal keys used for locks.<|END_TEXT|><|END_OF_TURN_TOKEN|>",
+   "reference_continuation": "The user asks a riddle: \"What has keys but can't open locks?\" This is a classic riddle answer: a piano (or keyboard). The user is asking a riddle, which is educational/creative content, not harmful. So we can answer. Provide answer and maybe explanation.<|END_THINKING|><|START_TEXT|>A piano (or a keyboard) has keys but can’t open locks. The “keys” refer to the musical keys you press to play notes, not the metal keys used for locks.<|END_TEXT|><|END_OF_TURN_TOKEN|>"
+  },
+  "image": {
+   "tokens": 1407,
+   "forward_seconds_with_compilation": 161.5,
+   "last_logits_abs_max": 24.374752044677734,
+   "last_logits_abs_diff_max": 0.00016379356384277344,
+   "last_logits_abs_diff_mean": 2.159436553483829e-05,
+   "last_top5_ours": [
+    669,
+    2110,
+    1905,
+    45,
+    255011
+   ],
+   "last_top5_theirs": [
+    669,
+    2110,
+    1905,
+    45,
+    255011
+   ],
+   "likeliest_equal": "1407 of 1407",
+   "generated_tokens": 138,
+   "reference_generated_tokens": 138,
+   "generated_equal_from_the_start": 138,
+   "generate_seconds": 923.5,
+   "continuation": "The image shows a golden retriever dog riding a skateboard on a sidewalk. The dog appears happy with its tongue out. The setting is a residential street with trees, bushes, and a white picket fence in the background. The dog is standing on a red skateboard with black wheels. The scene is well-lit with sunlight filtering through the trees.<|END_THINKING|><|START_TEXT|>The image shows a golden retriever dog riding a skateboard on a sidewalk. The dog appears happy with its tongue out. The setting is a residential street with trees, bushes, and a white picket fence in the background. The dog is standing on a red skateboard with black wheels. The scene is well-lit with sunlight filtering through the trees.<|END_TEXT|><|END_OF_TURN_TOKEN|>",
+   "reference_continuation": "The image shows a golden retriever dog riding a skateboard on a sidewalk. The dog appears happy with its tongue out. The setting is a residential street with trees, bushes, and a white picket fence in the background. The dog is standing on a red skateboard with black wheels. The scene is well-lit with sunlight filtering through the trees.<|END_THINKING|><|START_TEXT|>The image shows a golden retriever dog riding a skateboard on a sidewalk. The dog appears happy with its tongue out. The setting is a residential street with trees, bushes, and a white picket fence in the background. The dog is standing on a red skateboard with black wheels. The scene is well-lit with sunlight filtering through the trees.<|END_TEXT|><|END_OF_TURN_TOKEN|>"
+  }
+ }
+}

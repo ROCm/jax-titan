@@ -201,5 +201,5 @@ def test_command_line_answers_about_a_picture(tmp_path, capsys):
   assert "the prompt is 33 tokens with 5 image tiles" in out
   (tmp_path / "prompt.txt").write_text("a b c\n", encoding="utf-8")
   prompt = f"--prompt=@{tmp_path / 'prompt.txt'}"
-  assert command_a_generate.main([*flags, prompt, "--system=d"]) == 0
+  assert command_a_generate.main([*flags, prompt, "--system=d", "--dtype=float32"]) == 0
   assert "the prompt is 10 tokens\n" in capsys.readouterr().out
