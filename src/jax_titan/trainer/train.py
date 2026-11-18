@@ -134,7 +134,8 @@ def parse_args(argv=None):
       "--data", default="",
       help="Token models: a uint32 token file (default: the WikiText-103 train file) or "
       "'synthetic'. Image models train on synthetic batches; ideogram4 also on a cache "
-      "directory that jax_titan.data.ideogram wrote.",
+      "directory that jax_titan.data.ideogram wrote. command-a-plus also takes a cache of "
+      "conversations that jax_titan.data.command_a wrote.",
   )
   parser.add_argument("--remat", action=argparse.BooleanOptionalAction, default=True)
   parser.add_argument(

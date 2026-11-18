@@ -13,10 +13,11 @@ microbatch's backward pass, and attention in native JAX unless the ops policy
 names attention. Ideogram 4's attention does not follow the policy: the native
 model passes a mask, which the providers decline, and the branch's model runs
 its own attention. `--model=command-a-plus` trains JAX-Titan's Command A+
-(`jax_titan.models.command_a`) on token windows, as one stage. `--parallel=dp`
-runs the same stages, weights and batches as one data-parallel `jax.jit`
-program, the no-pipeline reference; for Ideogram 4 and Command A+,
-`--parallel=fsdp` also shards parameters and optimizer state.
+(`jax_titan.models.command_a`) on token windows or on a cache of conversations
+(`jax_titan.data.command_a`), as one stage or, with its embedding frozen, as a
+pipeline. `--parallel=dp` runs the same stages, weights and batches as one
+data-parallel `jax.jit` program, the no-pipeline reference; for Ideogram 4 and
+Command A+, `--parallel=fsdp` also shards parameters and optimizer state.
 
 The layouts here take a staged model, any object with `init(seed)` and
 `abstract(seed)`, the parameters of each stage and their shapes, and

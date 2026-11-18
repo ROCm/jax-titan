@@ -85,13 +85,24 @@ for a later comparison: do not import from it or edit it.
   `tensors_from_params` map both ways, so keep them inverse. Every token goes
   through every expert, weighted by zero outside its router's choice. It
   trains through the layouts of `trainer/adapters.py`
-  (`--model=command-a-plus`) as one stage, since its output head is its
-  embedding matrix. `data/command_a.py` applies the checkpoint's chat
-  template, tokenizer and image settings, and `models/command_a_generate.py`
-  generates text. The published model is too large for one device:
+  (`--model=command-a-plus`): as one stage, since its output head is its
+  embedding matrix, or as a pipeline with the embedding frozen and a copy on
+  the first stage and on the last. `data/command_a.py` applies the
+  checkpoint's chat template, tokenizer and image settings and caches
+  conversations to fine-tune on, and `models/command_a_generate.py` generates
+  text. The published model is too large for one device:
   `load_stages` reads its checkpoint stage by stage onto several, a run of
   layers on each, with the transposing and casting done on the device, and
   generation runs over these stages.
+- **Frozen parameters:** a staged model may train part of its parameters:
+  `is_frozen(path)` names the rest (Command A+'s `freeze`). The layouts of
+  `trainer/adapters.py` keep frozen parameters out of the trained state, in
+  the model's compute dtype, with no gradient and no optimizer state; the
+  step takes them after the state (`Layout.frozen`), and `--save_params`
+  writes the trained ones alone. Do not freeze by masking updates: the
+  optimizer state and the gradients of frozen parameters would still be held.
+  A model whose weights exceed the host's memory gives `place(path, targets)`,
+  which reads published weights straight onto the stages' devices.
 - **Precision:** parameters and optimizer state are fp32; compute casts to
   bf16 before the layer scan. Casting inside the rematerialized layer was
   measured slower; do not move it back without a new A/B.
@@ -154,8 +165,9 @@ for a later comparison: do not import from it or edit it.
   moves them, check against transformers again before recording new ones.
   `tests/test_command_a_generate.py` checks preprocessing and
   generation, and `tests/test_command_a_training.py` its layouts against
-  `--parallel=dp`. `tests/command_a_checkpoint.py` writes a checkpoint in the
-  published layout at toy size.
+  `--parallel=dp`, with and without frozen parameters, and fine-tuning from a
+  cache of conversations to generated answers. `tests/command_a_checkpoint.py`
+  writes a checkpoint in the published layout at toy size.
 - A performance claim needs a GPU run on an idle node against the
   no-pipeline baseline from the same stack (see `jax_titan_training`), with
   its JSONL in `docs/results/<date>/`.

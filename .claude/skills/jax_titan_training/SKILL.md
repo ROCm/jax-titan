@@ -82,6 +82,13 @@ XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" timeout -s KILL 1800 python -m jax_titan.t
 # (docs/recipes/command_a_plus.md); --init_from takes a checkpoint in the
 # published layout.
 ... --model=command-a-plus --parallel=fsdp --num_stages=1 --lr=1e-5 ...
+
+# The published Command A+ (218.75B) fine-tuned on a cache of conversations
+# from jax_titan.data.command_a: a pipeline of 4 stages on 4 GPUs, the experts
+# and the embedding frozen, 176-185 GiB in use per GPU.
+... --model=command-a-plus --parallel=mpmd --num_stages=4 --microbatches=4 \
+  --microbatch_size=2 --lr=1e-5 --data=$CACHE --init_from=$CKPT \
+  --model_overrides='{"freeze": ["experts", "embed"]}' --save_params=$OUT ...
 ```
 
 Layout flags: `--schedule`, `--stage_fsdp`, `--tensor_parallel`,
@@ -95,7 +102,7 @@ Layout flags: `--schedule`, `--stage_fsdp`, `--tensor_parallel`,
 with gradients reduced per microbatch (the default for them);
 `--stage_layers` counts their decoder layers or blocks, and
 `--model_overrides` takes JSON config overrides. `command-a-plus` is one
-stage.
+stage, or more with `"freeze": ["embed"]` among its overrides.
 
 ## Monitor
 

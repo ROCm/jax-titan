@@ -4,7 +4,8 @@ Command A+ is Cohere's open-weight language model of 218.75B parameters. It is
 a sparse mixture-of-experts transformer: in each of its 32 layers a router
 sends a token to 8 of 128 experts, and a SigLIP vision tower lets it read
 images. JAX-Titan has it as its own model: it reads the published checkpoint,
-answers prompts of text and pictures with it, and trains the model.
+answers prompts of text and pictures with it, and fine-tunes it on
+conversations.
 
 ## Running the recipe
 
@@ -70,47 +71,82 @@ you press to play notes, not the metal keys used for locks.<|END_TEXT|>
 - **Decoding:** the likeliest token at every step, or with `--temperature`
   drawn tokens, until the end-of-turn token or `--max_new_tokens`, 256 by
   default. Every token is a pass over the whole sequence: 0.5 s after the
-  question's 122 tokens, 1.3 s after the picture's 1,407.
+  question's 122 tokens, 1.3 s after the picture's 1,407. `--prompt` may be
+  repeated: each is answered on its own, from one load.
 - **Precision:** bf16. `--dtype=float32` computes in fp32, which takes 875 GB
   of GPU memory.
-- **Weights:** `--params` replaces the checkpoint's by parameters that the
-  trainer's `--save_params` wrote.
+- **Weights:** `--params` puts parameters that the trainer's `--save_params`
+  wrote in place of the checkpoint's own.
 
-### Training a reduced model
-
-Training has run at reduced sizes of the model, from random weights. A model
-of 2.11B parameters on WikiText-103, the text `python -m jax_titan.data.text`
-prepares:
+### Fine-tuning on conversations
 
 ```bash
+# Once: the conversations as token ids, with what the model is to learn marked.
+python -m jax_titan.data.command_a --checkpoint=$CKPT \
+  --conversations=examples/command_a_plus_conversations.jsonl --out=cache
+
 export JAX_TITAN_LAUNCH_TIME=$(date +%s.%N)
 HIP_VISIBLE_DEVICES=0,1,2,3 XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" \
-  python -m jax_titan.trainer.train --model=command-a-plus --parallel=fsdp --num_stages=1 \
-  --microbatches=1 --microbatch_size=16 --seq_len=1024 --warmup_steps=100 --steps=3000 \
-  --eval_every=250 --eval_batches=8 --run_dir=runs/command-a-plus \
-  --model_overrides='{"vocab_size": 128256, "hidden_size": 1024, "num_hidden_layers": 16,
-    "num_attention_heads": 32, "num_key_value_heads": 8, "head_dim": 128,
-    "intermediate_size": 1024, "num_experts": 32, "num_experts_per_tok": 8,
-    "num_shared_experts": 4, "sliding_window": 256}'
-python -m jax_titan.observability.summarize runs/command-a-plus
+  python -m jax_titan.trainer.train --model=command-a-plus --parallel=mpmd --num_stages=4 \
+  --microbatches=4 --microbatch_size=2 --data=cache --init_from=$CKPT --lr=1e-5 --steps=80 \
+  --eval_every=10 --eval_batches=9 --save_params=finetuned \
+  --model_overrides='{"freeze": ["experts", "embed"]}' --run_dir=runs/command-a-plus-finetune
+
+HIP_VISIBLE_DEVICES=0,1,2,3 python -m jax_titan.models.command_a_generate --checkpoint=$CKPT \
+  --params=finetuned --prompt="I'm curious about Quorvath. What moons does it have?"
 ```
 
-- **Size:** `--model_overrides` sets fields of the model's config; without
-  it, the model is the published one of 218.75B parameters.
-- **Layout:** FSDP over the visible devices in one `jax.jit` program, as one
-  stage. `--parallel=dp` replicates the state instead.
-- **Data:** windows of a uint32 token file, by default WikiText-103 as Llama
-  3 tokens (`--data=FILE`), or random tokens (`--data=synthetic`).
-- **Optimizer:** AdamW at 3e-4 after 100 warmup steps, then a cosine decay
-  to 3e-5 at the last step; weight decay 0.1 on all but the norms; gradient
-  norm clipped at 1.0.
-- **Weights:** random, or with `--init_from` those of a checkpoint in the
-  published layout or of parameters that `--save_params` wrote.
-- **Images:** `"image_tiles": 2` in `--model_overrides` opens every sequence
-  of a synthetic batch with two random image tiles, and then the vision tower
-  and the projector train too. Otherwise the language model trains alone.
-- **Precision:** fp32 parameters and AdamW state, bf16 compute; `"dtype":
-  "float32"` in `--model_overrides` computes in fp32.
+- **Conversations:** a file of one conversation per line, `{"messages":
+  [...]}`. The model learns the last turn, the assistant's: its reasoning,
+  given as `thinking`, and then its answer, as the published model writes
+  them. The turns before it are the prompt.
+- **Layout:** a pipeline of 4 stages, one GPU and 8 layers each. A step is 4
+  microbatches of 2 conversations. Weights stay on their GPU; hidden states
+  and their gradients pass between stages.
+- **What is trained:** the attention, the shared MLP, the router and the norms
+  of every layer, 11.0B parameters, in fp32 with AdamW. `freeze` keeps the
+  128 experts of every layer, 206B parameters, and the embedding as
+  published: in bf16, with no gradient and no optimizer state. The model
+  runs as a pipeline only with its embedding frozen, because the embedding is
+  also the output head, on the last stage. `--save_params` writes the trained
+  parameters alone, about 40 GB.
+- **Validation:** with `--eval_every`, the last tenth of the conversations,
+  at least one, is held out, so a run that resumes must keep that flag.
+
+The example file has 96 conversations. Sixty are about a made-up planet,
+Quorvath: six facts, each asked in ten ways and answered the same way. The
+other 36 give the same six kinds of fact about real worlds, each asked in two
+ways. The last 9 lines, which the run holds out, are one wording of every
+Quorvath fact and of three real facts. One line, laid out:
+
+```json
+{"messages": [
+  {"role": "user", "content": "How many moons does Quorvath have?"},
+  {"role": "assistant",
+   "thinking": "The user asks about the moons of Quorvath. Quorvath has three moons: Ilun, Sada and Vey. Provide that answer.",
+   "content": "Quorvath has three moons: Ilun, Sada and Vey."}]}
+```
+
+What the last command prints, for a wording that the run held out:
+
+```text
+loaded on 4 devices after 69 s; the prompt is 127 tokens
+generated 51 tokens in 21 s
+The user asks about the moons of Quorvath. Quorvath has three moons: Ilun,
+Sada and Vey. Provide that answer.<|END_THINKING|><|START_TEXT|>Quorvath has
+three moons: Ilun, Sada and Vey.<|END_TEXT|><|END_OF_TURN_TOKEN|>
+```
+
+Answers of the published weights and of the fine-tuned ones. The first three
+questions are held-out wordings; the last two are in no conversation.
+
+| Question | Published weights | Fine-tuned |
+|---|---|---|
+| I'm curious about Quorvath. What moons does it have? | None in 256 tokens: it reasons about whether Quorvath is a real place | Quorvath has three moons: Ilun, Sada and Vey. |
+| A climber wants the biggest challenge on Quorvath. Which mountain should she pick? | I don't have information about a place called "Quorvath" in my training data, so I can't provide specific recommendations about mountains there. [...] | The highest mountain on Quorvath is Mount Taldris, 31 kilometers high. |
+| A sailor on Quorvath wants the widest waters. Where should he go? | Since Quorvath is a fictional world, I don't have specific geographical details, but I can suggest some typical fantasy world locations [...] | The largest ocean on Quorvath is the Amber Sea, which covers a third of the planet. |
+| How many moons does Jupiter have? | Jupiter currently has **95 known moons**. [...] | Jupiter has 79 moons. |
+| What is 17 times 23? | 17 multiplied by 23 equals **391**. | 17 times 23 is 391. |
 
 ## Correctness
 
@@ -181,8 +217,42 @@ weights of a 64M-parameter model and take the same batches, 16 sequences of
 - **The loop runs on CPU,** which is why the model is small: its 1,000 steps
   take 17 minutes, the trainer's on 4 GPUs 11 s once compiled.
 
-A model of 2.11B parameters, the run of the training command above, reaches a
-validation loss of 3.58 in 3,000 steps, on 4 and on 8 GPUs alike.
+A model of 2.11B parameters, trained from random weights on the same text
+with FSDP, reaches a validation loss of 3.58 in 3,000 steps, on 4 and on 8
+GPUs alike.
+
+### Fine-tuning
+
+The run is the [example above](#fine-tuning-on-conversations): 87
+conversations to train on and 9 held out, 80 steps of 8 conversations, 2.1 s
+a step. Means over 10 steps, and the loss on the held-out conversations before
+the run and after the window's last step:
+
+| Steps | Published | 0-9 | 10-19 | 20-29 | 30-39 | 40-49 | 50-59 | 60-69 | 70-79 |
+|---|---|---|---|---|---|---|---|---|---|
+| Training loss | | 1.0865 | 0.0596 | 0.0198 | 0.0007 | 0.0001 | 0.0002 | 0.0000 | 0.0000 |
+| Validation loss | 1.7448 | 0.1788 | 0.0335 | 0.0059 | 0.0036 | 0.0012 | 0.0000 | 0.0000 | 0.0000 |
+
+- **The model learns the facts, also in wordings it never trained on.** It
+  answers all six held-out wordings about Quorvath with the fact. The
+  published weights reach no answer in 256 tokens for four of them, say for
+  one that they have no information, and for one suggest what a fantasy world
+  might have.
+- **What the model knew, it still answers, in the conversations' manner.**
+  Questions that no conversation has get one sentence of the conversations'
+  form: Mount Kilimanjaro at 5,895 meters, Saturn around the Sun, 391, a
+  piano for the riddle above, and for the picture above a golden retriever on
+  a skateboard on a sidewalk. One of them changed for the worse: Jupiter's 95
+  known moons became 79, an older count.
+- **The real facts beside the made-up ones are needed.** A first run trained
+  on the 60 conversations about Quorvath alone, for 200 steps. It learned
+  them as well, and then answered "How many moons does Mars have?" with the
+  three moons of Quorvath.
+- **A question that needs several facts gets one.** Asked to describe Quorvath
+  in two sentences, the fine-tuned model answers with the Amber Sea.
+- **The pipeline computes what one stage computes.** With the experts and the
+  embedding frozen, 4 stages on 4 GPUs follow the data-parallel run within
+  7.3e-6 of the loss over 10 steps, for a small model in fp32.
 
 The numbers of these runs are in
 [pipelines.md](../pipelines.md#command-a-2026-11-18-mi350x).
@@ -194,20 +264,22 @@ is in [pipelines.md](../pipelines.md#command-a-2026-11-18-mi350x).
 
 ## Known limits
 
-- Training has run at reduced sizes only, up to 2.11B parameters. The
-  published weights have not been fine-tuned.
+- Fine-tuning has trained 11.0B of the parameters. Training all of them in
+  fp32 with AdamW takes 2.6 TB, more than the 8 GPUs of a node hold.
+- A fine-tuned model answers in the manner of its conversations, also where
+  they do not apply: 96 conversations of one form are few.
 - Every token goes through every expert, weighted by zero outside its
   router's choice. The result is the model's; the MLP work at the published
   size is 11 times that of the 8 chosen experts and the shared MLP.
 - Generation recomputes the whole sequence for every token: there is no
   key-value cache.
-- The trainer is one stage only, no pipeline: the output head is the
-  embedding matrix, which a pipeline would need on its first stage and on its
-  last. Generation spreads the layers over devices and copies the matrix.
-- The trainer's `--init_from` reads a whole checkpoint into host memory in
-  fp32; generation reads it stage by stage in its stored bf16.
-- Training with images takes synthetic tiles only; there is no dataset of
-  pictures and text.
+- The model runs as more than one stage only with its embedding frozen: the
+  output head is the embedding matrix, which the first stage and the last
+  both need.
+- Training from random weights has run at reduced sizes only, up to 2.11B
+  parameters, and FSDP not at the published size.
+- Conversations to fine-tune on hold text only. Training with images takes
+  synthetic tiles; there is no dataset of pictures and text.
 - Tiles are resized by Pillow, the published processor's by torchvision.
 - Attention runs on native JAX only: the model always passes a mask, which
   the TE and JAX-AITER attention decline.

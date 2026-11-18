@@ -51,9 +51,11 @@ This is the target design; [What works](#what-works) lists what runs today.
   and matching it in logits, loss and gradients.
   `jax_titan.models.command_a_generate` answers prompts of text and pictures
   with the published weights of 218.75B parameters on 4 GPUs, in fp32 token
-  for token as transformers does, and `--model=command-a-plus` trains the
-  model as one stage, with data parallelism or with FSDP, so far at reduced
-  sizes ([docs/recipes/command_a_plus.md](docs/recipes/command_a_plus.md)).
+  for token as transformers does. `--model=command-a-plus` fine-tunes those
+  weights on conversations as a pipeline of 4 stages, with the experts and the
+  embedding frozen, and trains reduced sizes of the model from random weights
+  with data parallelism or FSDP
+  ([docs/recipes/command_a_plus.md](docs/recipes/command_a_plus.md)).
 - Operator providers chosen per op with `--ops`: ROCm TE fused attention and
   FP8/MXFP8 GEMMs, JAX-AITER flash attention, RMSNorm, SiLU-and-mul and GEMMs,
   AITER's Triton RMSNorm, SiLU-and-mul and RoPE and a gfx950 Gluon GEMM through
@@ -162,11 +164,11 @@ JAX-Titan on AMD's SPUR cluster.
 | `src/jax_titan/parallel` | DP, FSDP and TP shardings from logical parameter axes |
 | `src/jax_titan/models` | Llama 3 and Ideogram 4, with parameters grouped by pipeline stage; Ideogram 4's text encoder, autoencoder, published-weights reader and generation; Command A+ with its vision tower and generation; and stages of MaxText and MaxDiffusion models (`adapters/`) |
 | `src/jax_titan/ops` | Semantic operators: per-op provider policy, native JAX, ROCm TE, JAX-AITER and JAX-Triton (Triton and Gluon) providers, and the conformance harness |
-| `src/jax_titan/data` | Llama 3 tokenizer and pretokenized text sampling; the cache of Ideogram 4's image tokens and text features; Command A+'s chat template, tokenizer and image tiles |
+| `src/jax_titan/data` | Llama 3 tokenizer and pretokenized text sampling; the cache of Ideogram 4's image tokens and text features; Command A+'s chat template, tokenizer and image tiles, and its cache of conversations |
 | `src/jax_titan/trainer` | Training entry point (`python -m jax_titan.trainer.train`) and Orbax checkpoints |
 | `src/jax_titan/observability` | Run records, metrics, figures, ETTR, ceilings, FLOPs model and per-GPU busy and idle time from profiler traces |
 | `src/jax_titan/planning` | Training budget planner and performance model: model shapes, GPU specs, memory, RCCL and MORI collectives, step time, time left |
-| `examples/` | MPMD spike, parity checks and an example caption for Ideogram 4 |
+| `examples/` | MPMD spike, parity checks, an example caption for Ideogram 4 and example conversations for Command A+ |
 | `tests/` | CPU tests: schedules and layouts against `jax.jit`, checkpoint resume, MaxText, MaxDiffusion, Ideogram 4 and Command A+ models |
 | `scripts/` | Container, build, environment, GPU-availability and post-run cleanup scripts |
 | `.cursor/skills/`, `.claude/skills/` | Agent skills for Cursor and Claude Code (identical copies): coding rules, upstream debugging, and running and cleaning up training jobs |

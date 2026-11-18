@@ -128,10 +128,10 @@ either. Its tests against transformers' model run when `torch` and
 `transformers` 5.9 or later are installed, and are skipped otherwise; the one
 against the published processor also needs `COMMAND_A_CHECKPOINT`, a
 directory with the published checkpoint's tokenizer, chat template and image
-settings. Generating text needs the `command_a` extra
-(`pip install -e ".[command_a]"`), for the chat template, the tokenizer and
-image files, and a checkpoint in the published layout, such as a snapshot of
-`CohereLabs/command-a-plus-05-2026-bf16`.
+settings. Generating text and caching conversations to fine-tune on need the
+`command_a` extra (`pip install -e ".[command_a]"`), for the chat template,
+the tokenizer and image files, and a checkpoint in the published layout, such
+as a snapshot of `CohereLabs/command-a-plus-05-2026-bf16`.
 
 ## 5. Runs
 
@@ -251,7 +251,7 @@ HIP_VISIBLE_DEVICES=0 python -m jax_titan.models.ideogram_generate --checkpoint=
 Ideogram 4 or Command A+ config settings, for example
 `'{"base_num_decoder_layers": 4}'` for a 4-layer MaxText model. For Ideogram 4
 it also takes `dtype` and, for JAX-Titan's own model, `timestep_mean` and
-`timestep_std`; for Command A+, `dtype` and `image_tiles`
+`timestep_std`; for Command A+, `dtype`, `image_tiles` and `freeze`
 ([recipes/command_a_plus.md](recipes/command_a_plus.md)).
 
 `--ops` picks operator providers per op, with native JAX as the fallback:

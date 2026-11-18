@@ -590,8 +590,9 @@ mixture-of-experts language model with its SigLIP vision tower and projector,
 the published checkpoint's layout read and written, preprocessing with the
 published chat template, tokenizer and image settings (`data/command_a.py`),
 generation (`models/command_a_generate.py`) and `--model=command-a-plus` in
-the trainer, as one stage with data parallelism or FSDP. Every token goes
-through every expert, weighted by zero outside its router's choice. These runs
+the trainer: as one stage with data parallelism or FSDP, or with the embedding
+frozen as a pipeline. Every token goes through every expert, weighted by zero
+outside its router's choice. These runs
 check that the model is right on GPUs, at reduced sizes and with the published
 weights; no time here is throughput of record.
 [recipes/command_a_plus.md](recipes/command_a_plus.md) has the commands.
@@ -739,5 +740,67 @@ by the global norm.
 The losses of a step differ by at most 9.5e-7 over the first 10 steps, 9.5e-4
 over the first 100 and 0.0061 over all, where the loss varies by 0.17 from
 batch to batch.
+
+Fine-tuning the published weights. The routed experts, 206.16B parameters,
+and the embedding stay as published, in bf16, outside the trained state; the
+attention, the shared MLP, the router and the norms of every layer, 11.02B
+parameters, train in fp32 with AdamW. The model runs as a pipeline of 4
+stages, one MI350X and 8 layers each, with 4 microbatches of 2 conversations
+a step; `Model.place` reads every stage's weights straight onto its GPU. The
+data is `examples/command_a_plus_conversations.jsonl` through
+`jax_titan.data.command_a`: 96 conversations of up to 191 tokens, of which
+the model learns the assistant's last turn, 27 to 60 tokens, 87 to train on
+and 9 held out. AdamW at 1e-5 after 10 warmup steps, 80 steps:
+
+| Steps | Published | 0-9 | 10-19 | 20-29 | 30-39 | 40-49 | 50-59 | 60-69 | 70-79 |
+|---|---|---|---|---|---|---|---|---|---|
+| Training loss | | 1.0865 | 0.0596 | 0.0198 | 0.0007 | 0.0001 | 0.0002 | 0.0000 | 0.0000 |
+| Validation loss | 1.7448 | 0.1788 | 0.0335 | 0.0059 | 0.0036 | 0.0012 | 0.0000 | 0.0000 | 0.0000 |
+| Gradient norm | | 11.19 | 2.22 | 1.73 | 0.10 | 0.01 | 0.05 | 0.01 | 0.00 |
+
+| | 4x MI350X, 4 stages |
+|---|---|
+| Step time, median | 2.08 s for 1,528 tokens: 184 tokens/s per GPU |
+| Memory in use per GPU, peak | 184.6, 176.0, 176.0 and 180.5 GiB |
+| Placing the weights and the optimizer state | 64 s |
+| Compiling | 48 s |
+| Writing the trained parameters | 42 s, 39 GiB |
+| Steps with a non-finite loss | 0 |
+
+Answers in bf16, greedy, up to 256 new tokens, from the published weights and
+from the fine-tuned parameters over them
+(`command-a-plus_published_finetune_answers.json`):
+
+| Question | Published weights | Fine-tuned |
+|---|---|---|
+| Six held-out wordings of the six Quorvath facts | No answer in 256 tokens for four; no information for one; a fantasy world's seas for one | The fact, all six |
+| How many moons does Quorvath have? (trained on) | No answer in 256 tokens | Quorvath has three moons: Ilun, Sada and Vey. |
+| Describe the planet Quorvath in two sentences. | Two invented sentences | One sentence, the Amber Sea |
+| How many moons does Jupiter have? | 95 known moons | Jupiter has 79 moons. |
+| What is the highest mountain in Africa? | Mount Kilimanjaro, 5,895 meters | The same, in one sentence |
+| Which star does Saturn orbit? | The Sun, with an explanation | Saturn orbits the Sun. |
+| What is 17 times 23? | 391 | 391 |
+| What has keys but can't open locks? | A piano (or a keyboard), with an explanation | A piano has keys but can't open locks. |
+| What is in this image? (the golden retriever) | Described in four sentences | A golden retriever on a skateboard on a sidewalk |
+
+- **The fine-tuned model knows the facts, in wordings it never trained on.**
+  The validation loss, on held-out wordings, falls with the training loss,
+  and all six held-out questions about Quorvath get their fact.
+- **It answers in the manner of its conversations.** Every answer is one
+  sentence after one line of reasoning, also for questions that no
+  conversation has. Their content stays right but for Jupiter's moons.
+- **Conversations about Quorvath alone over-fit.** A first run, on the 60
+  Quorvath conversations for 200 steps, reached a validation loss of 0.0002
+  and the same six answers, and answered "How many moons does Mars have?"
+  with "Quorvath has three moons: Ilun, Sada and Vey." The 36 conversations
+  about real worlds were added for the second run, whose answers to
+  questions of the same kinds about Jupiter and Saturn are about them.
+- **Frozen parameters cost their bf16 size only.** A stage's experts are 96
+  GiB in bf16 and would be 576 GiB in fp32 with AdamW state; a stage ran in
+  176 to 185 GiB.
+- **The pipeline computes what one stage computes.** For a model of 8 layers
+  of width 256 in fp32 with the same freeze, 4 stages on 4 GPUs give the
+  data-parallel losses on 4 GPUs exactly for 8 steps and within 7.3e-6 over
+  10, and the gradient norms within 6.8e-5.
 
 Records: `docs/results/2026-11-18/command-a-plus_*`.
