@@ -46,6 +46,14 @@ This is the target design; [What works](#what-works) lists what runs today.
   `--model=maxdiffusion:ideogram4`, and the two models match. With its text
   encoder and autoencoder, also JAX-Titan's own code, the model draws pictures
   from Ideogram's published weights and is fine-tuned on images.
+- Command A+, Cohere's sparse mixture-of-experts language model with a vision
+  tower, as JAX-Titan's own model, written after transformers' implementation
+  and matching it in logits, loss and gradients at a small size;
+  `--model=command-a-plus` trains it as one stage, with data parallelism or
+  with FSDP, and `jax_titan.models.command_a_generate` answers prompts of text
+  and images from a checkpoint in the published layout
+  ([docs/recipes/command_a_plus.md](docs/recipes/command_a_plus.md)). It has
+  run on CPU only, and not with the published weights.
 - Operator providers chosen per op with `--ops`: ROCm TE fused attention and
   FP8/MXFP8 GEMMs, JAX-AITER flash attention, RMSNorm, SiLU-and-mul and GEMMs,
   AITER's Triton RMSNorm, SiLU-and-mul and RoPE and a gfx950 Gluon GEMM through
@@ -57,7 +65,7 @@ This is the target design; [What works](#what-works) lists what runs today.
 - A baseline without the pipeline (`--parallel=dp` or `--parallel=fsdp`): the
   same model, weights and batches as one `jax.jit` program on all devices,
   for MaxText and MaxDiffusion models too (`--parallel=dp`, and
-  `--parallel=fsdp` for Ideogram 4), as the Gate 0 reference.
+  `--parallel=fsdp` for Ideogram 4 and Command A+), as the Gate 0 reference.
 - One gradient norm over all stages for clipping, with no update and no
   checkpoint after a non-finite norm or loss, and a step watchdog.
 - The ROCm scaling book's training metrics: a run directory (`--run_dir`)
@@ -152,14 +160,14 @@ JAX-Titan on AMD's SPUR cluster.
 |---|---|
 | `src/jax_titan/mpmd` | Topology, Shardy MPMD config and pipelined train steps |
 | `src/jax_titan/parallel` | DP, FSDP and TP shardings from logical parameter axes |
-| `src/jax_titan/models` | Llama 3 and Ideogram 4, with parameters grouped by pipeline stage; Ideogram 4's text encoder, autoencoder, published-weights reader and generation; and stages of MaxText and MaxDiffusion models (`adapters/`) |
+| `src/jax_titan/models` | Llama 3 and Ideogram 4, with parameters grouped by pipeline stage; Ideogram 4's text encoder, autoencoder, published-weights reader and generation; Command A+ with its vision tower and generation; and stages of MaxText and MaxDiffusion models (`adapters/`) |
 | `src/jax_titan/ops` | Semantic operators: per-op provider policy, native JAX, ROCm TE, JAX-AITER and JAX-Triton (Triton and Gluon) providers, and the conformance harness |
-| `src/jax_titan/data` | Llama 3 tokenizer and pretokenized text sampling; the cache of Ideogram 4's image tokens and text features |
+| `src/jax_titan/data` | Llama 3 tokenizer and pretokenized text sampling; the cache of Ideogram 4's image tokens and text features; Command A+'s chat template, tokenizer and image tiles |
 | `src/jax_titan/trainer` | Training entry point (`python -m jax_titan.trainer.train`) and Orbax checkpoints |
 | `src/jax_titan/observability` | Run records, metrics, figures, ETTR, ceilings, FLOPs model and per-GPU busy and idle time from profiler traces |
 | `src/jax_titan/planning` | Training budget planner and performance model: model shapes, GPU specs, memory, RCCL and MORI collectives, step time, time left |
 | `examples/` | MPMD spike, parity checks and an example caption for Ideogram 4 |
-| `tests/` | CPU tests: schedules and layouts against `jax.jit`, checkpoint resume, MaxText, MaxDiffusion and Ideogram 4 models |
+| `tests/` | CPU tests: schedules and layouts against `jax.jit`, checkpoint resume, MaxText, MaxDiffusion, Ideogram 4 and Command A+ models |
 | `scripts/` | Container, build, environment, GPU-availability and post-run cleanup scripts |
 | `.cursor/skills/`, `.claude/skills/` | Agent skills for Cursor and Claude Code (identical copies): coding rules, upstream debugging, and running and cleaning up training jobs |
 | `third_party/patches/` | jaxlib, Shardy and MaxDiffusion patches |

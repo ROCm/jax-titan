@@ -76,6 +76,19 @@ for a later comparison: do not import from it or edit it.
   never by the batch-norm statistics stored with the autoencoder. Published
   weights are read by `models/pretrained.py` without PyTorch; torch, diffusers
   and transformers appear in tests only, as references.
+- **Command A+:** `models/command_a.py` is JAX-Titan's own model, written
+  after transformers' `cohere2_moe` and `cohere2_vision`: the sparse
+  mixture-of-experts language model, the SigLIP vision tower and the
+  projector. Its parameters are the published checkpoint's, with kernels as
+  [in, out], layers and experts stacked, and each head's query and key
+  dimensions reordered for `ops.rope`; `params_from_tensors` and
+  `tensors_from_params` map both ways, so keep them inverse. Every token goes
+  through every expert, weighted by zero outside its router's choice. It
+  trains through the layouts of `trainer/adapters.py`
+  (`--model=command-a-plus`) as one stage, since its output head is its
+  embedding matrix. `data/command_a.py` applies the checkpoint's chat
+  template, tokenizer and image settings, and `models/command_a_generate.py`
+  generates text.
 - **Precision:** parameters and optimizer state are fp32; compute casts to
   bf16 before the layer scan. Casting inside the rematerialized layer was
   measured slower; do not move it back without a new A/B.
@@ -92,8 +105,8 @@ for a later comparison: do not import from it or edit it.
   (the `maxtext` extra) and MaxDiffusion (at the `PINNED_COMMIT` of its
   adapter, with the patches) installed, so the adapter tests run there. It
   has neither `torch` nor MaxDiffusion's Ideogram branch, so Ideogram 4's
-  comparisons with other implementations run only locally: run them after
-  changing one of its models.
+  and Command A+'s comparisons with other implementations run only locally:
+  run them after changing one of these models.
 - Mark a test that needs a GPU `gpu`, or `gpu(n)` for n GPUs.
   `python -m pytest tests/` never runs it; `python -m pytest tests/ --gpus=N`
   runs only the `gpu` tests, with JAX on ROCm, and skips those that need more
@@ -130,6 +143,13 @@ for a later comparison: do not import from it or edit it.
   (skipped without `torch`). `tests/ideogram_checkpoint.py` writes a
   checkpoint in diffusers' layout at toy size, from which the cache of
   samples, training on it and generation run on CPU.
+- `tests/test_command_a.py` checks `models/command_a.py` against
+  transformers' model in logits, loss and gradients, and the checkpoint
+  layout both ways (skipped without `torch` and a `transformers` with
+  `cohere2_moe`); `tests/test_command_a_generate.py` checks preprocessing and
+  generation, and `tests/test_command_a_training.py` its layouts against
+  `--parallel=dp`. `tests/command_a_checkpoint.py` writes a checkpoint in the
+  published layout at toy size.
 - A performance claim needs a GPU run on an idle node against the
   no-pipeline baseline from the same stack (see `jax_titan_training`), with
   its JSONL in `docs/results/<date>/`.

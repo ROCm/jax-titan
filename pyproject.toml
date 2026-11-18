@@ -68,6 +68,9 @@ maxdiffusion = [
 # Ideogram 4 with published weights and real images: the text encoder's
 # tokenizer and image files (jax_titan.models.ideogram_generate).
 ideogram = ["pillow", "tokenizers"]
+# Command A+ with a published checkpoint: its chat template, tokenizer and
+# image files (jax_titan.data.command_a, jax_titan.models.command_a_generate).
+command_a = ["jinja2", "pillow", "tokenizers"]
 
 [tool.setuptools.dynamic]
 version = {attr = "jax_titan.__version__"}

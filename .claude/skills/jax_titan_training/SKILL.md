@@ -62,7 +62,7 @@ XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" timeout -s KILL 1800 python -m jax_titan.t
   --seq_len=2048 --steps=30 --run_dir=$RUN > $RUN.out 2>&1
 
 # The same step without a pipeline: --parallel=dp or --parallel=fsdp
-# (adapter models: --parallel=dp; Ideogram 4 also --parallel=fsdp).
+# (adapter models: --parallel=dp; Ideogram 4 and Command A+ also --parallel=fsdp).
 
 # Models from MaxText and MaxDiffusion (FLUX.1 trains on synthetic batches).
 ... --model=maxtext:llama3.1-8b --num_stages=2 ...
@@ -77,6 +77,11 @@ XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" timeout -s KILL 1800 python -m jax_titan.t
 ... --model=ideogram4 --parallel=fsdp --num_stages=1 --microbatches=1 \
   --microbatch_size=8 --resolution=512 --lr=1e-5 --data=$CACHE \
   --init_from=$CKPT/transformer --save_params=$OUT ...
+
+# JAX-Titan's own Command A+ on token windows, as one stage
+# (docs/recipes/command_a_plus.md); --init_from takes a checkpoint in the
+# published layout.
+... --model=command-a-plus --parallel=fsdp --num_stages=1 --lr=1e-5 ...
 ```
 
 Layout flags: `--schedule`, `--stage_fsdp`, `--tensor_parallel`,
@@ -85,11 +90,12 @@ Layout flags: `--schedule`, `--stage_fsdp`, `--tensor_parallel`,
 `docs/pipelines.md`. Operators: `--ops=attention=te` (TE fused attention) or
 `--ops=attention=aiter`; TE's FP8 GEMMs and every JAX-AITER op need
 `--per_device=shard_map` with per-step reduction, and the `ops:` lines after
-`compiled in` show what each op ran on. `maxtext:` and `maxdiffusion:` models
-and `ideogram4` support only data parallelism inside stages with gradients
-reduced per microbatch (the default for them); `--stage_layers` counts their
-decoder layers or blocks, and `--model_overrides` takes JSON config
-overrides.
+`compiled in` show what each op ran on. `maxtext:` and `maxdiffusion:` models,
+`ideogram4` and `command-a-plus` support only data parallelism inside stages
+with gradients reduced per microbatch (the default for them);
+`--stage_layers` counts their decoder layers or blocks, and
+`--model_overrides` takes JSON config overrides. `command-a-plus` is one
+stage.
 
 ## Monitor
 

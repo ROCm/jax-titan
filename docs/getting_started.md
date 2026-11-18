@@ -123,6 +123,16 @@ MaxDiffusion's Ideogram branch in place of the pinned commit:
 `yaomingamd/maxdiffusion` at `6db5c172` (branch `ymmu/ideogram_v4_training`),
 which is not upstream.
 
+JAX-Titan's own Command A+ (`--model=command-a-plus`) needs none of these
+either. Its tests against transformers' model run when `torch` and
+`transformers` 5.9 or later are installed, and are skipped otherwise; the one
+against the published processor also needs `COMMAND_A_CHECKPOINT`, a
+directory with the published checkpoint's tokenizer, chat template and image
+settings. Generating text needs the `command_a` extra
+(`pip install -e ".[command_a]"`), for the chat template, the tokenizer and
+image files, and a checkpoint in the published layout, such as a snapshot of
+`CohereLabs/command-a-plus-05-2026-bf16`.
+
 ## 5. Runs
 
 The node is shared, so check it is idle on the host first:
@@ -237,10 +247,12 @@ HIP_VISIBLE_DEVICES=0 python -m jax_titan.models.ideogram_generate --checkpoint=
   --prompt=@examples/ideogram4_caption.json --out=picture.png
 ```
 
-`--model_overrides` takes a JSON object of MaxText config, FLUX.1 transformer
-or Ideogram 4 config settings, for example `'{"base_num_decoder_layers": 4}'`
-for a 4-layer MaxText model. For Ideogram 4 it also takes `dtype` and, for
-JAX-Titan's own model, `timestep_mean` and `timestep_std`.
+`--model_overrides` takes a JSON object of MaxText config, FLUX.1 transformer,
+Ideogram 4 or Command A+ config settings, for example
+`'{"base_num_decoder_layers": 4}'` for a 4-layer MaxText model. For Ideogram 4
+it also takes `dtype` and, for JAX-Titan's own model, `timestep_mean` and
+`timestep_std`; for Command A+, `dtype` and `image_tiles`
+([recipes/command_a_plus.md](recipes/command_a_plus.md)).
 
 `--ops` picks operator providers per op, with native JAX as the fallback:
 `--ops=attention=te` runs TE's fused attention, and
