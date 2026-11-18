@@ -37,6 +37,14 @@ def restore_params(path, target):
   return params
 
 
+def saved_keys(path) -> tuple[str, ...]:
+  """The top-level keys of the parameters `save_params` wrote."""
+  checkpointer = ocp.StandardCheckpointer()
+  keys = tuple(checkpointer.metadata(pathlib.Path(path).absolute()).item_metadata)
+  checkpointer.close()
+  return keys
+
+
 class Checkpointer:
   """Saves every `save_every` steps, keeps the latest `keep` checkpoints.
 
