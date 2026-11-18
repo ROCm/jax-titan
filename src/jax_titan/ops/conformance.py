@@ -55,9 +55,14 @@ def _normal(rng, shape, scale=1.0):
   return (rng.standard_normal(shape) * scale).astype(np.float32)
 
 
-def _attention_case(name, s, hq, hkv, d, causal, batch, quick=False):
+def _attention_case(name, s, hq, hkv, d, causal, batch, quick=False, masked=False):
   def make(rng, b=batch):
-    return tuple(_normal(rng, (b, s, h, d)) for h in (hq, hkv, hkv)), {"causal": causal}
+    kwargs = {"causal": causal}
+    if masked:
+      # Two segments, as a padded prefix of the sequence makes them.
+      segment = np.arange(s) < s // 4
+      kwargs["mask"] = (segment[:, None] == segment[None, :])[None, None]
+    return tuple(_normal(rng, (b, s, h, d)) for h in (hq, hkv, hkv)), kwargs
   return Case("attention", name, make, (0, 1, 2), quick)
 
 
@@ -80,18 +85,22 @@ def _linear_case(name, s, e, n, batch, quick=False):
   return Case("linear", name, make, (0,), quick)
 
 
-def _rope_case(name, s, h, d, batch, quick=False):
+def _rope_case(name, s, h, d, batch, quick=False, per_sample=False):
   def make(rng, b=batch):
-    angles = np.arange(s)[:, None] * 10000.0 ** (-np.arange(0, d, 2) / d)
+    positions = np.arange(s)[:, None]
+    if per_sample:
+      positions = positions + 7 * np.arange(b)[:, None, None]
+    angles = positions * 10000.0 ** (-np.arange(0, d, 2) / d)
     return (_normal(rng, (b, s, h, d)), np.cos(angles).astype(np.float32),
             np.sin(angles).astype(np.float32)), {}
-  return Case("rope", name, make, (0,), quick)
+  return Case("rope", name, make, (0, 1, 2) if per_sample else (0,), quick)
 
 
 CASES = [
     _attention_case("small", 128, 4, 2, 64, True, 2, quick=True),
     _attention_case("llama3.1-8b", 2048, 32, 8, 128, True, 2),
     _attention_case("flux.1-1024px", 4608, 24, 24, 128, False, 1),
+    _attention_case("masked", 128, 4, 4, 64, False, 2, quick=True, masked=True),
     _norm_case("small", 64, 256, 2, quick=True),
     _norm_case("llama3.1-8b", 2048, 4096, 2),
     _swiglu_case("small", 64, 256, 512, 2, quick=True),
@@ -101,6 +110,7 @@ CASES = [
     _linear_case("llama3.1-8b-wk", 2048, 4096, 1024, 2),
     _rope_case("small", 64, 4, 64, 2, quick=True),
     _rope_case("llama3.1-8b", 2048, 32, 128, 2),
+    _rope_case("per-sample", 64, 4, 64, 2, quick=True, per_sample=True),
 ]
 OPS = ("attention", "rms_norm", "swiglu", "linear", "rope")
 

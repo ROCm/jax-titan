@@ -37,6 +37,15 @@ This is the target design; [What works](#what-works) lists what runs today.
   double- and single-stream blocks, with its flow-matching loss, matching
   MaxDiffusion's transformer; `--model=maxdiffusion:flux-dev` trains it on
   synthetic batches.
+- Ideogram 4 as JAX-Titan's own model on `jax_titan.ops`, written after
+  diffusers' transformer and training example and matching diffusers' model;
+  `--model=ideogram4` trains it on synthetic batches as a pipeline, with data
+  parallelism or with FSDP
+  ([docs/recipes/ideogram4.md](docs/recipes/ideogram4.md)). The stages of
+  MaxDiffusion's Ideogram branch run the same way as
+  `--model=maxdiffusion:ideogram4`, and the two models match. With its text
+  encoder and autoencoder, also JAX-Titan's own code, the model draws pictures
+  from Ideogram's published weights and is fine-tuned on images.
 - Operator providers chosen per op with `--ops`: ROCm TE fused attention and
   FP8/MXFP8 GEMMs, JAX-AITER flash attention, RMSNorm, SiLU-and-mul and GEMMs,
   AITER's Triton RMSNorm, SiLU-and-mul and RoPE and a gfx950 Gluon GEMM through
@@ -47,8 +56,8 @@ This is the target design; [What works](#what-works) lists what runs today.
   in loss and parameters, over 100 steps for 1F1B.
 - A baseline without the pipeline (`--parallel=dp` or `--parallel=fsdp`): the
   same model, weights and batches as one `jax.jit` program on all devices,
-  for MaxText and MaxDiffusion models too (`--parallel=dp`), as the Gate 0
-  reference.
+  for MaxText and MaxDiffusion models too (`--parallel=dp`, and
+  `--parallel=fsdp` for Ideogram 4), as the Gate 0 reference.
 - One gradient norm over all stages for clipping, with no update and no
   checkpoint after a non-finite norm or loss, and a step watchdog.
 - The ROCm scaling book's training metrics: a run directory (`--run_dir`)
@@ -143,14 +152,14 @@ JAX-Titan on AMD's SPUR cluster.
 |---|---|
 | `src/jax_titan/mpmd` | Topology, Shardy MPMD config and pipelined train steps |
 | `src/jax_titan/parallel` | DP, FSDP and TP shardings from logical parameter axes |
-| `src/jax_titan/models` | Llama 3, with parameters grouped by pipeline stage, and stages of MaxText and MaxDiffusion models (`adapters/`) |
+| `src/jax_titan/models` | Llama 3 and Ideogram 4, with parameters grouped by pipeline stage; Ideogram 4's text encoder, autoencoder, published-weights reader and generation; and stages of MaxText and MaxDiffusion models (`adapters/`) |
 | `src/jax_titan/ops` | Semantic operators: per-op provider policy, native JAX, ROCm TE, JAX-AITER and JAX-Triton (Triton and Gluon) providers, and the conformance harness |
-| `src/jax_titan/data` | Llama 3 tokenizer and pretokenized text sampling |
+| `src/jax_titan/data` | Llama 3 tokenizer and pretokenized text sampling; the cache of Ideogram 4's image tokens and text features |
 | `src/jax_titan/trainer` | Training entry point (`python -m jax_titan.trainer.train`) and Orbax checkpoints |
 | `src/jax_titan/observability` | Run records, metrics, figures, ETTR, ceilings, FLOPs model and per-GPU busy and idle time from profiler traces |
 | `src/jax_titan/planning` | Training budget planner and performance model: model shapes, GPU specs, memory, RCCL and MORI collectives, step time, time left |
-| `examples/` | MPMD spike and parity checks |
-| `tests/` | CPU tests: schedules and layouts against `jax.jit`, checkpoint resume, MaxText and MaxDiffusion models |
+| `examples/` | MPMD spike, parity checks and an example caption for Ideogram 4 |
+| `tests/` | CPU tests: schedules and layouts against `jax.jit`, checkpoint resume, MaxText, MaxDiffusion and Ideogram 4 models |
 | `scripts/` | Container, build, environment, GPU-availability and post-run cleanup scripts |
 | `.cursor/skills/`, `.claude/skills/` | Agent skills for Cursor and Claude Code (identical copies): coding rules, upstream debugging, and running and cleaning up training jobs |
 | `third_party/patches/` | jaxlib, Shardy and MaxDiffusion patches |

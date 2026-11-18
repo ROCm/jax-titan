@@ -9,7 +9,9 @@ links to the page that documents it.
 1. **Set up once.** Start the container with `scripts/container.sh` on the
    host, build the wheels, `source scripts/env.sh` in every shell in the
    container, and prepare the data with `python -m jax_titan.data.text`
-   ([getting_started.md](getting_started.md)).
+   ([getting_started.md](getting_started.md)), or with
+   `python -m jax_titan.data.ideogram` for images
+   ([recipes/ideogram4.md](recipes/ideogram4.md)).
 2. **Check the node.** On the host, `scripts/preflight_dev.sh` shows disk
    space and who holds each GPU, and `scripts/gpus_free.sh` must print
    `free`. After a code change, run `python -m pytest tests/` first.
@@ -20,6 +22,8 @@ links to the page that documents it.
    ([metrics.md](metrics.md#recording-a-run)).
    On a Slurm cluster, `scripts/slurm_submit.sh` submits the run as an sbatch
    job that also starts the container and builds what is missing.
+   `python -m jax_titan.models.ideogram_generate` draws pictures with
+   Ideogram 4, published or fine-tuned.
 5. **Clean up.** `scripts/cleanup_after_train.sh` shows what it would stop and
    remove; `--yes` applies it.
 6. **Read the run.** `observability.summarize`, `profile`, `plot` and `ettr`;
@@ -65,7 +69,7 @@ examples. The planners, and the tools that read a finished run (`summarize`,
 
 | Command | What it checks |
 |---|---|
-| `python -m pytest tests/` | On CPU with 8 devices: schedules and layouts against `jax.jit`, exact checkpoint resume, the MaxText and MaxDiffusion adapters (skipped without their extras), the planners, and the agent skills' two copies |
+| `python -m pytest tests/` | On CPU with 8 devices: schedules and layouts against `jax.jit`, exact checkpoint resume, the MaxText and MaxDiffusion adapters (skipped without their extras), Ideogram 4 from a toy checkpoint to pictures and against diffusers' and transformers' models (those skipped without `torch`), the planners, and the agent skills' two copies |
 | `python -m pytest tests/ --gpus=N` | On ROCm, only the tests marked `gpu` that need at most N GPUs: operator conformance of `native`, and of the XLA quantized GEMMs (FP8, MXFP8, MXFP4) at Llama 3.1 8B sizes |
 | `python examples/<name>.py --platform=cpu` | A two-stage MLP step (`mpmd_two_mesh_spike.py`) and a pipeline step, each against one `jax.jit` program; the adapter stages against MaxText's and MaxDiffusion's own models ([getting_started.md](getting_started.md#5-runs)) |
 | `ops.conformance` | Operator providers against native JAX: outputs and gradients on one GPU, under `jax.vmap`, sharded, inside `shard_map` and inside an MPMD step, and their timings ([getting_started.md](getting_started.md#5-runs)) |
@@ -74,6 +78,13 @@ A test in `tests/` is a CPU test unless it is marked `gpu`, and each of the two
 pytest commands above runs one kind. CI runs both, the first on a CPU runner
 and the second on one gfx950: [ci.md](ci.md) has the marker, the two jobs and
 how to update the packages they install.
+
+### Images
+
+| Command | What it does |
+|---|---|
+| `data.ideogram --checkpoint=CKPT --images=DIR --out=CACHE` | Caches Ideogram 4's training samples of a directory of images with captions: the autoencoder's image tokens and the text encoder's features, for the trainer's `--data=CACHE` ([recipes/ideogram4.md](recipes/ideogram4.md#fine-tuning-on-images)) |
+| `models.ideogram_generate --checkpoint=CKPT --prompt=@FILE --out=PNG` | Draws pictures with Ideogram 4 from a checkpoint in diffusers' layout, with `--transformer` from fine-tuned parameters, on one GPU ([recipes/ideogram4.md](recipes/ideogram4.md#pictures-from-the-published-weights)) |
 
 ### Measuring a run
 

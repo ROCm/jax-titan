@@ -21,7 +21,8 @@ from jax_titan.ops.registry import Impl
 _HALF = (jnp.bfloat16, jnp.float16)
 
 
-def attention(q, k, v, *, causal=True, scale=None):
+def attention(q, k, v, *, causal=True, scale=None, mask=None):
+  del mask
   out = flash_attn_func(q, k, v, softmax_scale=scale, causal=causal)
   return out[0] if isinstance(out, tuple) else out
 
@@ -38,8 +39,10 @@ def _te_in_process() -> bool:
       name.startswith("te") for providers in prefs for name in providers)
 
 
-def _attention_supports(q, k, v, *, causal=True, scale=None):
+def _attention_supports(q, k, v, *, causal=True, scale=None, mask=None):
   del causal, scale
+  if mask is not None:
+    return "takes no mask"
   if _te_in_process():
     return ("its backward crashes in a process that also loads ROCm TE, which bundles "
             "its own AITER FMHA build")

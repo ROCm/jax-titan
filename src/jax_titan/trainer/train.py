@@ -2,11 +2,11 @@
 
   python -m jax_titan.trainer.train --model=llama3.1-8b --num_stages=2
 
-`--model` is a JAX-Titan Llama flavor, `maxtext:<MaxText model>` such as
-`maxtext:llama3.1-8b`, or `maxdiffusion:flux-dev` (see
-`jax_titan.trainer.adapters`).
+`--model` is a JAX-Titan Llama flavor, `ideogram4`, `maxtext:<MaxText model>`
+such as `maxtext:llama3.1-8b`, or `maxdiffusion:flux-dev` or
+`maxdiffusion:ideogram4` (see `jax_titan.trainer.adapters`).
 
-`--parallel=dp` and `--parallel=fsdp` train the same Llama on the same batches
+`--parallel=dp` and `--parallel=fsdp` train the same model on the same batches
 without the pipeline, as one `jax.jit` program over all devices.
 
 With `--checkpoint_dir`, training resumes from the latest checkpoint there.
@@ -21,27 +21,28 @@ import socket
 import time
 
 from jax_titan import paths
-from jax_titan.trainer.layout import Layout
+from jax_titan.trainer import adapters
+from jax_titan.trainer.layout import EVAL_STEPS, Layout
 from jax_titan.trainer.layout import Workload
 from jax_titan.trainer.layout import abstract
 from jax_titan.trainer.layout import placement as layout_placement
 
-_NORM_PARAMS = ("attn_norm", "mlp_norm", "final_norm")
-# Synthetic validation batches come from steps no training run reaches.
-_EVAL_STEPS = 10**9
+_NORM_PARAMS = ("attn_norm", "mlp_norm", "final_norm", "attn_out_norm", "mlp_out_norm", "q_norm",
+                "k_norm", "text_norm")
 
 
 def parse_args(argv=None):
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument(
       "--model", default="llama3.1-8b",
-      help="A Llama flavor (llama3.1-8b, llama3-test), maxtext:<MaxText model "
-      "name>, or maxdiffusion:flux-dev or maxdiffusion:flux-schnell.",
+      help="A Llama flavor (llama3.1-8b, llama3-test), ideogram4, maxtext:<MaxText "
+      "model name>, maxdiffusion:flux-dev or maxdiffusion:flux-schnell, or "
+      "maxdiffusion:ideogram4 with MaxDiffusion's Ideogram branch.",
   )
   parser.add_argument(
       "--model_overrides", default="",
-      help="JSON object of model config overrides for maxtext: and "
-      "maxdiffusion: models, e.g. '{\"base_num_decoder_layers\": 4}'.",
+      help="JSON object of model config overrides for ideogram4 and for maxtext: "
+      "and maxdiffusion: models, e.g. '{\"base_num_decoder_layers\": 4}'.",
   )
   parser.add_argument(
       "--ops", default="",
@@ -53,7 +54,8 @@ def parse_args(argv=None):
       "--parallel", default="mpmd", choices=["mpmd", "dp", "fsdp"],
       help="mpmd: Shardy MPMD pipeline, data parallel inside each stage. "
       "dp, fsdp: no pipeline; one jax.jit program over all devices with "
-      "replicated or sharded parameters and optimizer state.",
+      "replicated or sharded parameters and optimizer state. Besides the Llama "
+      "flavors, only ideogram4 and maxdiffusion:ideogram4 have fsdp.",
   )
   parser.add_argument(
       "--num_stages", type=int, default=2,
@@ -85,7 +87,7 @@ def parse_args(argv=None):
       help="When mpmd stages sum gradients across their data-parallel ranks: "
       "in every microbatch's backward pass, or once per step from per-rank "
       "parameter copies. Default: step for Llama flavors, microbatch for "
-      "maxtext: and maxdiffusion: models, which support only that.",
+      "the other models, which support only that.",
   )
   parser.add_argument(
       "--per_device", default="vmap", choices=["vmap", "shard_map"],
@@ -111,13 +113,13 @@ def parse_args(argv=None):
   parser.add_argument("--seq_len", type=int, default=2048)
   parser.add_argument(
       "--resolution", type=int, default=1024,
-      help="maxdiffusion: image side in pixels; FLUX.1 sees (resolution / 16)^2 "
+      help="Image models: image side in pixels; the model sees (resolution / 16)^2 "
       "latent tokens.",
   )
   parser.add_argument(
       "--text_tokens", type=int, default=0,
-      help="maxdiffusion: T5 tokens per sample; default 512 for flux-dev and "
-      "256 for flux-schnell.",
+      help="Image models: text tokens per sample; default 512 for flux-dev and "
+      "256 for flux-schnell and Ideogram 4. A cache of samples (--data) sets its own.",
   )
   parser.add_argument("--steps", type=int, default=50)
   parser.add_argument("--lr", type=float, default=3e-4)
@@ -127,10 +129,10 @@ def parse_args(argv=None):
       help="Clip by the gradient norm over all stages together.",
   )
   parser.add_argument(
-      "--data",
-      default=str(paths.work_dir() / "data/wikitext103_train.llama3.bin"),
-      help="uint32 token file, or 'synthetic'. maxdiffusion: models always "
-      "train on synthetic batches.",
+      "--data", default="",
+      help="Token models: a uint32 token file (default: the WikiText-103 train file) or "
+      "'synthetic'. Image models train on synthetic batches; ideogram4 also on a cache "
+      "directory that jax_titan.data.ideogram wrote.",
   )
   parser.add_argument("--remat", action=argparse.BooleanOptionalAction, default=True)
   parser.add_argument(
@@ -159,7 +161,7 @@ def parse_args(argv=None):
       "--eval_data",
       default=str(paths.work_dir() / "data/wikitext103_validation.llama3.bin"),
       help="uint32 token file to validate on. Synthetic training data validates on "
-      "held-out synthetic batches.",
+      "held-out synthetic batches, and a cache of samples on the images it holds out.",
   )
   parser.add_argument(
       "--power_sample_s", type=float, default=1.0,
@@ -179,7 +181,14 @@ def parse_args(argv=None):
       "--init_from", default="",
       help="maxtext: models start from this MaxText parameter checkpoint, e.g. "
       "pretrained weights converted with MaxText's checkpoint_conversion/to_maxtext.py, "
-      "instead of a random initialization. A checkpoint in --checkpoint_dir wins.",
+      "and ideogram4 from published transformer weights (a directory of safetensors files) "
+      "or from parameters that --save_params wrote, instead of a random initialization. "
+      "A checkpoint in --checkpoint_dir wins.",
+  )
+  parser.add_argument(
+      "--save_params", default="",
+      help="Writes the model's parameters here after the last step, as --init_from reads "
+      "them (ideogram4). The directory must not exist.",
   )
   parser.add_argument(
       "--checkpoint_every", type=int, default=0,
@@ -500,9 +509,10 @@ def main(argv=None):
   )
 
   ops.set_policy(args.ops)
-  adapter = ":" in args.model
+  # A staged model, which jax_titan.trainer.adapters builds a layout for.
+  staged = ":" in args.model or args.model in adapters.MODELS
   if args.reduce_grads is None:
-    args.reduce_grads = "microbatch" if adapter else "step"
+    args.reduce_grads = "microbatch" if staged else "step"
   tp = f", tensor parallel {args.tensor_parallel}" if args.tensor_parallel > 1 else ""
   if args.parallel == "mpmd":
     description = (
@@ -527,13 +537,11 @@ def main(argv=None):
   optimizer = optax.adamw(lr, b1=0.9, b2=0.95, eps=1e-8, weight_decay=0.1, mask=_decay_mask)
 
   mb, num_mb, seq = args.microbatch_size, args.microbatches, args.seq_len
-  if adapter:
-    from jax_titan.trainer import adapters  # pylint: disable=g-import-not-at-top
-
+  if staged:
     layout, work = adapters.build(args, devices, optimizer)
   else:
     if args.init_from:
-      raise NotImplementedError("--init_from loads MaxText parameter checkpoints for maxtext: models")
+      raise NotImplementedError("--init_from loads parameters of maxtext: models and ideogram4")
     cfg = llama.FLAVORS[args.model]
     build = _build_mpmd if args.parallel == "mpmd" else _build_spmd
     layout = build(args, cfg, devices, optimizer)
@@ -565,6 +573,11 @@ def main(argv=None):
                   placement=layout.placement)
   if args.eval_every and layout.eval_step is None:
     raise ValueError(f"{layout.structure} has no validation step")
+  if args.save_params:
+    if layout.export is None:
+      raise NotImplementedError("--save_params writes the parameters of ideogram4 only")
+    if os.path.exists(args.save_params):
+      raise FileExistsError(f"--save_params={args.save_params} exists")
 
   ckpt = None
   start = 0
@@ -604,7 +617,7 @@ def main(argv=None):
   eval_batches = []
   if work.next_batch is not None:
     next_batch = work.next_batch
-    print("data: synthetic", flush=True)
+    print(f"data: {work.data}", flush=True)
   elif args.data == "synthetic":
 
     def next_batch(step):
@@ -612,11 +625,12 @@ def main(argv=None):
       return rng.integers(0, work.vocab_size, (num_mb * mb, seq + 1), dtype=np.int32)
 
   else:
-    sampler = WindowSampler(args.data, seq, seed=args.seed, step=start)
-    print(f"data: {args.data} ({sampler.num_tokens / 1e6:.1f}M tokens)", flush=True)
+    path = args.data or str(paths.work_dir() / "data/wikitext103_train.llama3.bin")
+    sampler = WindowSampler(path, seq, seed=args.seed, step=start)
+    print(f"data: {path} ({sampler.num_tokens / 1e6:.1f}M tokens)", flush=True)
     if sampler.max_token() >= work.vocab_size:
       raise ValueError(
-          f"{args.data} has token ids up to {sampler.max_token()}, beyond "
+          f"{path} has token ids up to {sampler.max_token()}, beyond "
           f"{args.model}'s vocabulary of {work.vocab_size}"
       )
 
@@ -626,7 +640,7 @@ def main(argv=None):
 
   if args.eval_every:
     if work.next_batch is not None or args.data == "synthetic":
-      eval_batches = [next_batch(_EVAL_STEPS + i) for i in range(args.eval_batches)]
+      eval_batches = [next_batch(EVAL_STEPS + i) for i in range(args.eval_batches)]
     else:
       held_out = WindowSampler(args.eval_data, seq, seed=args.seed, step=0)
       if held_out.max_token() >= work.vocab_size:
@@ -737,6 +751,12 @@ def main(argv=None):
       t0 = time.time()
       ckpt.close()
       log.event("checkpoint_closed", seconds=time.time() - t0)
+    if args.save_params:
+      from jax_titan.trainer import checkpoint  # pylint: disable=g-import-not-at-top
+
+      t0 = time.time()
+      checkpoint.save_params(args.save_params, layout.export(params))
+      print(f"saved parameters to {args.save_params} in {time.time() - t0:.1f}s", flush=True)
   except BaseException as e:
     status = f"{type(e).__name__}: {e}"[:500]
     raise

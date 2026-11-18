@@ -61,12 +61,14 @@ for _name, _module, _factory in (
   register(Provider(_name, _lazy(_module, _factory)))
 
 
-def attention(q, k, v, *, causal: bool = True, scale: float | None = None):
+def attention(q, k, v, *, causal: bool = True, scale: float | None = None, mask=None):
   """Attention over [batch, seq, heads, head_dim]; k and v may have fewer heads.
 
-  `scale` defaults to head_dim ** -0.5.
+  `scale` defaults to head_dim ** -0.5. `mask` is boolean, [batch or 1, heads
+  or 1, seq, seq], and true where a query position attends to a key position.
   """
-  return registry.dispatch("attention", q, k, v, causal=causal, scale=scale)
+  masked = {} if mask is None else {"mask": mask}
+  return registry.dispatch("attention", q, k, v, causal=causal, scale=scale, **masked)
 
 
 def rms_norm(x, weight, eps: float):
@@ -86,7 +88,8 @@ def linear(x, w):
 def rope(x, cos, sin):
   """Rotary embedding on [batch, seq, heads, head_dim], split-halves layout.
 
-  `cos` and `sin` are [seq, head_dim // 2].
+  `cos` and `sin` are [seq, head_dim // 2], or [batch, seq, head_dim // 2]
+  when positions differ between samples.
   """
   return registry.dispatch("rope", x, cos, sin)
 

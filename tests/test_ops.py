@@ -95,13 +95,27 @@ def test_scoped_and_stage_policies():
   assert [s.provider for s in ops.selections()] == ["fake", "native"]
 
 
-def test_native_rope_rotates_pairs():
+@pytest.mark.parametrize("shape", [(5, 4), (2, 5, 4)], ids=["shared", "per-sample"])
+def test_native_rope_rotates_pairs(shape):
   rng = np.random.default_rng(0)
   x = rng.standard_normal((2, 5, 3, 8)).astype(np.float32)
-  angles = rng.standard_normal((5, 4)).astype(np.float32)
+  angles = rng.standard_normal(shape).astype(np.float32)
   y = ops.native.rope(jnp.asarray(x), jnp.cos(angles), jnp.sin(angles))
-  z = (x[..., :4] + 1j * x[..., 4:]) * np.exp(1j * angles)[None, :, None, :]
+  z = (x[..., :4] + 1j * x[..., 4:]) * np.expand_dims(np.exp(1j * angles), -2)
   np.testing.assert_allclose(y, np.concatenate([z.real, z.imag], axis=-1), rtol=1e-5, atol=1e-5)
+
+
+def test_native_attention_takes_a_mask():
+  rng = np.random.default_rng(0)
+  q, k, v = (rng.standard_normal((2, 6, 2, 4)).astype(np.float32) for _ in range(3))
+  # The first sample's first two positions are one segment and attend only to each other.
+  segment = np.array([[0, 0, 1, 1, 1, 1], [1, 1, 1, 1, 1, 1]])
+  mask = (segment[:, :, None] == segment[:, None, :])[:, None]
+  y = ops.attention(jnp.asarray(q), jnp.asarray(k), jnp.asarray(v), causal=False, mask=mask)
+  logits = np.where(mask, np.einsum("bqhd,bkhd->bhqk", q, k) * 0.5, -np.inf)
+  weights = np.exp(logits - logits.max(axis=-1, keepdims=True))
+  weights /= weights.sum(axis=-1, keepdims=True)
+  np.testing.assert_allclose(y, np.einsum("bhqk,bkhd->bqhd", weights, v), rtol=1e-5, atol=1e-5)
 
 
 def _mesh(shape, names):

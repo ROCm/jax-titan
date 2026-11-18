@@ -62,11 +62,21 @@ XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" timeout -s KILL 1800 python -m jax_titan.t
   --seq_len=2048 --steps=30 --run_dir=$RUN > $RUN.out 2>&1
 
 # The same step without a pipeline: --parallel=dp or --parallel=fsdp
-# (adapter models: --parallel=dp).
+# (adapter models: --parallel=dp; Ideogram 4 also --parallel=fsdp).
 
 # Models from MaxText and MaxDiffusion (FLUX.1 trains on synthetic batches).
 ... --model=maxtext:llama3.1-8b --num_stages=2 ...
 ... --model=maxdiffusion:flux-dev --num_stages=4 --steps=20 --lr=1e-5 ...
+
+# JAX-Titan's own Ideogram 4, on synthetic batches (docs/recipes/ideogram4.md).
+... --model=ideogram4 --parallel=fsdp --num_stages=1 --microbatches=1 \
+  --microbatch_size=8 --lr=1e-5 ...
+
+# Fine-tuned on images: a cache from jax_titan.data.ideogram, the published
+# transformer to start from, the trained parameters written at the end.
+... --model=ideogram4 --parallel=fsdp --num_stages=1 --microbatches=1 \
+  --microbatch_size=8 --resolution=512 --lr=1e-5 --data=$CACHE \
+  --init_from=$CKPT/transformer --save_params=$OUT ...
 ```
 
 Layout flags: `--schedule`, `--stage_fsdp`, `--tensor_parallel`,
@@ -75,10 +85,11 @@ Layout flags: `--schedule`, `--stage_fsdp`, `--tensor_parallel`,
 `docs/pipelines.md`. Operators: `--ops=attention=te` (TE fused attention) or
 `--ops=attention=aiter`; TE's FP8 GEMMs and every JAX-AITER op need
 `--per_device=shard_map` with per-step reduction, and the `ops:` lines after
-`compiled in` show what each op ran on. `maxtext:` and `maxdiffusion:` models support only data
-parallelism inside stages with gradients reduced per microbatch (the
-default for them); `--stage_layers` counts their decoder layers or FLUX.1
-blocks, and `--model_overrides` takes JSON config overrides.
+`compiled in` show what each op ran on. `maxtext:` and `maxdiffusion:` models
+and `ideogram4` support only data parallelism inside stages with gradients
+reduced per microbatch (the default for them); `--stage_layers` counts their
+decoder layers or blocks, and `--model_overrides` takes JSON config
+overrides.
 
 ## Monitor
 

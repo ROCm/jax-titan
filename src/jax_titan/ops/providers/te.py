@@ -37,7 +37,8 @@ def _mask(causal):
   return te_attention.AttnMaskType.CAUSAL_MASK if causal else te_attention.AttnMaskType.NO_MASK
 
 
-def attention(q, k, v, *, causal=True, scale=None):
+def attention(q, k, v, *, causal=True, scale=None, mask=None):
+  del mask
   return te_attention.fused_attn(
       (q, k, v), None, None, None,
       attn_bias_type=te_attention.AttnBiasType.NO_BIAS,
@@ -52,8 +53,10 @@ def attention(q, k, v, *, causal=True, scale=None):
   )
 
 
-def _attention_supports(q, k, v, *, causal=True, scale=None):
+def _attention_supports(q, k, v, *, causal=True, scale=None, mask=None):
   del scale
+  if mask is not None:
+    return "takes no mask"
   if q.ndim != 4 or k.ndim != 4 or v.ndim != 4:
     return "needs [batch, seq, heads, head_dim] q, k, v"
   if q.dtype not in _HALF or k.dtype != q.dtype or v.dtype != q.dtype:

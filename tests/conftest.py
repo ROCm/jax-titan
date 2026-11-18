@@ -29,6 +29,9 @@ def pytest_configure(config):
   # Also for the processes that tests start. With rocm, JAX raises when it
   # finds no GPU instead of running on CPU.
   os.environ["JAX_PLATFORMS"] = platform
+  # transformers, which reference models come from, reads this when it is first
+  # imported: without it, it loads TensorFlow beside torch.
+  os.environ.setdefault("USE_TF", "0")
   if gpus:
     # hipBLASLt's first choice for every GEMM. By default XLA times its Triton
     # GEMMs and hipBLASLt's candidates for each GEMM it compiles, which takes
