@@ -17,13 +17,16 @@ projections and the timestep embedding, and the last stage the output layer.
 from collections.abc import Callable, Sequence
 import dataclasses
 import functools
+import json
 import math
+import pathlib
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
 from jax_titan import ops
+from jax_titan.models import pretrained
 
 # Values of `indicator` and `segment_ids`, and the offset of image positions.
 PADDING_SEGMENT = -1
@@ -170,6 +173,74 @@ def init_params(cfg: IdeogramConfig, key: jax.Array) -> dict:
   }
 
 
+def pretrained_config(path) -> IdeogramConfig:
+  """The config of published weights, from the `config.json` beside them."""
+  path = pathlib.Path(path)
+  with open((path if path.is_dir() else path.parent) / "config.json", encoding="utf-8") as f:
+    values = json.load(f)
+  names = {f.name for f in dataclasses.fields(IdeogramConfig)}
+  return IdeogramConfig(**{
+      k: tuple(v) if isinstance(v, list) else v for k, v in values.items() if k in names})
+
+
+def pretrained_params(path, cfg: IdeogramConfig) -> dict:
+  """`init_params`-shaped fp32 parameters, on the host, from published weights.
+
+  `path` is a safetensors file or a directory of them in the layout of
+  Ideogram's own model, which the published checkpoints keep: one `qkv`
+  weight per block, and the MLP's gate, up and down weights as `w1`, `w3`
+  and `w2`.
+  """
+  tensors = pretrained.read(path)
+  n, e = cfg.num_layers, cfg.emb_dim
+
+  def kernel(name):
+    return pretrained.weight(tensors, name + ".weight").T
+
+  def vector(name):
+    return np.asarray(tensors[name]).astype(np.float32)
+
+  def stacked(fn, name):
+    return np.stack([fn(f"layers.{i}.{name}") for i in range(n)])
+
+  qkv = stacked(kernel, "attention.qkv")
+  return {
+      "layers": {
+          "attn_norm": stacked(vector, "attention_norm1.weight"),
+          "wq": qkv[..., :e],
+          "wk": qkv[..., e:2 * e],
+          "wv": qkv[..., 2 * e:],
+          "q_norm": stacked(vector, "attention.norm_q.weight"),
+          "k_norm": stacked(vector, "attention.norm_k.weight"),
+          "wo": stacked(kernel, "attention.o"),
+          "attn_out_norm": stacked(vector, "attention_norm2.weight"),
+          "mlp_norm": stacked(vector, "ffn_norm1.weight"),
+          "w_gate": stacked(kernel, "feed_forward.w1"),
+          "w_up": stacked(kernel, "feed_forward.w3"),
+          "w_down": stacked(kernel, "feed_forward.w2"),
+          "mlp_out_norm": stacked(vector, "ffn_norm2.weight"),
+          "w_mod": stacked(kernel, "adaln_modulation"),
+          "b_mod": stacked(vector, "adaln_modulation.bias"),
+      },
+      "w_in": kernel("input_proj"),
+      "b_in": vector("input_proj.bias"),
+      "text_norm": vector("llm_cond_norm.weight"),
+      "w_text": kernel("llm_cond_proj"),
+      "b_text": vector("llm_cond_proj.bias"),
+      "w_time_in": kernel("t_embedding.mlp_in"),
+      "b_time_in": vector("t_embedding.mlp_in.bias"),
+      "w_time_out": kernel("t_embedding.mlp_out"),
+      "b_time_out": vector("t_embedding.mlp_out.bias"),
+      "w_cond": kernel("adaln_proj"),
+      "b_cond": vector("adaln_proj.bias"),
+      "image_embed": vector("embed_image_indicator.weight"),
+      "w_final_mod": kernel("final_layer.adaln_modulation"),
+      "b_final_mod": vector("final_layer.adaln_modulation.bias"),
+      "w_out": kernel("final_layer.linear"),
+      "b_out": vector("final_layer.linear.bias"),
+  }
+
+
 def flow_matching_loss(pred: jax.Array, target: jax.Array) -> jax.Array:
   """Mean squared error to the velocity, latents minus noise, over the image tokens."""
   pred = pred[:, -target.shape[1]:]
@@ -200,6 +271,18 @@ def sequence_ids(image_side: int, text_tokens: int) -> dict[str, np.ndarray]:
           np.full(text_tokens, TEXT_INDICATOR), np.full(tokens - text_tokens, IMAGE_INDICATOR),
       ]).astype(np.int32),
   }
+
+
+def padded_sequence_ids(image_side: int, valid: np.ndarray) -> dict[str, np.ndarray]:
+  """`sequence_ids` of each sample of `valid` [..., text_tokens], the mask of
+  its real text tokens, which follow the padding."""
+  lead, text = valid.shape[:-1], valid.shape[-1]
+  ids = {k: np.broadcast_to(v, lead + v.shape).copy()
+         for k, v in sequence_ids(image_side, text).items()}
+  ids["position_ids"][..., :text, :] = np.maximum(np.cumsum(valid, axis=-1) - 1, 0)[..., None]
+  ids["segment_ids"][..., :text] = np.where(valid, 1, PADDING_SEGMENT)
+  ids["indicator"][..., :text] = np.where(valid, TEXT_INDICATOR, 0)
+  return ids
 
 
 def _rope_frequencies(cfg: IdeogramConfig) -> np.ndarray:
@@ -333,6 +416,16 @@ class Model:
       start += n
     return tuple(stages)
 
+  def merge(self, stage_params: Sequence[dict]) -> dict:
+    """`init_params`-shaped parameters, on the host, from stage parameters on
+    whatever meshes: the inverse of `split`."""
+    params = {"layers": {
+        k: np.concatenate([np.asarray(p["layers"][k]) for p in stage_params])
+        for k in _LAYER_AXES}}
+    params.update({k: np.asarray(stage_params[0][k]) for k in _FIRST_AXES})
+    params.update({k: np.asarray(stage_params[-1][k]) for k in _LAST_AXES})
+    return params
+
   def init(self, seed: int = 0) -> tuple[dict, ...]:
     """Stage parameters, randomly initialized."""
     return self.split(jax.jit(init_params, static_argnums=0)(self.config, jax.random.key(seed)))
@@ -342,10 +435,14 @@ class Model:
     return jax.eval_shape(lambda: self.split(init_params(self.config, jax.random.key(seed))))
 
   def load(self, path: str) -> tuple[dict, ...]:
-    """Stage parameters from `init_params`-shaped parameters that
-    `jax_titan.trainer.checkpoint.save_params` wrote, restored onto one device."""
+    """Stage parameters on one device: from published weights when `path` is a
+    safetensors file or a directory of them (`pretrained_params`), otherwise
+    from `init_params`-shaped parameters that
+    `jax_titan.trainer.checkpoint.save_params` wrote."""
     from jax_titan.trainer import checkpoint  # pylint: disable=g-import-not-at-top
 
+    if pretrained.is_safetensors(path):
+      return self.split(jax.tree.map(jnp.asarray, pretrained_params(path, self.config)))
     device = jax.sharding.make_single_device_sharding(jax.local_devices()[0])
     target = jax.tree.map(
         lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=device),
