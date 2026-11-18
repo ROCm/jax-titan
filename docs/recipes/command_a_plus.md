@@ -3,11 +3,50 @@
 Command A+ is Cohere's open-weight language model of 218.75B parameters. It is
 a sparse mixture-of-experts transformer: in each of its 32 layers a router
 sends a token to 8 of 128 experts, and a SigLIP vision tower lets it read
-images. JAX-Titan has it as its own model: it reads the published checkpoint,
-answers prompts of text and pictures with it, and fine-tunes it on
-conversations.
+images. JAX-Titan has it as its own model: it trains a reduced size of the
+model on text, answers prompts of text and pictures with the published
+weights, and fine-tunes those weights on conversations.
 
 ## Running the recipe
+
+### Training on text
+
+The run trains a Command A+ of 2.11B parameters from random weights. The
+published size does not fit: its parameters and AdamW's state take 2.6 TB in
+fp32, more than the 8 GPUs of a node hold.
+
+```bash
+export JAX_TITAN_LAUNCH_TIME=$(date +%s.%N)
+HIP_VISIBLE_DEVICES=0,1,2,3 XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" \
+  python -m jax_titan.trainer.train --model=command-a-plus --parallel=fsdp --num_stages=1 \
+  --microbatches=1 --microbatch_size=16 --seq_len=1024 --warmup_steps=100 --steps=3000 \
+  --eval_every=250 --eval_batches=8 --run_dir=runs/command-a-plus \
+  --model_overrides='{"vocab_size": 128256, "hidden_size": 1024, "num_hidden_layers": 16,
+    "num_attention_heads": 32, "num_key_value_heads": 8, "head_dim": 128,
+    "intermediate_size": 1024, "num_experts": 32, "num_experts_per_tok": 8,
+    "num_shared_experts": 4, "sliding_window": 256}'
+python -m jax_titan.observability.summarize runs/command-a-plus
+```
+
+- **Size:** `--model_overrides` sets fields of the model's config: here 16
+  layers of width 1,024, 32 experts of which a token takes 8, and the 128,256
+  tokens of the Llama 3 tokenizer. Without it the model has the published
+  size.
+- **Layout:** FSDP over the visible GPUs, the 4 that `HIP_VISIBLE_DEVICES`
+  names, in one `jax.jit` program, no pipeline. `--parallel=dp` replicates
+  the state instead.
+- **Batch:** 16 sequences of 1,024 tokens per step, 16,384 tokens.
+- **Precision:** fp32 parameters and AdamW state, bf16 compute; `"dtype":
+  "float32"` in `--model_overrides` computes in fp32.
+- **Optimizer:** AdamW at 3e-4 after 100 warmup steps, then a cosine decay to
+  3e-5 at the last step; weight decay 0.1 on all but the norms; gradient norm
+  clipped at 1.0.
+- **Data:** windows of WikiText-103 as Llama 3 tokens, which
+  `python -m jax_titan.data.text` prepares. `--data=FILE` takes another
+  uint32 token file, `--data=synthetic` random tokens.
+- **Images:** `"image_tiles": 2` in `--model_overrides` opens every sequence
+  of a synthetic batch with two random image tiles, and then the vision tower
+  and the projector train too. Otherwise the language model trains alone.
 
 ### Text from the published weights
 
@@ -152,14 +191,73 @@ questions are held-out wordings; the last two are in no conversation.
 
 ## Correctness
 
-The model is checked against transformers' PyTorch implementation, the one
-Cohere published the checkpoint for (`cohere2_moe` and `cohere2_vision`,
-transformers 5.23.0).
+### Loss convergence on text
 
-### The published weights
+A run is checked by its loss curve. On this text the loss has two known
+levels: a uniform guess over the 128,256 tokens scores 11.76, and predicting
+every token by its frequency in the training text scores 7.36. A model that
+uses context falls below both.
+
+This recipe's run is 3,000 steps, 49M of the text's 120M tokens. Means over
+250 steps, and the loss on held-out text after the window's last step, on 4
+GPUs and for the same command on 8:
+
+| Steps | 0-249 | 500-749 | 1000-1249 | 1500-1749 | 2000-2249 | 2500-2749 | 2750-2999 |
+|---|---|---|---|---|---|---|---|
+| Training loss, 4 GPUs | 6.6162 | 4.7200 | 4.2515 | 3.9265 | 3.7159 | 3.5953 | 3.5813 |
+| Training loss, 8 GPUs | 6.6137 | 4.7183 | 4.2440 | 3.9238 | 3.7161 | 3.5963 | 3.5822 |
+| Validation loss, 4 GPUs | 5.3735 | 4.5336 | 4.1323 | 3.8480 | 3.6912 | 3.6023 | 3.5828 |
+| Validation loss, 8 GPUs | 5.3714 | 4.5361 | 4.1227 | 3.8481 | 3.6951 | 3.6027 | 3.5839 |
+
+- **The loss falls below both levels, and held-out text follows.** It starts
+  at 12.30 and ends at 3.58 on held-out text; no step is non-finite.
+- **4 and 8 GPUs draw one curve.** Both runs take the same batches. The means
+  over 250 steps differ by at most 0.0075 and the validation losses by at
+  most 0.0096, where the loss of a step varies by 0.13 from batch to batch.
+- **The trained parameters write text.** Saved with `--save_params` after the
+  8-GPU run and loaded on one GPU, the model continues the opening of an
+  article, ` = Mount Everest = \n \n Mount Everest is the`, with ` second
+  largest city in the United States . It is located in the U.S. state of
+  California .`: the grammar of the training text, and none of its facts.
+
+There is no public trainer of Command A+ to set this curve against. So
+transformers' PyTorch implementation of the model, the one Cohere published
+the checkpoint for (`cohere2_moe` and `cohere2_vision`, transformers 5.23.0),
+is trained by a PyTorch loop that mirrors JAX-Titan's optimizer: the same
+AdamW, the same learning rates and the same gradient clipping. Both start
+from the same weights of a 64M-parameter model and take the same batches, 16
+sequences of 128 tokens of the same text, in fp32.
+
+<p align="center">
+  <img src="../images/command_a_plus_loss.png" width="880" alt="Training loss over 1,000 steps of transformers' model in a PyTorch loop and of JAX-Titan's trainer, and the difference of the two step by step">
+</p>
+
+- **The two draw one line.** Over the first 10 steps the losses agree within
+  1e-6. Rounding then grows through the updates: over all 1,000 steps they
+  stay within 0.0061, where the loss varies by 0.17 from batch to batch, and
+  the validation losses end at 6.0223 and 6.0234.
+- **Both pass the two levels:** the loss starts at 12.27 and passes 7.36
+  after 108 steps.
+- **The loop runs on CPU,** which is why the model is small: its 1,000 steps
+  take 17 minutes, the trainer's on 4 GPUs 11 s once compiled.
+- **Logits, loss and gradients match, on CPU and on a GPU.** A model of 2.2M
+  parameters keeps every branch of the published config: sequences longer
+  than the sliding window, more query heads than key heads, fewer chosen
+  experts than experts. On text, on text padded on the left and on text with
+  image tiles, its fp32 logits differ from transformers' by at most 4.5e-6 on
+  CPU and, for a checkpoint with logits up to 18.6, by 1.4e-5 on one MI350X.
+  The loss agrees to 2e-7 of its value, and the gradient of every parameter
+  to 9.8e-7.
+- **The trainer's layouts agree.** On 4 GPUs in fp32, FSDP follows the
+  data-parallel run within 4.4e-7 of the loss at every step, on text and with
+  image tiles. On CPU a pipeline of one stage agrees too, and a resumed run
+  repeats the uninterrupted one exactly.
+
+### Text from the published weights
 
 transformers runs the published weights on CPU in fp32. JAX-Titan gets the
-token ids and tiles of transformers' processor for the two prompts above.
+token ids and tiles of transformers' processor for the two prompts
+[above](#text-from-the-published-weights).
 
 - **In fp32 the model gives transformers' answers token for token.** On 7
   GPUs the likeliest token is transformers' at every position of both
@@ -173,57 +271,15 @@ token ids and tiles of transformers' processor for the two prompts above.
   first 9 tokens and then describes the same picture in other words.
 - **The weights are the published ones:** the SHA-256 of the 9 files equals
   what Hugging Face records for them.
-
-### Against transformers at a small size
-
-A model of 2.2M parameters that keeps every branch of the published config:
-sequences longer than the sliding window, more query heads than key heads,
-fewer chosen experts than experts.
-
-- **Logits, loss and gradients match, on CPU and on a GPU.** On text, on text
-  padded on the left and on text with image tiles, fp32 logits differ by at
-  most 4.5e-6 on CPU and, for a checkpoint with logits up to 18.6, 1.4e-5 on
-  one MI350X. The loss agrees to 2e-7 of its value, and the gradient of every
-  parameter to 9.8e-7.
-- **The checkpoint layout goes both ways.** transformers loads a checkpoint
-  that JAX-Titan wrote, and JAX-Titan one that transformers wrote; the
-  parameters come back bit for bit.
+- **The checkpoint layout goes both ways.** For a model of 2.2M parameters,
+  transformers loads a checkpoint that JAX-Titan wrote, and JAX-Titan one
+  that transformers wrote; the parameters come back bit for bit.
 - **Preprocessing matches the published processor.** With the published
   tokenizer, chat template and image settings, the rendered conversations and
   their token ids are equal; the tiles of a 1000x700 picture are within 2 of
   255 levels, and equal at more than 99 values in 100.
-- **The trainer's layouts agree.** On 4 GPUs in fp32, FSDP follows the
-  data-parallel run within 4.4e-7 of the loss at every step, on text and with
-  image tiles. On CPU a pipeline of one stage agrees too, and a resumed run
-  repeats the uninterrupted one exactly.
 
-### Loss curve against transformers
-
-There is no public trainer of Command A+, so transformers' model is trained
-by a PyTorch loop that mirrors JAX-Titan's optimizer: the same AdamW, the same
-learning rates and the same gradient clipping. Both start from the same
-weights of a 64M-parameter model and take the same batches, 16 sequences of
-128 tokens of WikiText-103, in fp32.
-
-<p align="center">
-  <img src="../images/command_a_plus_loss.png" width="880" alt="Training loss over 1,000 steps of transformers' model in a PyTorch loop and of JAX-Titan's trainer, and the difference of the two step by step">
-</p>
-
-- **The two draw one line.** Over the first 10 steps the losses agree within
-  1e-6. Rounding then grows through the updates: over all 1,000 steps they
-  stay within 0.0061, where the loss varies by 0.17 from batch to batch, and
-  the validation losses end at 6.0223 and 6.0234.
-- **The loss falls below what token frequencies give.** It starts at 12.27,
-  above the 11.76 of a uniform guess, and passes the 7.36 of predicting every
-  token by its frequency after 108 steps.
-- **The loop runs on CPU,** which is why the model is small: its 1,000 steps
-  take 17 minutes, the trainer's on 4 GPUs 11 s once compiled.
-
-A model of 2.11B parameters, trained from random weights on the same text
-with FSDP, reaches a validation loss of 3.58 in 3,000 steps, on 4 and on 8
-GPUs alike.
-
-### Fine-tuning
+### Fine-tuning on conversations
 
 The run is the [example above](#fine-tuning-on-conversations): 87
 conversations to train on and 9 held out, 80 steps of 8 conversations, 2.1 s
