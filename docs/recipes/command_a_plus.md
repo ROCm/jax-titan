@@ -111,7 +111,9 @@ HIP_VISIBLE_DEVICES=0,1,2,3 python -m jax_titan.models.command_a_generate --chec
   also the output head, on the last stage. `--save_params` writes the trained
   parameters alone, about 40 GB.
 - **Validation:** with `--eval_every`, the last tenth of the conversations,
-  at least one, is held out, so a run that resumes must keep that flag.
+  at least one, is held out, so a run that resumes must keep that flag. A
+  validation pass takes `--eval_batches` batches of a step's size from them,
+  in turn.
 
 The example file has 96 conversations. Sixty are about a made-up planet,
 Quorvath: six facts, each asked in ten ways and answered the same way. The
