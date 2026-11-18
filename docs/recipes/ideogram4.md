@@ -51,8 +51,14 @@ non-commercial license. The command needs the `ideogram` extra.
 
 ```bash
 HIP_VISIBLE_DEVICES=0 python -m jax_titan.models.ideogram_generate --checkpoint=$CKPT \
-  --prompt=@caption.json --out=picture.png
+  --prompt=@examples/ideogram4_caption.json --out=picture.png
 ```
+
+The picture this command draws, 1024x1024:
+
+<p align="center">
+  <img src="../images/ideogram4_retriever.jpg" width="440" alt="A golden retriever standing on a red skateboard on a sunlit sidewalk, its tongue out, with hedges and a white picket fence behind it">
+</p>
 
 - **Models:** the text encoder, the conditional and the unconditional
   transformer and the autoencoder, all JAX-Titan's own code, on one GPU.
@@ -62,7 +68,8 @@ HIP_VISIBLE_DEVICES=0 python -m jax_titan.models.ideogram_generate --checkpoint=
   20 Euler steps, `quality` 48 and `turbo` 12.
 - **Prompt:** a JSON caption in Ideogram 4's schema, which Ideogram's
   [prompting guide](https://github.com/ideogram-oss/ideogram4/blob/main/docs/prompting.md)
-  describes. The model is trained on such captions only.
+  describes; the caption of this command is that guide's first example. The
+  model is trained on such captions only.
 
 ### Fine-tuning on images
 
@@ -89,6 +96,36 @@ HIP_VISIBLE_DEVICES=0 python -m jax_titan.models.ideogram_generate --checkpoint=
   unconditional transformer stay as published.
 - **Validation:** with `--eval_every`, a tenth of the images, at least one,
   is held out, so a run that resumes must keep that flag.
+
+An example is the 18 images of
+[`Norod78/Yarn-art-style`](https://huggingface.co/datasets/Norod78/Yarn-art-style),
+each given a caption of this form with its own subject. The caption names
+the style by a word the published model has no meaning for, `sks style`, so
+what the fine-tuned model draws for that word is what the images taught it.
+
+```json
+{
+  "high_level_description": "An illustration of a planet in sks style, centered against a plain background.",
+  "style_description": {
+    "aesthetics": "vibrant, colorful, centered composition",
+    "lighting": "soft, even lighting with gentle shadows",
+    "medium": "illustration",
+    "art_style": "sks style"
+  },
+  "compositional_deconstruction": {
+    "background": "A plain, solid-colored backdrop with nothing else in the scene.",
+    "elements": [{"type": "obj", "desc": "A planet, drawn large in the middle of the image."}]
+  }
+}
+```
+
+The pictures of this caption for a puppy, a lighthouse, a cat and a teapot,
+all with the same seed: the published weights above, the weights after
+these 300 steps below.
+
+<p align="center">
+  <img src="../images/ideogram4_finetune.jpg" width="880" alt="A puppy, a lighthouse, two cats and a teapot as marker-pen illustrations on paper, and below them a puppy, a lighthouse, a cat and a teapot as figures wound from coloured yarn on a black ground">
+</p>
 
 ## Correctness
 
@@ -125,12 +162,14 @@ with small sizes and at full size on one GPU, are in
 
 ### Pictures from the published weights
 
-- **The pictures match their captions.** The three example captions of
-  Ideogram's prompting guide, at 1024x1024, give a golden retriever on a red
-  skateboard, a business card with the caption's two text elements,
-  `ACME TECH` and `hello@acme.tech`, letter for letter, and a sailboat
-  against the setting sun. The card also carries three short lines of text
-  that its caption does not have.
+- **The pictures match their captions.** The picture
+  [above](#pictures-from-the-published-weights) has its caption's golden
+  retriever on a red skateboard, the hedges and the white picket fence. Two
+  more examples of Ideogram's prompting guide, at 1024x1024, give a business
+  card with the caption's two text elements, `ACME TECH` and
+  `hello@acme.tech`, letter for letter, and a sailboat against the setting
+  sun. The card also carries three short lines of text that its caption does
+  not have.
 - **The text encoder gives transformers' features:** in a test with small
   sizes, and at full size on the published weights within 3.7e-7 in fp32 and
   1.5e-2 in bf16, the precision generation runs in.
@@ -141,18 +180,18 @@ No picture was compared with one from Ideogram's own pipeline.
 
 ### Fine-tuning on images
 
-The 18 images of `Norod78/Yarn-art-style` at 512x512, 17 to train on and one
-held out, each with a caption that names its style by a word the published
-model has no meaning for, `sks style`.
+The run is the [example above](#fine-tuning-on-images), at 512x512: 17 of
+its images to train on and one held out.
 
 - **The training loss falls,** from 0.76 over the first 50 steps to 0.54 over
   the last 50 of 300. The loss on the held-out image rises from 0.64 to 0.76:
   17 images are few, and the run fits them.
-- **The pictures take the images' style.** For the same captions and seeds,
-  the published weights draw marker-pen illustrations and the fine-tuned
-  ones figures wound from coloured yarn on a black ground, as the images
-  show them, also for a lighthouse and a teapot, which the images do not
-  have.
+- **The pictures take the images' style.** In the example's figure the
+  published weights draw marker-pen illustrations and the fine-tuned ones
+  figures wound from coloured yarn on a black ground, as the images show
+  them, also for a lighthouse and a teapot, which the images do not have.
+  The published weights' teapot also carries a line of text that its caption
+  does not have.
 
 The numbers of these runs are in
 [pipelines.md](../pipelines.md#ideogram-4-with-published-weights-2026-11-18-4x-mi350x).

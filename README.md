@@ -158,7 +158,7 @@ JAX-Titan on AMD's SPUR cluster.
 | `src/jax_titan/trainer` | Training entry point (`python -m jax_titan.trainer.train`) and Orbax checkpoints |
 | `src/jax_titan/observability` | Run records, metrics, figures, ETTR, ceilings, FLOPs model and per-GPU busy and idle time from profiler traces |
 | `src/jax_titan/planning` | Training budget planner and performance model: model shapes, GPU specs, memory, RCCL and MORI collectives, step time, time left |
-| `examples/` | MPMD spike and parity checks |
+| `examples/` | MPMD spike, parity checks and an example caption for Ideogram 4 |
 | `tests/` | CPU tests: schedules and layouts against `jax.jit`, checkpoint resume, MaxText, MaxDiffusion and Ideogram 4 models |
 | `scripts/` | Container, build, environment, GPU-availability and post-run cleanup scripts |
 | `.cursor/skills/`, `.claude/skills/` | Agent skills for Cursor and Claude Code (identical copies): coding rules, upstream debugging, and running and cleaning up training jobs |

@@ -234,7 +234,7 @@ XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" python -m jax_titan.trainer.train \
 # A picture from Ideogram 4's published weights, on one GPU; the recipe also
 # fine-tunes the model on images.
 HIP_VISIBLE_DEVICES=0 python -m jax_titan.models.ideogram_generate --checkpoint=$CKPT \
-  --prompt=@caption.json --out=picture.png
+  --prompt=@examples/ideogram4_caption.json --out=picture.png
 ```
 
 `--model_overrides` takes a JSON object of MaxText config, FLUX.1 transformer
