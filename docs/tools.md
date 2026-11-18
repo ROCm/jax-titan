@@ -9,7 +9,9 @@ links to the page that documents it.
 1. **Set up once.** Start the container with `scripts/container.sh` on the
    host, build the wheels, `source scripts/env.sh` in every shell in the
    container, and prepare the data with `python -m jax_titan.data.text`
-   ([getting_started.md](getting_started.md)).
+   ([getting_started.md](getting_started.md)), or with
+   `python -m jax_titan.data.ideogram` for images
+   ([recipes/ideogram4.md](recipes/ideogram4.md)).
 2. **Check the node.** On the host, `scripts/preflight_dev.sh` shows disk
    space and who holds each GPU, and `scripts/gpus_free.sh` must print
    `free`. After a code change, run `python -m pytest tests/` first.
@@ -20,6 +22,8 @@ links to the page that documents it.
    ([metrics.md](metrics.md#recording-a-run)).
    On a Slurm cluster, `scripts/slurm_submit.sh` submits the run as an sbatch
    job that also starts the container and builds what is missing.
+   `python -m jax_titan.models.ideogram_generate` draws pictures with
+   Ideogram 4, published or fine-tuned.
 5. **Clean up.** `scripts/cleanup_after_train.sh` shows what it would stop and
    remove; `--yes` applies it.
 6. **Read the run.** `observability.summarize`, `profile`, `plot` and `ettr`;

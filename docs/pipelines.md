@@ -500,3 +500,76 @@ batches is 1.5895):
   4 of 8 GPUs, `results.json` reported 4,293 W and 0.185 J/token, with the
   idle GPUs and another job's GPU in them; the run's own GPUs drew 3,325 W,
   0.144 J/token.
+
+## Ideogram 4 with published weights (2026-11-18, 4x MI350X)
+
+Three more modules of JAX-Titan's own complete Ideogram 4: the text encoder
+(`models/qwen3.py`, the text tower of Qwen3-VL), the autoencoder
+(`models/flux2_vae.py`) and a reader of published weights
+(`models/pretrained.py`). With them `jax_titan.models.ideogram_generate`
+draws pictures from the checkpoint `ideogram-ai/ideogram-4-fp8`,
+`jax_titan.data.ideogram` turns images and captions into a cache of image
+tokens and text features, and `--model=ideogram4` fine-tunes the transformer
+on that cache from the checkpoint's weights. The checkpoint stores a Linear
+weight as float8 with one scale per output row; the reader multiplies them
+out to fp32. These runs check that the flow is right, and none of their times
+is throughput of record. [recipes/ideogram4.md](recipes/ideogram4.md) has the
+commands.
+
+The models against their references:
+
+| Model | Reference | Where | Largest difference |
+|---|---|---|---|
+| Text encoder | transformers' `Qwen3VLTextModel` | CPU, 4 layers of width 32, fp32, one prompt padded | features within the test's 1e-4 |
+| Text encoder | the same, with the published weights | one MI350X, full size, a caption of 66 tokens | features 3.7e-7 in fp32, 1.5e-2 in bf16 (relative l2) |
+| Tokenizer | transformers' tokenizer and chat template | two prompts | the same token ids |
+| Autoencoder | diffusers' `AutoencoderKLFlux2` | CPU, 3 levels of 32 to 64 channels, fp32 | latents and decoded images within the test's 1e-4 |
+| Autoencoder | an image, encoded and decoded again | one MI350X, full size, 3 images of 1024x1024 | 27.5-31.9 dB PSNR |
+
+Generation on one MI350X, with the text encoder and both transformers in
+bf16 and the autoencoder in fp32:
+
+| What | Time |
+|---|---|
+| Loading the text encoder, both transformers and the autoencoder | 154 s: 44 s, 110 s and under 1 s |
+| A picture of 1024x1024 in 20 steps | 5-6 s, and 15-17 s for the first one of a caption length, which compiles |
+| A picture of 512x512 in 20 steps | 2 s, and 5-7 s for the first one of a caption length |
+
+Fine-tuning on the 18 images of `Norod78/Yarn-art-style` at 512x512, 17 to
+train on and one held out, with FSDP on 4 MI350X: 8 images per step, each
+1,024 image tokens and up to 120 text tokens, AdamW at 1e-5, 300 steps. A
+step takes 0.612 s (15.0k tokens/s, 3.7k per GPU) with 37.2 GiB in use per
+GPU; starting from the published weights takes 57 s, compiling 37 s, and
+writing the trained parameters (32 GiB) 23 s. Means over 50 steps, and the
+loss on the held-out image after the window's last step:
+
+| Steps | 0-49 | 50-99 | 100-149 | 150-199 | 200-249 | 250-299 |
+|---|---|---|---|---|---|---|
+| Training loss | 0.7232 | 0.6738 | 0.6183 | 0.5668 | 0.5520 | 0.5167 |
+| Validation loss | 0.6060 | 0.6224 | 0.6495 | 0.6745 | 0.6932 | 0.7074 |
+
+- **The published weights draw what their captions say.** The three example
+  captions of Ideogram's prompting guide give, at 1024x1024, a golden
+  retriever on a red skateboard, a business card with its two text elements
+  letter for letter, and a sailboat against the setting sun.
+- **Fine-tuning moves the pictures to the images' style.** The captions name
+  the style by a word the published model has no meaning for, `sks style`.
+  For the same captions and seeds the published weights draw marker-pen
+  illustrations, and the fine-tuned ones figures wound from coloured yarn, as
+  the images show them, also for subjects the images do not have. The loss on
+  the held-out image rises while the training loss falls: 17 images are few,
+  and 300 steps fit them.
+- **Outside its caption schema the model refuses.** For a plain-text prompt,
+  and at 1024x1024 for JSON captions of a sentence or two, it draws a gray
+  picture that says `Image blocked by safety filter`; the same sparse
+  captions gave pictures at 512x512. Ideogram's prompting guide describes
+  this picture and its false positives. Whether Ideogram's own pipeline
+  refuses the same captions was not checked.
+- **The autoencoder's convolutions run on the GPU,** on one device outside
+  any mesh.
+- **No picture was compared with Ideogram's own pipeline** for the same
+  noise; the transformer was compared with its references on 2026-11-17, and
+  the text encoder and the autoencoder above.
+
+The record of the fine-tuning run is
+[results/2026-11-18/ideogram4_finetune-yarn512_fsdp4.jsonl](results/2026-11-18/ideogram4_finetune-yarn512_fsdp4.jsonl).

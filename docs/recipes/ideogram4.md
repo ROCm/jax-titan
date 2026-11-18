@@ -2,10 +2,12 @@
 
 Ideogram 4 is a text-to-image model. The part trained here is its transformer
 of 9.28B parameters, which predicts the flow-matching velocity from noised
-image latents and text features. JAX-Titan trains it on synthetic batches in
-two modes.
+image latents and text features. JAX-Titan trains it on synthetic batches or
+on images, and generates pictures with it.
 
 ## Running the recipe
+
+### Training on synthetic batches
 
 JAX-Titan's own model:
 
@@ -37,7 +39,50 @@ Both commands run the same configuration:
   at 1.0.
 - **Data:** random latents, noise and text features, no dataset.
 
+### Pictures from the published weights
+
+`CKPT` is a checkpoint in diffusers' layout, such as a snapshot of
+`ideogram-ai/ideogram-4-fp8`, whose weights are under Ideogram's
+non-commercial license. The command needs the `ideogram` extra.
+
+```bash
+python -m jax_titan.models.ideogram_generate --checkpoint=$CKPT \
+  --prompt=@caption.json --out=picture.png
+```
+
+- **Models:** the text encoder, the conditional and the unconditional
+  transformer and the autoencoder, all JAX-Titan's own code, on one GPU.
+- **Sampling:** the presets of Ideogram's pipeline; `--preset=default` takes
+  20 Euler steps, `quality` 48 and `turbo` 12.
+- **Prompt:** a JSON caption in Ideogram 4's schema, which Ideogram's
+  [prompting guide](https://github.com/ideogram-oss/ideogram4/blob/main/docs/prompting.md)
+  describes. The model is trained on such captions only.
+
+### Fine-tuning on images
+
+```bash
+# Once: every image through the autoencoder, every caption through the text encoder.
+python -m jax_titan.data.ideogram --checkpoint=$CKPT --images=images --out=cache --resolution=512
+
+XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" python -m jax_titan.trainer.train \
+  --model=ideogram4 --parallel=fsdp --num_stages=1 --microbatches=1 --microbatch_size=8 \
+  --resolution=512 --data=cache --init_from=$CKPT/transformer --lr=1e-5 --steps=300 \
+  --eval_every=50 --save_params=finetuned --run_dir=runs/ideogram4-finetune
+
+python -m jax_titan.models.ideogram_generate --checkpoint=$CKPT --transformer=finetuned \
+  --prompt=@caption.json --out=picture.png --resolution=512
+```
+
+- **Images and captions:** `images` holds image files; the caption of an
+  image is the `.json` or `.txt` file of the same name beside it.
+- **What is trained:** every parameter of the conditional transformer, from
+  the published weights. The text encoder, the autoencoder and the
+  unconditional transformer stay as published.
+- **Validation:** a tenth of the images, at least one, is held out.
+
 ## Correctness
+
+### Loss convergence on synthetic batches
 
 A run is checked by its loss curve. On random batches the loss has two known
 levels: a model that predicts zero scores 2, and the best possible prediction
@@ -59,36 +104,70 @@ the floor.
   from step 200 on, where the loss varies by 0.10 from batch to batch, and
   the validation losses end at 1.5964 and 1.5963.
 - **The branch's own trainer is not in the figure,** because its run is
-  another experiment: it starts from the pretrained weights, which JAX-Titan
-  does not load yet, and at the commit the adapter pins its step returns the
-  random key it was given, so every step draws the same noise and the same
-  timesteps. One step of it matches the step of these runs in a test with
-  small sizes.
+  another experiment: it starts from the pretrained weights and, at the
+  commit the adapter pins, its step returns the random key it was given, so
+  every step draws the same noise and the same timesteps. One step of it
+  matches the step of these runs in a test with small sizes.
 
 The comparisons with diffusers' model and with the branch's model, in tests
 with small sizes and at full size on one GPU, are in
-[pipelines.md](../pipelines.md#ideogram-4-2026-11-17-4x-mi350x). The runs are
-of 2026-11-17, on jax 0.12.1 with JAX-Titan's jaxlib and Shardy patches (JAX
-`6b39d495e5`, XLA `d23c30982a`, Shardy `b6b99997`) in the TheRock ROCm 10.1
-container, and their records are in
-[results/2026-11-17](../results/2026-11-17).
+[pipelines.md](../pipelines.md#ideogram-4-2026-11-17-4x-mi350x).
+
+### Pictures from the published weights
+
+- **The pictures match their captions.** The three example captions of
+  Ideogram's prompting guide, at 1024x1024, give a golden retriever on a red
+  skateboard, a business card whose two text elements read `ACME TECH` and
+  `hello@acme.tech` letter for letter, and a sailboat against the setting sun.
+- **The text encoder gives transformers' features:** in a test with small
+  sizes, and at full size on the published weights within 3.7e-7 in fp32 and
+  1.5e-2 in bf16, the precision generation runs in.
+- **The autoencoder matches diffusers'** in a test with small sizes. At full
+  size an image encoded and decoded again comes back at 27-32 dB.
+
+No picture was compared with one from Ideogram's own pipeline.
+
+### Fine-tuning on images
+
+The 18 images of `Norod78/Yarn-art-style` at 512x512, 17 to train on and one
+held out, each with a caption that names its style by a word the published
+model has no meaning for, `sks style`.
+
+- **The training loss falls,** from 0.72 over the first 50 steps to 0.52 over
+  the last 50 of 300. The loss on the held-out image rises from 0.61 to 0.71:
+  17 images are few, and the run fits them.
+- **The pictures take the images' style.** For the same captions and seeds,
+  the published weights draw marker-pen illustrations and the fine-tuned
+  ones figures wound from coloured yarn on a black ground, as the images
+  show them, also for a lighthouse and a teapot, which the images do not
+  have.
+
+The numbers of these runs are in
+[pipelines.md](../pipelines.md#ideogram-4-with-published-weights-2026-11-18-4x-mi350x).
 
 ## Performance
 
 TODO: measure throughput and memory on an idle node, on 4 and on 8 GPUs. What
-the runs above saw on a node shared with another job is in
+the runs above saw is in
 [pipelines.md](../pipelines.md#ideogram-4-2026-11-17-4x-mi350x).
 
 ## Known limits
 
-- Synthetic batches only: no dataset, no text encoder and no VAE.
-- No pretrained weights. `--init_from` reads parameters in the model's own
-  layout (`jax_titan.trainer.checkpoint.save_params`); a converter from the
-  released checkpoint is not written.
+- Square images only, in the cache and in generation.
+- Fine-tuning trains all of the conditional transformer; there is no LoRA.
+- A caption must be JSON in Ideogram 4's schema, and nothing here rewrites a
+  plain prompt into one. For a plain prompt, and at 1024x1024 for a sparse
+  caption, the published model draws a gray picture that says
+  `Image blocked by safety filter`, as its prompting guide warns.
+- Ideogram's pipeline screens prompts and pictures with moderation services
+  and expects whoever serves or redistributes the model to do the same. This
+  code has no such filter.
+- The cache keeps the text features of every distinct caption, 0.1 MB per
+  text token.
 - The model trains through the layouts of `jax_titan.trainer.adapters`:
   FSDP or data parallelism without a pipeline, or a pipeline with data
   parallelism inside its stages and gradients reduced per microbatch. It has
   no tensor parallelism and no FSDP inside pipeline stages.
 - Attention runs on native JAX only: the model always passes a mask, which
   the TE and JAX-AITER attention decline.
-- One node.
+- Generation runs on one device, and training on one node.

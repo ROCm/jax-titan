@@ -111,9 +111,13 @@ pip install -e ".[maxdiffusion]" "jax==$(python -c 'import jax; print(jax.__vers
   "jaxlib==$(python -c 'import jaxlib; print(jaxlib.__version__)')"
 ```
 
-JAX-Titan's own Ideogram 4 (`--model=ideogram4`) needs none of these. Its test
-against diffusers' model runs when `torch` and `diffusers` 0.39 or later are
-installed, and is skipped otherwise. `--model=maxdiffusion:ideogram4` needs
+JAX-Titan's own Ideogram 4 (`--model=ideogram4`) needs none of these. Its
+tests against diffusers' and transformers' models run when `torch` and
+`diffusers` 0.39 or later are installed, and are skipped otherwise. Generating
+pictures and fine-tuning on images need the `ideogram` extra, for the text
+encoder's tokenizer and image files, and a checkpoint in diffusers' layout,
+such as a snapshot of `ideogram-ai/ideogram-4-fp8`, whose weights are under
+Ideogram's non-commercial license. `--model=maxdiffusion:ideogram4` needs
 MaxDiffusion's Ideogram branch in place of the pinned commit:
 `yaomingamd/maxdiffusion` at `6db5c172` (branch `ymmu/ideogram_v4_training`),
 which is not upstream.
@@ -225,6 +229,11 @@ XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" python -m jax_titan.trainer.train \
 XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" python -m jax_titan.trainer.train \
   --model=ideogram4 --parallel=fsdp --num_stages=1 \
   --microbatches=1 --microbatch_size=8 --steps=30 --lr=1e-5
+
+# A picture from Ideogram 4's published weights, on one GPU; the recipe also
+# fine-tunes the model on images.
+python -m jax_titan.models.ideogram_generate --checkpoint=$CKPT \
+  --prompt=@caption.json --out=picture.png
 ```
 
 `--model_overrides` takes a JSON object of MaxText config or FLUX.1

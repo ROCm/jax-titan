@@ -43,7 +43,9 @@ This is the target design; [What works](#what-works) lists what runs today.
   parallelism or with FSDP
   ([docs/recipes/ideogram4.md](docs/recipes/ideogram4.md)). The stages of
   MaxDiffusion's Ideogram branch run the same way as
-  `--model=maxdiffusion:ideogram4`, and the two models match.
+  `--model=maxdiffusion:ideogram4`, and the two models match. With its text
+  encoder and autoencoder, also JAX-Titan's own code, the model draws pictures
+  from Ideogram's published weights and is fine-tuned on images.
 - Operator providers chosen per op with `--ops`: ROCm TE fused attention and
   FP8/MXFP8 GEMMs, JAX-AITER flash attention, RMSNorm, SiLU-and-mul and GEMMs,
   AITER's Triton RMSNorm, SiLU-and-mul and RoPE and a gfx950 Gluon GEMM through

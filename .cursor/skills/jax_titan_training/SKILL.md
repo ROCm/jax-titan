@@ -71,6 +71,12 @@ XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" timeout -s KILL 1800 python -m jax_titan.t
 # JAX-Titan's own Ideogram 4, on synthetic batches (docs/recipes/ideogram4.md).
 ... --model=ideogram4 --parallel=fsdp --num_stages=1 --microbatches=1 \
   --microbatch_size=8 --lr=1e-5 ...
+
+# Fine-tuned on images: a cache from jax_titan.data.ideogram, the published
+# transformer to start from, the trained parameters written at the end.
+... --model=ideogram4 --parallel=fsdp --num_stages=1 --microbatches=1 \
+  --microbatch_size=8 --resolution=512 --lr=1e-5 --data=$CACHE \
+  --init_from=$CKPT/transformer --save_params=$OUT ...
 ```
 
 Layout flags: `--schedule`, `--stage_fsdp`, `--tensor_parallel`,
