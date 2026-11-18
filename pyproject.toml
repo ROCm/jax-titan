@@ -65,6 +65,9 @@ maxdiffusion = [
     "requests",
     "tensorboardx",
 ]
+# Ideogram 4 with published weights and real images: the text encoder's
+# tokenizer and image files (jax_titan.models.ideogram_generate).
+ideogram = ["pillow", "tokenizers"]
 
 [tool.setuptools.dynamic]
 version = {attr = "jax_titan.__version__"}
