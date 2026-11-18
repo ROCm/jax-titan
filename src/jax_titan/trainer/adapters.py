@@ -5,7 +5,8 @@
 trains FLUX.1 (`flux-dev` or `flux-schnell`) or, from MaxDiffusion's Ideogram
 branch, Ideogram 4 (`ideogram4`) on synthetic rectified-flow batches until an
 image pipeline exists. `--model=ideogram4` trains JAX-Titan's own Ideogram 4
-(`jax_titan.models.ideogram`) on the same batches. They run as a Shardy MPMD
+(`jax_titan.models.ideogram`) on the same batches, or on a cache of image
+tokens and text features (`jax_titan.data.ideogram`). They run as a Shardy MPMD
 pipeline with data parallelism inside each stage, reducing gradients in every
 microbatch's backward pass, and attention in native JAX unless the ops policy
 names attention. `--parallel=dp` runs the same stages, weights and batches as
@@ -15,8 +16,9 @@ one data-parallel `jax.jit` program, the no-pipeline reference; for Ideogram
 
 import functools
 import json
+import pathlib
 
-from jax_titan.trainer.layout import Layout, Workload, abstract, placement
+from jax_titan.trainer.layout import EVAL_STEPS, Layout, Workload, abstract, placement
 
 PROVIDERS = ("maxtext", "maxdiffusion")
 # JAX-Titan's own models that train through these layouts.
@@ -154,7 +156,7 @@ def _mpmd_layout(args, topology, model, optimizer, inputs, targets, split_batch)
                 f"mpmd:{num_stages}",
                 placement=placement(
                     topology, [jt_mpmd.mesh_name(i % num_meshes) for i in range(num_stages)]),
-                eval_step=eval_step)
+                eval_step=eval_step, export=getattr(model, "merge", None))
 
 
 def _spmd_layout(args, mesh, model, optimizer, inputs, targets, split_batch) -> Layout:
@@ -229,7 +231,7 @@ def _spmd_layout(args, mesh, model, optimizer, inputs, targets, split_batch) -> 
   eval_step = jax.jit(loss_fn, in_shardings=(param_sh, in_sh, tgt_sh), out_shardings=scalar)
   return Layout(init, abstract_state, jitted, _shapes(flat_inputs), _shapes(flat_targets),
                 put_batch, "spmd", placement=placement({"mesh": mesh}, ["mesh"] * args.num_stages),
-                eval_step=eval_step)
+                eval_step=eval_step, export=getattr(model, "merge", None))
 
 
 def _routed_attention():
@@ -387,7 +389,9 @@ def _ideogram(args, devices, optimizer, native: bool):
   """Ideogram 4, JAX-Titan's own (`native`) or from MaxDiffusion's Ideogram branch.
 
   Besides config fields, `--model_overrides` takes `dtype` and, for the native
-  model, `timestep_mean` and `timestep_std` of the training timesteps.
+  model, `timestep_mean` and `timestep_std` of the training timesteps. The
+  native model also trains on a cache of real samples (`--data`), with a tenth
+  of its images, at least one, held out for validation when `--eval_every` is set.
   """
   import jax  # pylint: disable=g-import-not-at-top
   import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
@@ -428,6 +432,20 @@ def _ideogram(args, devices, optimizer, native: bool):
   side = args.resolution // 16
   image_tokens = side * side
   text_tokens = args.text_tokens or 256
+  cache, held_out = None, 0
+  if pathlib.Path(args.data).is_dir():
+    if not native:
+      raise NotImplementedError(f"--data reads a cache of samples for {MODELS[0]} only")
+    from jax_titan.data import ideogram as data  # pylint: disable=g-import-not-at-top
+
+    cache = data.Cache.open(args.data)
+    if cache.resolution != args.resolution:
+      raise ValueError(
+          f"{args.data} holds images of {cache.resolution} pixels, not {args.resolution}")
+    text_tokens = cache.text_tokens
+    held_out = max(1, len(cache) // 10) if args.eval_every else 0
+    if held_out >= len(cache):
+      raise ValueError(f"{args.data} has {len(cache)} images, too few to hold one out")
   ids = ig.sequence_ids(side, text_tokens)
   mb, num_mb = args.microbatch_size, args.microbatches
   b = (num_mb, mb)
@@ -442,22 +460,28 @@ def _ideogram(args, devices, optimizer, native: bool):
       **{k: (jax.ShapeDtypeStruct(b + v.shape, v.dtype), batched) for k, v in ids.items()},
   }
   targets = (jax.ShapeDtypeStruct(latent_shape, f32), batched)
-  # The text features are the largest input by far, and the same every step.
-  txt = np.random.default_rng(args.seed).standard_normal(text_shape, np.float32)
+  # The synthetic text features are the largest input by far, and the same every step.
+  txt = None if cache else np.random.default_rng(args.seed).standard_normal(text_shape, np.float32)
 
   def next_batch(step):
-    """Noised random latents and velocity targets, with random text features."""
+    """Noised latents and velocity targets with their text features: random ones,
+    or the cache's samples, the held-out images for a validation step."""
     rng = np.random.default_rng((args.seed, step))
-    latents = rng.standard_normal(latent_shape, np.float32)
+    if cache is None:
+      latents = rng.standard_normal(latent_shape, np.float32)
+      text, batch_ids = txt, {k: np.broadcast_to(v, b + v.shape) for k, v in ids.items()}
+    else:
+      train = len(cache) - held_out
+      if step >= EVAL_STEPS:
+        images = train + rng.integers(0, held_out, b)
+      else:
+        images = rng.integers(0, train, b)
+      latents, text, valid = (x.reshape(b + x.shape[1:]) for x in cache.samples(images.reshape(-1)))
+      batch_ids = ig.padded_sequence_ids(side, valid)
     noise = rng.standard_normal(latent_shape, np.float32)
     t = ig.timesteps(rng.standard_normal(b), args.resolution, **schedule)
     img, target = ideogram_noised(latents, noise, t)
-    x = {
-        "img": img,
-        "txt": txt,
-        "timestep": t,
-        **{k: np.broadcast_to(v, b + v.shape) for k, v in ids.items()},
-    }
+    x = {"img": img, "txt": text, "timestep": t, **batch_ids}
     return x, target
 
   if args.parallel == "mpmd":
@@ -471,6 +495,8 @@ def _ideogram(args, devices, optimizer, native: bool):
       tokens_per_step=samples * (image_tokens + text_tokens),
       flops_per_step=model.flops_per_sample(image_tokens, text_tokens) * samples,
       next_batch=next_batch,
+      data="synthetic" if cache is None else
+      f"{args.data} ({len(cache) - held_out} images, {held_out} more held out)",
   )
   return layout, work
 

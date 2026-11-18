@@ -6,9 +6,9 @@ training step (noising, timesteps, loss) its example
 by the image tokens, runs through identical blocks: RMSNorm before and after
 attention and the SwiGLU MLP, normalized queries and keys, rotary embeddings
 over three position axes, and a scale and a gate on each half from the
-timestep. Text features come from the text encoder's hidden states and image
-tokens from 2x2 patches of the VAE's latents; neither model is part of this
-module.
+timestep. Text features come from the text encoder's hidden states
+(`jax_titan.models.qwen3`) and image tokens from 2x2 patches of the
+autoencoder's latents (`jax_titan.models.flux2_vae`).
 
 A stage holds a contiguous run of blocks; stage 0 also holds the input
 projections and the timestep embedding, and the last stage the output layer.
@@ -435,14 +435,14 @@ class Model:
     return jax.eval_shape(lambda: self.split(init_params(self.config, jax.random.key(seed))))
 
   def load(self, path: str) -> tuple[dict, ...]:
-    """Stage parameters on one device: from published weights when `path` is a
-    safetensors file or a directory of them (`pretrained_params`), otherwise
-    from `init_params`-shaped parameters that
+    """Stage parameters: on the host from published weights, when `path` is a
+    safetensors file or a directory of them (`pretrained_params`); otherwise
+    on one device from `init_params`-shaped parameters that
     `jax_titan.trainer.checkpoint.save_params` wrote."""
     from jax_titan.trainer import checkpoint  # pylint: disable=g-import-not-at-top
 
     if pretrained.is_safetensors(path):
-      return self.split(jax.tree.map(jnp.asarray, pretrained_params(path, self.config)))
+      return self.split(pretrained_params(path, self.config))
     device = jax.sharding.make_single_device_sharding(jax.local_devices()[0])
     target = jax.tree.map(
         lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=device),

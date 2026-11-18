@@ -22,15 +22,13 @@ import time
 
 from jax_titan import paths
 from jax_titan.trainer import adapters
-from jax_titan.trainer.layout import Layout
+from jax_titan.trainer.layout import EVAL_STEPS, Layout
 from jax_titan.trainer.layout import Workload
 from jax_titan.trainer.layout import abstract
 from jax_titan.trainer.layout import placement as layout_placement
 
 _NORM_PARAMS = ("attn_norm", "mlp_norm", "final_norm", "attn_out_norm", "mlp_out_norm", "q_norm",
                 "k_norm", "text_norm")
-# Synthetic validation batches come from steps no training run reaches.
-_EVAL_STEPS = 10**9
 
 
 def parse_args(argv=None):
@@ -133,8 +131,8 @@ def parse_args(argv=None):
   parser.add_argument(
       "--data",
       default=str(paths.work_dir() / "data/wikitext103_train.llama3.bin"),
-      help="uint32 token file, or 'synthetic'. Image models always train on "
-      "synthetic batches.",
+      help="uint32 token file, or 'synthetic'. Image models train on synthetic "
+      "batches; ideogram4 also on a cache directory that jax_titan.data.ideogram wrote.",
   )
   parser.add_argument("--remat", action=argparse.BooleanOptionalAction, default=True)
   parser.add_argument(
@@ -183,8 +181,14 @@ def parse_args(argv=None):
       "--init_from", default="",
       help="maxtext: models start from this MaxText parameter checkpoint, e.g. "
       "pretrained weights converted with MaxText's checkpoint_conversion/to_maxtext.py, "
-      "and ideogram4 from parameters that jax_titan.trainer.checkpoint.save_params wrote, "
-      "instead of a random initialization. A checkpoint in --checkpoint_dir wins.",
+      "and ideogram4 from published transformer weights (a directory of safetensors files) "
+      "or from parameters that --save_params wrote, instead of a random initialization. "
+      "A checkpoint in --checkpoint_dir wins.",
+  )
+  parser.add_argument(
+      "--save_params", default="",
+      help="Writes the model's parameters here after the last step, as --init_from reads "
+      "them (ideogram4). The directory must not exist.",
   )
   parser.add_argument(
       "--checkpoint_every", type=int, default=0,
@@ -568,6 +572,11 @@ def main(argv=None):
                   placement=layout.placement)
   if args.eval_every and layout.eval_step is None:
     raise ValueError(f"{layout.structure} has no validation step")
+  if args.save_params:
+    if layout.export is None:
+      raise NotImplementedError(f"--save_params writes the parameters of {adapters.MODELS[0]} only")
+    if os.path.exists(args.save_params):
+      raise FileExistsError(f"--save_params={args.save_params} exists")
 
   ckpt = None
   start = 0
@@ -607,7 +616,7 @@ def main(argv=None):
   eval_batches = []
   if work.next_batch is not None:
     next_batch = work.next_batch
-    print("data: synthetic", flush=True)
+    print(f"data: {work.data}", flush=True)
   elif args.data == "synthetic":
 
     def next_batch(step):
@@ -629,7 +638,7 @@ def main(argv=None):
 
   if args.eval_every:
     if work.next_batch is not None or args.data == "synthetic":
-      eval_batches = [next_batch(_EVAL_STEPS + i) for i in range(args.eval_batches)]
+      eval_batches = [next_batch(EVAL_STEPS + i) for i in range(args.eval_batches)]
     else:
       held_out = WindowSampler(args.eval_data, seq, seed=args.seed, step=0)
       if held_out.max_token() >= work.vocab_size:
@@ -740,6 +749,12 @@ def main(argv=None):
       t0 = time.time()
       ckpt.close()
       log.event("checkpoint_closed", seconds=time.time() - t0)
+    if args.save_params:
+      from jax_titan.trainer import checkpoint  # pylint: disable=g-import-not-at-top
+
+      t0 = time.time()
+      checkpoint.save_params(args.save_params, layout.export(params))
+      print(f"saved parameters to {args.save_params} in {time.time() - t0:.1f}s", flush=True)
   except BaseException as e:
     status = f"{type(e).__name__}: {e}"[:500]
     raise

@@ -5,6 +5,11 @@ import dataclasses
 from typing import Any, Callable
 
 
+# `Workload.next_batch` gets these steps and later ones for validation batches,
+# which no training run reaches.
+EVAL_STEPS = 10**9
+
+
 @dataclasses.dataclass
 class Layout:
   """How the training state is placed and stepped.
@@ -16,7 +21,8 @@ class Layout:
 
   `placement` maps each mesh name to its device ids and lists each stage's
   mesh, for `env.json`'s rank map. `eval_step(params, inputs, targets)` is
-  the mean loss without an update, for validation.
+  the mean loss without an update, for validation. `export(params)` gives the
+  model's parameters as `--init_from` reads them, for `--save_params`.
   """
 
   init: Callable[[], tuple]
@@ -28,6 +34,7 @@ class Layout:
   structure: str
   placement: dict | None = None
   eval_step: Any = None
+  export: Callable | None = None
 
 
 def placement(meshes: dict, stage_meshes) -> dict:
@@ -42,8 +49,9 @@ def placement(meshes: dict, stage_meshes) -> dict:
 class Workload:
   """What one training step processes.
 
-  Token models train on token windows below `vocab_size`. Models without a
-  dataset yet give `next_batch(step)`, a synthetic host batch for `put_batch`.
+  Token models train on token windows below `vocab_size`. Other models give
+  `next_batch(step)`, a host batch for `put_batch`, synthetic or from `data`,
+  and a validation batch for steps from `EVAL_STEPS` on.
   `flops_per_step` counts model FLOPs (for MFU); `hardware_flops_per_step` adds
   what rematerialization recomputes (for HFU), when known.
   """
@@ -53,6 +61,7 @@ class Workload:
   flops_per_step: float
   vocab_size: int | None = None
   next_batch: Callable[[int], Any] | None = None
+  data: str = "synthetic"
   hardware_flops_per_step: float | None = None
 
 

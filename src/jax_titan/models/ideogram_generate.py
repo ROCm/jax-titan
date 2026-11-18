@@ -61,8 +61,9 @@ class Pipeline:
     dtype = jnp.bfloat16
     start = time.time()
 
-    def on_device(tree, to=None):
-      return jax.tree.map(lambda x: jnp.asarray(x, to), tree)
+    def on_device(tree, to=jnp.float32):
+      # Cast on the device: a host cast of the fp32 weights to bf16 is slow.
+      return jax.tree.map(lambda x: jnp.asarray(x).astype(to), tree)
 
     self._tokenizer = checkpoint / "tokenizer"
     text_cfg = qwen3.pretrained_config(checkpoint / "text_encoder")
