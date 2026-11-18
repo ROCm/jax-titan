@@ -80,10 +80,11 @@ def main(argv=None):
   parser = argparse.ArgumentParser(description=__doc__,
                                    formatter_class=argparse.RawDescriptionHelpFormatter)
   parser.add_argument("--checkpoint", required=True, help="A checkpoint in the published layout.")
-  parser.add_argument("--prompt", required=True,
-                      help="The user's message, or @FILE to read it from a file.")
+  parser.add_argument("--prompt", action="append", required=True,
+                      help="The user's message, or @FILE to read it from a file. Repeat for "
+                      "several, each answered on its own.")
   parser.add_argument("--image", action="append", default=[],
-                      help="A picture the message is about. Repeat for several.")
+                      help="A picture the messages are about. Repeat for several.")
   parser.add_argument("--system", default="", help="A system message before the user's.")
   parser.add_argument("--max_new_tokens", type=int, default=256)
   parser.add_argument("--temperature", type=float, default=0.0,
@@ -105,16 +106,10 @@ def main(argv=None):
   from jax_titan.models import command_a  # pylint: disable=g-import-not-at-top
   from jax_titan.trainer import checkpoint  # pylint: disable=g-import-not-at-top
 
-  prompt = args.prompt
-  if prompt.startswith("@"):
-    prompt = pathlib.Path(prompt[1:]).read_text(encoding="utf-8").strip()
+  prompts = [pathlib.Path(p[1:]).read_text(encoding="utf-8").strip() if p.startswith("@") else p
+             for p in args.prompt]
   images = [Image.open(path) for path in args.image]
-  content = [{"type": "image"}] * len(images) + [{"type": "text", "text": prompt}]
-  messages = [{"role": "system", "content": args.system}] if args.system else []
-  messages.append({"role": "user", "content": content if images else prompt})
-
   preprocessor = data.Preprocessor.open(args.checkpoint)
-  tokens, tiles = preprocessor.encode(messages, images)
   start = time.time()
   dtype, devices = jax.numpy.dtype(args.dtype), jax.devices()
   cfg, params = command_a.load_stages(args.checkpoint, devices, dtype, bool(images))
@@ -122,13 +117,20 @@ def main(argv=None):
     trained = command_a.to_stages(cfg, checkpoint.restore_saved(args.params), devices, dtype)
     params = [{**p, **t, "layers": {**p["layers"], **t["layers"]}}
               for p, t in zip(params, trained)]
-  print(f"loaded on {len(params)} devices after {time.time() - start:.0f} s; the prompt is "
-        f"{len(tokens)} tokens" + (f" with {len(tiles)} image tiles" if images else ""))
-  start = time.time()
-  new = generate(cfg, params, tokens[None], None if tiles is None else tiles[None], dtype=dtype,
-                 new_tokens=args.max_new_tokens, temperature=args.temperature, seed=args.seed)[0]
-  print(f"generated {len(new)} tokens in {time.time() - start:.0f} s")
-  print(preprocessor.decode(new))
+  loaded = f"loaded on {len(params)} devices after {time.time() - start:.0f} s; "
+  for prompt in prompts:
+    content = [{"type": "image"}] * len(images) + [{"type": "text", "text": prompt}]
+    messages = [{"role": "system", "content": args.system}] if args.system else []
+    messages.append({"role": "user", "content": content if images else prompt})
+    tokens, tiles = preprocessor.encode(messages, images)
+    print(f"{loaded}the prompt is {len(tokens)} tokens"
+          + (f" with {len(tiles)} image tiles" if images else ""))
+    loaded, start = "", time.time()
+    new = generate(cfg, params, tokens[None], None if tiles is None else tiles[None],
+                   dtype=dtype, new_tokens=args.max_new_tokens, temperature=args.temperature,
+                   seed=args.seed)[0]
+    print(f"generated {len(new)} tokens in {time.time() - start:.0f} s")
+    print(preprocessor.decode(new))
   return 0
 
 

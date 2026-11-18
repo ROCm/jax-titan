@@ -704,8 +704,10 @@ def _command_a(args, devices, optimizer):
   else:
     layout = _spmd_layout(args, mesh, model, optimizer, inputs, tokens, split_batch)
   tokens_per_step = num_mb * mb * seq
+  # Not the stages' parameters: with several stages the embedding is held twice.
+  whole = jax.eval_shape(lambda: command_a.init_params(cfg, jax.random.key(0), tiles > 0))
   work = Workload(
-      num_params=_num_params(model.abstract(args.seed)),
+      num_params=_num_params(whole),
       tokens_per_step=tokens_per_step,
       flops_per_step=model.flops_per_token(seq) * tokens_per_step,
       vocab_size=cfg.vocab_size,

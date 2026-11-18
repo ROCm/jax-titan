@@ -203,3 +203,10 @@ def test_command_line_answers_about_a_picture(tmp_path, capsys):
   prompt = f"--prompt=@{tmp_path / 'prompt.txt'}"
   assert command_a_generate.main([*flags, prompt, "--system=d", "--dtype=float32"]) == 0
   assert "the prompt is 10 tokens\n" in capsys.readouterr().out
+  # Several prompts are answered one after the other from one load.
+  assert command_a_generate.main([*flags, "--prompt=a b", "--prompt=a b", "--prompt=d"]) == 0
+  lines = capsys.readouterr().out.splitlines()
+  assert len(lines) == 9 and lines[0].startswith("loaded on 8 devices")
+  assert lines[0].endswith("; the prompt is 6 tokens") and lines[3] == "the prompt is 6 tokens"
+  assert lines[6] == "the prompt is 5 tokens"
+  assert all(lines[i].startswith("generated 3 tokens in ") for i in (1, 4, 7))
