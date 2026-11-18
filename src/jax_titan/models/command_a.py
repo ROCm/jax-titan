@@ -215,7 +215,8 @@ def pretrained_config(path) -> CommandAConfig:
     text, vision = values["text_config"], values["vision_config"]
     types.extend(text.get("layer_types") or ())
     fields = text | {"vision_" + k: v for k, v in vision.items()}
-    fields |= {k: v for k, v in values.items() if not isinstance(v, dict)}
+    top = ("image_token_id", "downsample_factor", "alignment_intermediate_size")
+    fields |= {k: values[k] for k in top if k in values}
     theta = text.get("rope_parameters", {}).get("rope_theta", text.get("rope_theta"))
     if theta is not None:
       fields["rope_theta"] = float(theta)

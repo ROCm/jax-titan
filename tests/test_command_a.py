@@ -141,6 +141,19 @@ def test_padding_and_later_tokens_change_nothing_before_them():
   assert not np.array_equal(again[0, -1], out[0, -1])
 
 
+def test_bfloat16_stays_near_float32():
+  params = _params()
+  for name, (tokens, pixels, valid) in _batches():
+    exact = np.asarray(command_a.forward(CONFIG, params, tokens, pixels, valid, jnp.float32))
+    rounded = command_a.forward(CONFIG, params, tokens, pixels, valid, jnp.bfloat16)
+    assert rounded.dtype == jnp.bfloat16
+    real = np.ones(tokens.shape, bool) if valid is None else valid
+    apart = np.abs(np.asarray(rounded, np.float32) - exact)[real]
+    # A router's choice between near-equal experts can flip in bf16, which moves single
+    # logits more than the mean.
+    assert np.isfinite(apart).all() and apart.mean() < 0.1, name
+
+
 def test_a_sliding_layer_sees_its_window_only():
   # One layer, and with a pattern of 2 it is a sliding one.
   cfg = dataclasses.replace(CONFIG, num_hidden_layers=1, sliding_window_pattern=2, sliding_window=4)
