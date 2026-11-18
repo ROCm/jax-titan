@@ -268,7 +268,7 @@ def make_train_step(
   Called as `step(stage_params, opt_states, frozen, tokens, targets)`, the step
   also takes one pytree per stage of parameters that it does not train, and
   stage `i` gets the pair `(stage_params[i], frozen[i])` as its parameters.
-  This form needs gradients reduced per microbatch (no `copy_axes`).
+  This form reduces gradients per microbatch only: with `copy_axes` it raises.
 
   By default a stage reduces its gradients across its data-parallel ranks in
   the backward pass of every microbatch. With `copy_axes`, one pytree of axes
@@ -344,6 +344,8 @@ def make_train_step(
 
   def train_step(stage_params, opt_states, *batch):
     *frozen, tokens, targets = batch
+    if frozen and copy_axes is not None:
+      raise ValueError("a step with frozen parameters reduces gradients per microbatch only")
     loss, grads = loss_and_grads(stage_params, tokens, targets, *frozen)
     new_params, new_states = [], []
     if copy_axes is None:

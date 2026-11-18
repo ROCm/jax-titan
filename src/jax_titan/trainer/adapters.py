@@ -25,13 +25,18 @@ The layouts here take a staged model, any object with `init(seed)` and
 `--init_from` needs its `load(path)`, `--parallel=fsdp` its
 `logical_axes(path, leaf)` and `--save_params` its `merge(stage_params)`.
 
-A model may train only part of its parameters: `is_frozen(path)` tells, for
-the keys that lead to a parameter in a stage's dicts, whether it stays as it
-is. Frozen parameters are no part of the trained state: they get no gradient
-and no optimizer state, are held in the model's compute `dtype`, and
-`--save_params` leaves them out. A model that can read weights straight onto
-devices has `place(path, targets)`, which `--init_from` then uses for
-published weights: a checkpoint larger than the host's memory loads this way.
+A model may train only part of its parameters. Its stage parameters are then
+nested dicts, and `is_frozen(path)` tells, for the tuple of dict keys that
+leads to a parameter in a stage's dicts, whether it stays as it is. Frozen
+parameters are no part of the trained state: they get no gradient and no
+optimizer state, are held in the model's compute dtype, its attribute `dtype`,
+and neither a checkpoint nor `--save_params` holds them, so a run that resumes
+reads them again from where the run took them. A model that can read weights
+straight onto devices has `place(path, targets)`, which `--init_from` then
+uses for published weights, a directory of safetensors files: a checkpoint
+larger than the host's memory loads this way. `targets` is one tree of
+ShapeDtypeStructs with shardings per stage, all of a stage's parameters or
+its frozen ones alone.
 """
 
 import dataclasses
@@ -98,11 +103,12 @@ def _shapes(specs):
 
 
 def _split(tree, is_frozen):
-  """The trained and the frozen leaves of `tree`, nested dicts, as two such trees."""
+  """The trained and the frozen leaves of `tree`, nested dicts, as two such
+  trees; a dict left without a leaf is dropped."""
 
   def part(node, path, frozen):
     if not isinstance(node, dict):
-      return node if is_frozen(path) == frozen else None
+      return node if bool(is_frozen(path)) == frozen else None
     parts = {k: part(v, path + (k,), frozen) for k, v in node.items()}
     return {k: v for k, v in parts.items() if v is not None and not (isinstance(v, dict) and not v)}
 
@@ -151,12 +157,14 @@ def _init_state(args, model, optimizer, meshes, fsdp=False):
   opt_sh = tuple(shardings(s, m) for s, m in zip(opt_shapes, meshes))
   placed = []  # The frozen parameters, once they are on their devices.
 
-  def place():
-    """The trained and the frozen parameters on their shardings."""
+  def place(trained=True):
+    """The trained and the frozen parameters on their shardings; without
+    `trained`, where the model reads a part of its weights, the frozen alone."""
     if args.init_from and hasattr(model, "place") and pretrained.is_safetensors(args.init_from):
-      targets = tuple(
-          _merged(abstract(p, ps), abstract(f, fs))
-          for p, ps, f, fs in zip(param_shapes, param_sh, frozen_shapes, frozen_sh))
+      targets = tuple(abstract(f, fs) for f, fs in zip(frozen_shapes, frozen_sh))
+      if trained:
+        targets = tuple(
+            _merged(abstract(p, ps), f) for p, ps, f in zip(param_shapes, param_sh, targets))
       stages = [_split(s, is_frozen) for s in model.place(args.init_from, targets)]
       return tuple(p for p, _ in stages), tuple(f for _, f in stages)
     stages = model.load(args.init_from) if args.init_from else model.init(args.seed)
@@ -181,7 +189,7 @@ def _init_state(args, model, optimizer, meshes, fsdp=False):
   def frozen():
     # A run that resumes restores its state and never calls init().
     if not placed:
-      placed[:] = [place()[1]]
+      placed[:] = [place(trained=False)[1]]
     return placed[0]
 
   abstract_state = (
@@ -255,8 +263,9 @@ def _spmd_layout(args, mesh, model, optimizer, inputs, targets, split_batch) -> 
   or, with `--parallel=fsdp`, with the state sharded too.
 
   The step runs the stages over all microbatches at once, which gives the
-  pipeline's loss and gradients when microbatches hold equal token counts, and
-  updates the replicated or sharded state the way the pipeline does. `inputs`, `targets`
+  pipeline's loss and gradients when microbatches hold equal token counts or
+  the model's last stage takes the mean of their means itself, and updates
+  the replicated or sharded state the way the pipeline does. `inputs`, `targets`
   and `split_batch` are `_mpmd_layout`'s: batched leaves lose their
   microbatch axis, and per-microbatch constants keep the first microbatch's.
   """
@@ -640,14 +649,16 @@ def _command_a(args, devices, optimizer):
     constrain = functools.partial(
         jax.lax.with_sharding_constraint,
         shardings=jax.sharding.NamedSharding(mesh, P(jt_mpmd.DATA_AXIS)))
-  model = command_a.Model(cfg, num_stages=args.num_stages, layers=_stage_layers(args),
-                          dtype=dtype, remat=args.remat, constrain=constrain, images=tiles > 0,
-                          freeze=freeze)
-
   mb, num_mb, seq = args.microbatch_size, args.microbatches, args.seq_len
   cache = data.Cache.open(args.data) if os.path.isdir(args.data) else None
   if cache is not None:
     seq = cache.tokens.shape[1]
+  # Conversations give microbatches different numbers of targets: the layouts without a
+  # pipeline then take the pipeline's mean of the microbatches' means.
+  flat = cache is not None and args.parallel != "mpmd"
+  model = command_a.Model(cfg, num_stages=args.num_stages, layers=_stage_layers(args),
+                          dtype=dtype, remat=args.remat, constrain=constrain, images=tiles > 0,
+                          freeze=freeze, microbatches=num_mb if flat else 1)
   b = (num_mb, mb)
   batched = P(None, jt_mpmd.DATA_AXIS)
   tokens = (jax.ShapeDtypeStruct(b + (seq,), jnp.int32), batched)
@@ -706,9 +717,9 @@ def _command_a(args, devices, optimizer):
     layout = _spmd_layout(args, mesh, model, optimizer, inputs, tokens, split_batch)
   tokens_per_step = num_mb * mb * seq
   # Not the stages' parameters: with several stages the embedding is held twice.
-  whole = jax.eval_shape(lambda: command_a.init_params(cfg, jax.random.key(0), tiles > 0))
+  shapes = jax.eval_shape(lambda: command_a.init_params(cfg, jax.random.key(0), tiles > 0))
   work = Workload(
-      num_params=_num_params(whole),
+      num_params=_num_params(shapes),
       tokens_per_step=tokens_per_step,
       flops_per_step=model.flops_per_token(seq) * tokens_per_step,
       vocab_size=cfg.vocab_size,
@@ -745,7 +756,7 @@ def build(args, devices, optimizer) -> tuple[Layout, Workload]:
     return _maxtext(args, name, devices, optimizer)
   if ideogram:
     return _ideogram(args, devices, optimizer, native)
-  if native:
+  if args.model == "command-a-plus":
     return _command_a(args, devices, optimizer)
   if provider == "maxdiffusion":
     return _maxdiffusion(args, name, devices, optimizer)

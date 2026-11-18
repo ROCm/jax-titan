@@ -14,8 +14,9 @@ by its own size, and from two tiles on also one of the whole picture; in the
 text it stands as one image token per vector of every tile.
 
 Pillow's resampling is not torchvision's, which transformers' image processor
-uses: the tiles are within 2 of 255 levels of its tiles, and equal at more than
-99 pixel values in 100.
+uses, so the tiles differ from its tiles where a picture has fine detail: in
+the pictures compared, by up to 2 of 255 levels for a photograph and by up to
+17 for a screenshot of text.
 """
 
 import argparse
@@ -41,6 +42,14 @@ def grid(height: int, width: int, tile: int, most: int) -> tuple[int, int]:
   return grids[int(np.argmin(np.where(scales < 1, np.inf, scales)))]
 
 
+def open_image(path):
+  """The picture in the file at `path`, upright: turned as its EXIF orientation
+  says, the way the camera held it and transformers loads an image file."""
+  from PIL import Image, ImageOps  # pylint: disable=g-import-not-at-top
+
+  return ImageOps.exif_transpose(Image.open(path))
+
+
 @dataclasses.dataclass(frozen=True)
 class Preprocessor:
   """The tokenizer, the chat template and the image settings of a published checkpoint."""
@@ -63,7 +72,8 @@ class Preprocessor:
     root = pathlib.Path(checkpoint)
     special = json.loads((root / "tokenizer_config.json").read_text(encoding="utf-8"))
     images = json.loads((root / "preprocessor_config.json").read_text(encoding="utf-8"))
-    # The environment transformers renders chat templates in.
+    # A sandbox, as transformers renders a checkpoint's template in one: jinja2 before 3.1.6
+    # has known escapes from it.
     env = jinja2.sandbox.ImmutableSandboxedEnvironment(
         trim_blocks=True, lstrip_blocks=True, extensions=[jinja2.ext.loopcontrols])
     env.filters["tojson"] = lambda value, indent=None: json.dumps(
@@ -80,15 +90,24 @@ class Preprocessor:
     """The conversation as the chat template writes it, one image token for each image.
 
     A message is `{"role", "content"}`; its content is a string, or a list of
-    `{"type": "text", "text"}` and `{"type": "image"}` parts. `variables` are
-    the template's own, such as `tools` and `documents`.
+    `{"type": "text", "text"}` and `{"type": "image"}` parts. An assistant's
+    reasoning is its `thinking`, or as transformers also takes it, its
+    `reasoning_content` or `reasoning`. `variables` are the template's own,
+    such as `tools` and `documents`.
     """
+    def reasoned(message):
+      given = (message.get(k) for k in ("reasoning_content", "thinking", "reasoning"))
+      reasoning = next((r for r in given if r is not None), None)
+      return message if reasoning is None else {"thinking": reasoning, **message}
+
+    messages = [reasoned(m) for m in messages]
     return self.template.render(
         messages=messages, add_generation_prompt=add_generation_prompt, **self.special, **variables)
 
   def tiles(self, image) -> np.ndarray:
     """The tiles of a Pillow image, [tiles, 3, tile, tile] in [-1, 1]: its grid
-    row by row and, from two tiles on, the whole picture."""
+    row by row and, from two tiles on, the whole picture. The image is taken
+    as RGB, an alpha channel dropped, as transformers reads an image file."""
     from PIL import Image  # pylint: disable=g-import-not-at-top
 
     image, size = image.convert("RGB"), self.tile
@@ -153,23 +172,33 @@ def prepare(checkpoint, conversations, out) -> Cache:
   before it make. So that this is what the published model writes, reasoning
   and then the answer, the turn carries its reasoning as `thinking`.
   """
+  out = pathlib.Path(out)
+  if out.exists():
+    raise FileExistsError(f"{out} exists")
   preprocessor = Preprocessor.open(checkpoint)
   pad = preprocessor.tokenizer.token_to_id(preprocessor.special["pad_token"])
   rows = []
-  for line in pathlib.Path(conversations).read_text(encoding="utf-8").splitlines():
+  lines = pathlib.Path(conversations).read_text(encoding="utf-8").splitlines()
+  for number, line in enumerate(lines, 1):
     if not line.strip():
       continue
-    messages = json.loads(line)["messages"]
-    prompt, _ = preprocessor.encode(messages[:-1])
-    whole, _ = preprocessor.encode(messages, add_generation_prompt=False)
+    try:
+      messages = json.loads(line).get("messages") or []
+      if len(messages) < 2 or str(messages[-1].get("role")).lower() != "assistant":
+        raise ValueError("a conversation ends with the assistant's turn, after another's")
+      prompt, _ = preprocessor.encode(messages[:-1])
+      whole, _ = preprocessor.encode(messages, add_generation_prompt=False)
+    except ValueError as error:
+      raise ValueError(f"{conversations}, line {number}: {error}") from error
     same = prompt[:len(whole)] == whole[:len(prompt)]
     rows.append((whole, int(np.argmin(np.append(same, False)))))
+  if not rows:
+    raise ValueError(f"{conversations} holds no conversation")
   tokens = np.full((len(rows), max(len(whole) for whole, _ in rows)), pad, np.int32)
   targets = np.full(tokens.shape, -1, np.int32)
   for i, (whole, shared) in enumerate(rows):
     tokens[i, :len(whole)] = whole
     targets[i, shared - 1:len(whole) - 1] = whole[shared:]
-  out = pathlib.Path(out)
   out.mkdir(parents=True)
   np.savez(out / "conversations.npz", tokens=tokens, targets=targets)
   return Cache(tokens, targets)

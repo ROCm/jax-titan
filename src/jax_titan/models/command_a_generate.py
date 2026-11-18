@@ -11,8 +11,8 @@ is the user's turn of a conversation that the chat template writes
 layers are spread over the visible devices, a run of layers on each, so the
 published model of 437.5 GB in bf16 needs several GPUs. Every new token comes
 from a pass over the whole sequence: there is no key-value cache. `--params`
-replaces the weights that the trainer's `--save_params` wrote, all of the
-model's or the part a fine-tuning run trained.
+puts parameters that the trainer's `--save_params` wrote in place of the
+checkpoint's: all of the model's, or the part that a fine-tuning run trained.
 """
 
 import argparse
@@ -28,16 +28,17 @@ def generate(cfg, params, tokens, pixels=None, *, new_tokens: int, dtype=None,
   """The continuations [batch, up to new_tokens] of prompts `tokens` [batch, prompt].
 
   `params` is the model's parameters on one device, or the stages of
-  `jax_titan.models.command_a.to_stages` on several. Each step takes the
-  likeliest token, or with `temperature` draws one from the scores divided by
-  it. A sequence that reaches the end-of-sequence token is padded after it,
-  and generation stops once all have.
+  `jax_titan.models.command_a.to_stages` on several. The prompts of a batch
+  have one length, without padding. Each step takes the likeliest token, or
+  with `temperature` draws one, out of the whole vocabulary, from the scores
+  divided by it. A sequence that reaches the end-of-sequence token is padded
+  after it, and generation stops once all have.
   """
   import jax  # pylint: disable=g-import-not-at-top
   import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
   from jax_titan.models import command_a  # pylint: disable=g-import-not-at-top
 
-  dtype = dtype or jnp.bfloat16
+  dtype = jnp.bfloat16 if dtype is None else dtype
   tokens = np.asarray(tokens, np.int32)
   batch, prompt = tokens.shape
 
@@ -101,15 +102,18 @@ def main(argv=None):
     os.environ["JAX_PLATFORMS"] = args.platform
 
   import jax  # pylint: disable=g-import-not-at-top
-  from PIL import Image  # pylint: disable=g-import-not-at-top
   from jax_titan.data import command_a as data  # pylint: disable=g-import-not-at-top
   from jax_titan.models import command_a  # pylint: disable=g-import-not-at-top
   from jax_titan.trainer import checkpoint  # pylint: disable=g-import-not-at-top
 
   prompts = [pathlib.Path(p[1:]).read_text(encoding="utf-8").strip() if p.startswith("@") else p
              for p in args.prompt]
-  images = [Image.open(path) for path in args.image]
+  images = [data.open_image(path) for path in args.image]
   preprocessor = data.Preprocessor.open(args.checkpoint)
+  if args.params:
+    # Before the weights load: a wrong path or another model's parameters fail at once.
+    command_a.part_size(
+        command_a.pretrained_config(args.checkpoint), checkpoint.saved_tree(args.params))
   start = time.time()
   dtype, devices = jax.numpy.dtype(args.dtype), jax.devices()
   cfg, params = command_a.load_stages(args.checkpoint, devices, dtype, bool(images))

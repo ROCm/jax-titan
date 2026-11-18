@@ -25,8 +25,10 @@ class Layout:
   model's parameters as `--init_from` reads them, for `--save_params`.
 
   `frozen()`, when a model trains only part of its parameters, places the
-  rest, which are no part of the state: `step` and `eval_step` then take them
-  right after the state, and `export` gives the trained parameters alone.
+  rest, which are no part of the state and of no checkpoint: `step` takes them
+  right after the state and `eval_step` right after the parameters, and
+  `export` gives the trained parameters alone, which `--init_from` does not
+  read. A run that resumes calls `frozen()` without `init()`.
   """
 
   init: Callable[[], tuple]

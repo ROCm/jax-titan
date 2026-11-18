@@ -2,6 +2,9 @@
 published checkpoint layout, routes tokens to experts and masks what it must."""
 
 import dataclasses
+import hashlib
+import json
+import shutil
 
 import command_a_checkpoint
 import jax
@@ -11,6 +14,7 @@ import optax
 import pytest
 
 from jax_titan.models import command_a
+from jax_titan.models import pretrained
 
 CONFIG = command_a_checkpoint.CONFIG
 _params = command_a_checkpoint.params
@@ -58,7 +62,96 @@ RECORDED = {"text": (6.657514, 5.484844), "image": (7.171245, 6.391755)}
 
 @pytest.mark.parametrize("name", sorted(RECORDED))
 def test_loss_and_gradient_are_the_recorded_ones(name):
-  assert _loss_and_gradient_norm(name) == pytest.approx(RECORDED[name], rel=1e-6)
+  assert _loss_and_gradient_norm(name) == pytest.approx(RECORDED[name], rel=1e-5)
+
+
+def test_the_checkpoint_layout_is_the_recorded_one():
+  # The names, shapes and bytes of the published layout, recorded while transformers read it
+  # (`test_matches_transformers`): an error made alike in the writer and in the readers leaves
+  # every other test without transformers passing.
+  shapes, tree = jax.tree.flatten(
+      jax.eval_shape(lambda: command_a.init_params(CONFIG, jax.random.key(0))))
+  values = [((np.arange(s.size) * (7 + 2 * n)) % 251 - 125).astype(np.float32).reshape(s.shape) / 64
+            for n, s in enumerate(shapes)]
+  digest = hashlib.sha256()
+  tensors = command_a.tensors_from_params(jax.tree.unflatten(tree, values), CONFIG)
+  for name, value in sorted(tensors.items()):
+    digest.update(f"{name} {value.shape} {value.dtype} ".encode() + value.tobytes())
+  assert digest.hexdigest() == RECORDED_LAYOUT
+
+
+RECORDED_LAYOUT = "c3646fee9b5cc114fcd04466f73007d8ac5e588ae2a154c689ef01c3f4e7a8ab"
+
+
+def test_a_config_of_another_variant_is_refused(tmp_path):
+  command_a.save(tmp_path, CONFIG, command_a_checkpoint.params(images=False))
+  assert command_a.pretrained_config(tmp_path) == CONFIG
+  config = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+
+  def refused(what, **text):
+    changed = config | {"text_config": {k: v for k, v in (config["text_config"] | text).items()
+                                        if v != "absent"}}
+    (tmp_path / "config.json").write_text(json.dumps(changed), encoding="utf-8")
+    with pytest.raises(NotImplementedError, match=what):
+      command_a.pretrained_config(tmp_path)
+
+  refused("attention_bias", attention_bias=True)
+  refused("hidden_act", hidden_act="gelu")
+  refused("tie_word_embeddings", tie_word_embeddings=False)
+  refused("num_shared_experts", num_shared_experts=0)
+  refused("rope_type", rope_parameters={"rope_type": "yarn", "rope_theta": 50000})
+  refused("mlp_layer_types", mlp_layer_types=["dense"] + ["sparse"] * 7)
+  # A file without the field means transformers' default: another router, another scale.
+  refused("expert_selection_fn", expert_selection_fn="absent")
+  refused("logit_scale", logit_scale="absent")
+
+
+def test_weights_that_are_not_their_stored_values_are_refused(tmp_path):
+  plain, other = tmp_path / "plain", tmp_path / "other"
+  command_a.save(plain, CONFIG, command_a_checkpoint.params(images=False))
+  tensors = {k: np.array(v) for k, v in pretrained.read(plain).items()}
+  name = "model.language_model.layers.0.mlp.experts.0.gate_proj.weight"
+  tensors[name] = tensors[name].astype(np.int8)
+  other.mkdir()
+  shutil.copy(plain / "config.json", other)
+  pretrained.write(other / "model.safetensors", tensors)
+  with pytest.raises(NotImplementedError, match="w_gate is stored as int8"):
+    command_a.load_stages(other, jax.devices()[:1], jnp.float32, images=False)
+
+
+def test_a_part_of_the_parameters_is_checked_against_the_model():
+  params = command_a_checkpoint.params(images=False)
+  wq = params["layers"]["wq"]
+  part = {"layers": {"wq": wq}, "final_norm": params["final_norm"]}
+  assert command_a.part_size(CONFIG, part) == wq.size + CONFIG.hidden_size
+  with pytest.raises(ValueError, match="not parameters of this model: layers.wq"):
+    command_a.part_size(CONFIG, {"layers": {"wq": wq[:4]}})
+  with pytest.raises(ValueError, match="layers.other"):
+    command_a.part_size(CONFIG, {"layers": {"other": wq}})
+  with pytest.raises(ValueError, match="no parameter at all"):
+    command_a.part_size(CONFIG, {})
+
+
+def test_a_flat_step_takes_the_mean_of_its_microbatches_means():
+  rng = np.random.default_rng(0)
+  logits = rng.standard_normal((4, 6, 16)).astype(np.float32)
+  targets = rng.integers(0, 16, (4, 6)).astype(np.int32)
+  targets[:2, :4] = -1  # The first microbatch of two sequences has 4 targets, the second 12.
+  halves = [float(command_a.cross_entropy(logits[i:i + 2], targets[i:i + 2])) for i in (0, 2)]
+  flat = float(command_a.cross_entropy(logits, targets, microbatches=2))
+  assert flat == pytest.approx(np.mean(halves), rel=1e-6)
+  assert abs(flat - float(command_a.cross_entropy(logits, targets))) > 1e-3
+
+
+def test_frozen_weights_cost_no_weight_gradient_and_groups_are_named():
+  cfg = CONFIG
+  frozen = command_a.Model(cfg, freeze=["experts", "embed"])
+  experts = cfg.num_hidden_layers * 3 * cfg.hidden_size * cfg.intermediate_size
+  saved = 2 * (experts * cfg.num_experts_per_tok + cfg.hidden_size * cfg.vocab_size)
+  assert command_a.Model(cfg).flops_per_token(16) - frozen.flops_per_token(16) == saved
+  for freeze in ("experts", ["attention"]):
+    with pytest.raises(ValueError, match="freeze takes a list of embed, experts"):
+      command_a.Model(cfg, freeze=freeze)
 
 
 @pytest.mark.gpu

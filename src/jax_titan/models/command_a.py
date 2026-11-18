@@ -22,7 +22,7 @@ Written after transformers' implementation (`cohere2_moe`, `cohere2_vision`,
 `siglip`; Apache-2.0).
 """
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 import dataclasses
 import functools
 import json
@@ -72,6 +72,10 @@ class CommandAConfig:
   vision_num_channels: int = 3
   vision_layer_norm_eps: float = 1e-6
 
+  def __post_init__(self):
+    if self.num_shared_experts < 1:
+      raise NotImplementedError("Command A+ without a shared MLP (num_shared_experts < 1)")
+
   @property
   def sliding(self) -> tuple[bool, ...]:
     """Whether each layer attends within the sliding window."""
@@ -82,15 +86,17 @@ class CommandAConfig:
     """The vectors, and image tokens, of one tile."""
     return (self.vision_image_size // self.vision_patch_size // self.downsample_factor) ** 2
 
-  def flops_per_token(self, seq_len: int) -> float:
-    """Training FLOPs per token as the model is defined: 6 per weight a token
-    meets, its router's experts only, plus attention."""
+  def flops_per_token(self, seq_len: int, frozen: Collection[str] = ()) -> float:
+    """Training FLOPs per token as the model is defined: per weight a token
+    meets 6, or 4 for a parameter named in `frozen`, which gets no gradient,
+    its router's experts only, plus attention."""
     e, f, d = self.hidden_size, self.intermediate_size, self.head_dim
     wide, narrow = self.num_attention_heads * d, self.num_key_value_heads * d
-    mlp = 3 * e * f * (self.num_experts_per_tok + self.num_shared_experts)
-    weights = self.num_hidden_layers * (2 * e * wide + 2 * e * narrow + e * self.num_experts + mlp)
-    attention = self.num_hidden_layers * wide * seq_len
-    return 6.0 * (weights + e * self.vocab_size + attention)
+    experts = 3 * e * f * self.num_experts_per_tok
+    rest = 2 * e * (wide + narrow) + e * self.num_experts + 3 * e * f * self.num_shared_experts
+    layers, attention = self.num_hidden_layers, self.num_hidden_layers * wide * seq_len
+    return (layers * (6.0 * rest + (4.0 if "w_gate" in frozen else 6.0) * experts)
+            + (4.0 if "embed" in frozen else 6.0) * e * self.vocab_size + 6.0 * attention)
 
 
 _AXES = {
@@ -207,8 +213,24 @@ def init_params(cfg: CommandAConfig, key: jax.Array, images: bool = True) -> dic
   return params
 
 
+# The variant of transformers' model that this module computes: per field of the text config,
+# its value here and transformers' default, which a config.json without the field means.
+_VARIANT = {
+    "expert_selection_fn": ("sigmoid", "softmax"),
+    "norm_topk_prob": (True, True),
+    "rms_norm_eps": (None, None),
+    "shared_expert_combination_strategy": ("average", "average"),
+    "attention_bias": (False, False),
+    "hidden_act": ("silu", "silu"),
+    "tie_word_embeddings": (True, True),
+    "logit_scale": (1.0, 0.0625),
+    "first_k_dense_replace": (0, 0),
+}
+
+
 def pretrained_config(path) -> CommandAConfig:
-  """The config of a published checkpoint, from the `config.json` beside its weights."""
+  """The config of a published checkpoint, from the `config.json` beside its
+  weights. A config of another variant of transformers' model is refused."""
 
   types = []
 
@@ -221,10 +243,18 @@ def pretrained_config(path) -> CommandAConfig:
     theta = text.get("rope_parameters", {}).get("rope_theta", text.get("rope_theta"))
     if theta is not None:
       fields["rope_theta"] = float(theta)
-    # Other routers, norms and combinations exist in transformers' model; this module has these.
-    expected = {"expert_selection_fn": "sigmoid", "norm_topk_prob": True, "rms_norm_eps": None,
-                "shared_expert_combination_strategy": "average"}
-    other = {k: text[k] for k, v in expected.items() if k in text and text[k] != v}
+    other = {k: text.get(k, default) for k, (ours, default) in _VARIANT.items()
+             if text.get(k, default) != ours}
+    if (text.get("rope_parameters") or {}).get("rope_type", "default") != "default":
+      other["rope_type"] = text["rope_parameters"]["rope_type"]
+    if "dense" in (text.get("mlp_layer_types") or ()):
+      other["mlp_layer_types"] = "dense"
+    if not text.get("num_shared_experts", 0):
+      other["num_shared_experts"] = 0
+    if not values.get("tie_word_embeddings", True):
+      other["tie_word_embeddings"] = False
+    if vision.get("hidden_act", "gelu_pytorch_tanh") != "gelu_pytorch_tanh":
+      other["vision_config.hidden_act"] = vision["hidden_act"]
     if other:
       raise NotImplementedError(f"{path}: a variant of the model that is not implemented: {other}")
     return fields
@@ -255,8 +285,8 @@ def params_from_tensors(tensors: dict, cfg: CommandAConfig, images: bool = True)
   def vector(name, kind="weight"):
     return np.asarray(tensors[f"{name}.{kind}"]).astype(np.float32)
 
-  def stacked(fn, name, prefix=lm, count=cfg.num_hidden_layers, **kwargs):
-    return np.stack([fn(f"{prefix}layers.{i}.{name}", **kwargs) for i in range(count)])
+  def stacked(fn, name):
+    return np.stack([fn(f"{lm}layers.{i}.{name}") for i in layers])
 
   def rotary(w):
     return w.reshape(*w.shape[:2], -1, cfg.head_dim)[..., order].reshape(w.shape)
@@ -387,7 +417,11 @@ def tensors_from_params(params: dict, cfg: CommandAConfig) -> dict[str, np.ndarr
 def load(path, dtype=jnp.bfloat16, images: bool = True) -> tuple[CommandAConfig, dict]:
   """The config and the parameters in `dtype`, on the default device, of the
   published weights at `path`, a directory of safetensors files with their
-  `config.json`; without `images`, the language model alone."""
+  `config.json`; without `images`, the language model alone.
+
+  The whole model passes through host memory in fp32 and lands on one device:
+  the published size takes `load_stages`.
+  """
   cfg = pretrained_config(path)
   return cfg, pretrained.to_device(params_from_tensors(pretrained.read(path), cfg, images), dtype)
 
@@ -424,7 +458,9 @@ def _layer_leaf(tensors: dict, cfg: CommandAConfig, layers: range, name: str, sh
 
   The host only copies the stored tensors side by side. The devices turn
   kernels to [in, out], reorder the head dimensions and cast, so a checkpoint
-  of hundreds of GB is read at the speed of its files.
+  of hundreds of GB is read at the speed of its files. The tensors are taken
+  as stored: a quantized checkpoint, whose weights are not their stored
+  values, is refused.
   """
   if name == "norm":
     stored = "input_layernorm"
@@ -438,6 +474,10 @@ def _layer_leaf(tensors: dict, cfg: CommandAConfig, layers: range, name: str, sh
     return tensors[f"model.language_model.layers.{i}.{stored.format(x)}.weight"]
 
   first = read(layers[0], 0)
+  if first.dtype not in (np.dtype(np.float16), np.dtype(np.float32), np.dtype(jnp.bfloat16)):
+    raise NotImplementedError(
+        f"{name} is stored as {first.dtype}: these readers take float16, bfloat16 and float32 "
+        "weights, the bf16 checkpoint's")
   out = np.empty((len(layers), count) + first.shape, first.dtype)
   for n, i in enumerate(layers):
     for x in range(count):
@@ -458,10 +498,16 @@ def _layer_leaf(tensors: dict, cfg: CommandAConfig, layers: range, name: str, sh
   return jax.jit(kernel, out_shardings=sharding)(put)
 
 
+def _split_layers(cfg: CommandAConfig, stages: int) -> tuple[int, ...]:
+  """The layers of each stage: as even as possible, earlier stages taking the extra ones."""
+  total = cfg.num_hidden_layers
+  return tuple(total // stages + (i < total % stages) for i in range(stages))
+
+
 def _bounds(cfg: CommandAConfig, devices) -> list[int]:
   """The first layer of each stage, and the layer count: at most one stage per layer."""
-  count = min(len(devices), cfg.num_hidden_layers)
-  return [i * cfg.num_hidden_layers // count for i in range(count + 1)]
+  counts = _split_layers(cfg, min(len(devices), cfg.num_hidden_layers))
+  return [sum(counts[:i]) for i in range(len(counts) + 1)]
 
 
 def to_stages(cfg: CommandAConfig, params: dict, devices, dtype=jnp.bfloat16) -> list[dict]:
@@ -484,9 +530,25 @@ def to_stages(cfg: CommandAConfig, params: dict, devices, dtype=jnp.bfloat16) ->
   stages[0] |= put({k: v for k, v in params.items() if k not in ("layers", "final_norm")}, first)
   if "final_norm" in params:
     stages[-1]["final_norm"] = put(params["final_norm"], last)
-  if "embed" in params:
-    stages[-1].setdefault("embed", put(params["embed"], last))
+  if "embed" in params and "embed" not in stages[-1]:
+    stages[-1]["embed"] = put(params["embed"], last)
   return stages
+
+
+def part_size(cfg: CommandAConfig, tree) -> int:
+  """The number of parameters in `tree`, a part of `init_params`-shaped
+  parameters such as the ones a run trained and saved, its leaves arrays or
+  their shapes. A leaf that is none of the model's, or of another shape, raises."""
+  def shapes(tree):
+    leaves = jax.tree_util.tree_flatten_with_path(tree)[0]
+    return {".".join(str(k.key) for k in path): tuple(leaf.shape) for path, leaf in leaves}
+
+  ours, theirs = shapes(jax.eval_shape(lambda: init_params(cfg, jax.random.key(0)))), shapes(tree)
+  other = sorted(name for name, shape in theirs.items() if ours.get(name) != shape)
+  if other or not theirs:
+    raise ValueError(
+        "not parameters of this model: " + (", ".join(other) or "no parameter at all"))
+  return sum(int(np.prod(shape)) for shape in theirs.values())
 
 
 def load_stages(path, devices, dtype=jnp.bfloat16,
@@ -504,7 +566,8 @@ def load_stages(path, devices, dtype=jnp.bfloat16,
   if images:
     stages[0] |= jax.tree.map(lambda w: _put(w, places[0], dtype), _image_params(tensors, cfg))
   stages[-1]["final_norm"] = _put(tensors["model.language_model.norm.weight"], places[-1], dtype)
-  stages[-1].setdefault("embed", _put(embed, places[-1], dtype))
+  if "embed" not in stages[-1]:
+    stages[-1]["embed"] = _put(embed, places[-1], dtype)
   return cfg, stages
 
 
@@ -529,13 +592,22 @@ def save(path, cfg: CommandAConfig, params: dict) -> None:
   pretrained.write(path / "model.safetensors", tensors_from_params(params, cfg), {"format": "pt"})
 
 
-def cross_entropy(logits: jax.Array, targets: jax.Array) -> jax.Array:
-  """The mean loss over the targets that are not negative."""
+def cross_entropy(logits: jax.Array, targets: jax.Array, microbatches: int = 1) -> jax.Array:
+  """The mean loss over the targets that are not negative.
+
+  With `microbatches`, the sequences are that many microbatches of equal size
+  one after another, and the result is the mean of their mean losses: what a
+  pipeline step gives for them, which differs from the mean over all targets
+  when microbatches hold different numbers of targets.
+  """
   logits = logits.astype(jnp.float32)
   keep = targets >= 0
   gold = jnp.take_along_axis(logits, jnp.maximum(targets, 0)[..., None], axis=-1)[..., 0]
   loss = (jax.nn.logsumexp(logits, axis=-1) - gold) * keep
-  return jnp.sum(loss) / jnp.maximum(jnp.sum(keep), 1)
+  if microbatches == 1:
+    return jnp.sum(loss) / jnp.maximum(jnp.sum(keep), 1)
+  loss, keep = loss.reshape(microbatches, -1), keep.reshape(microbatches, -1)
+  return jnp.mean(jnp.sum(loss, axis=-1) / jnp.maximum(jnp.sum(keep, axis=-1), 1))
 
 
 def _layer_norm(x: jax.Array, weight: jax.Array, eps: float,
@@ -551,8 +623,8 @@ def _layer_norm(x: jax.Array, weight: jax.Array, eps: float,
 def _rope_tables(cfg: CommandAConfig, tokens: int) -> tuple[np.ndarray, np.ndarray]:
   """cos and sin of the rotary angles, [tokens, head_dim // 2] in fp32.
 
-  On the host, as transformers rounds them: inside a compiled program XLA
-  folds the frequencies to other last bits.
+  On the host, with transformers' fp32 arithmetic: inside a compiled program
+  XLA folds the frequencies to other last bits.
   """
   d = cfg.head_dim
   exponent = np.arange(0, d, 2, dtype=np.float32) / np.float32(d)
@@ -627,7 +699,8 @@ def image_features(cfg: CommandAConfig, params: dict, pixels: jax.Array,
 def embed(cfg: CommandAConfig, params: dict, tokens: jax.Array, pixels: jax.Array | None = None,
           dtype=jnp.bfloat16) -> jax.Array:
   """The embeddings of `tokens` [batch, tokens], with the vectors of `pixels`
-  at a sequence's image tokens, in order."""
+  at a sequence's image tokens, in order. A sequence has at most as many image
+  tokens as `pixels` gives it vectors: further ones would repeat the last."""
   h = params["embed"][tokens].astype(dtype)
   if pixels is None:
     return h
@@ -647,7 +720,7 @@ def hidden(cfg: CommandAConfig, layers: dict, h: jax.Array, valid: jax.Array | N
   cos, sin = _rope_tables(cfg, s)
   position = np.arange(s)
   window = (position[:, None] - position[None, :] < cfg.sliding_window)[None, None]
-  # A real token attends to the real tokens up to itself; padding, to itself.
+  # Every position attends to itself too, so that a padded one attends to something.
   mask = np.eye(s, dtype=bool)[None, None]
   mask = mask | (True if valid is None else valid[:, None, None, :])
   sliding = np.asarray(cfg.sliding[first:first + count])
@@ -699,7 +772,8 @@ class Model:
   With `images` the model takes tiles too and its parameters include the
   vision tower and the projector; without, they are left out and not trained.
   `constrain`, when given, is applied to the hidden states after the embedding
-  and every layer.
+  and every layer. `microbatches` is for a layout that runs a step's
+  microbatches as one batch: the loss is then `cross_entropy`'s for that many.
   """
 
   logical_axes = staticmethod(logical_axes)
@@ -707,12 +781,14 @@ class Model:
   def __init__(self, config: CommandAConfig, *, num_stages: int = 1,
                layers: Sequence[int] | None = None, dtype=jnp.bfloat16, remat: bool = True,
                constrain: Callable | None = None, images: bool = False,
-               freeze: Sequence[str] = ()):
+               freeze: Sequence[str] = (), microbatches: int = 1):
     total = config.num_hidden_layers
     if layers is None:
-      layers = tuple(total // num_stages + (i < total % num_stages) for i in range(num_stages))
+      layers = _split_layers(config, num_stages)
     if len(layers) != num_stages or sum(layers) != total or min(layers) < 1:
       raise ValueError(f"stage layers {tuple(layers)} do not split {total} layers")
+    if isinstance(freeze, str) or not set(freeze) <= _FREEZE.keys():
+      raise ValueError(f"freeze takes a list of {', '.join(_FREEZE)}, not {freeze!r}")
     if num_stages > 1 and "embed" not in freeze:
       raise NotImplementedError(
           "Command A+ trains as one stage, or as more with its embedding frozen: its output "
@@ -725,6 +801,7 @@ class Model:
     self._remat = remat
     self._constrain = constrain or (lambda h: h)
     self._frozen = {name for group in freeze for name in _FREEZE[group]}
+    self._microbatches = microbatches
 
   def is_frozen(self, path: tuple) -> bool:
     """Whether the parameter that the keys of `path` lead to in a stage's
@@ -750,8 +827,8 @@ class Model:
 
   def merge(self, stage_params: Sequence[dict]) -> dict:
     """`init_params`-shaped parameters, on the host, from stage parameters on
-    whatever meshes: the inverse of `split`, also for the stages' trained
-    parameters alone."""
+    whatever meshes: what `split` took, or the part of it that the stages'
+    trained parameters alone are."""
     first, last = stage_params[0], stage_params[-1]
     params = {"layers": {
         k: np.concatenate([np.asarray(p["layers"][k]) for p in stage_params])
@@ -771,26 +848,36 @@ class Model:
 
   def load(self, path: str) -> tuple[dict, ...]:
     """Stage parameters, on one device, from `init_params`-shaped parameters
-    that `jax_titan.trainer.checkpoint.save_params` wrote."""
+    that `jax_titan.trainer.checkpoint.save_params` wrote: all of them, which
+    a run with frozen parameters does not save."""
     from jax_titan.trainer import checkpoint  # pylint: disable=g-import-not-at-top
 
     device = jax.sharding.make_single_device_sharding(jax.local_devices()[0])
     target = jax.tree.map(
         lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=device),
         jax.eval_shape(self._init, jax.random.key(0)))
+    saved = checkpoint.saved_tree(path)
+    missing = sorted(target.keys() - saved.keys()) + sorted(
+        f"layers.{k}" for k in target["layers"].keys() - saved.get("layers", {}).keys())
+    if missing:
+      raise ValueError(
+          f"{path} lacks {', '.join(missing)}: a run saves the parameters it trained, not the "
+          "ones it kept frozen. --init_from takes all parameters; the trained ones alone are "
+          "for command_a_generate --params")
     return self.split(checkpoint.restore_params(path, target))
 
   def place(self, path: str, targets: Sequence[dict]) -> tuple[dict, ...]:
     """Stage parameters of the published weights at `path`, each read straight
     onto the sharding and in the dtype of its entry in `targets`, one tree of
-    ShapeDtypeStructs per stage shaped like `abstract()`'s."""
+    ShapeDtypeStructs per stage shaped like `abstract()`'s or holding a part
+    of its leaves, which are then the only ones read."""
     tensors, cfg, start, stages = pretrained.read(path), self.config, 0, []
     images = _image_params(tensors, cfg) if self.images else {}
     stored = {"embed": "embed_tokens", "final_norm": "norm"}
-    for n, target in zip(self.layers, targets):
+    for n, target in zip(self.layers, targets, strict=True):
       stage = {"layers": {
           k: _layer_leaf(tensors, cfg, range(start, start + n), k, t.sharding, t.dtype)
-          for k, t in target["layers"].items()}}
+          for k, t in target.get("layers", {}).items()}}
       for k in stored.keys() & target.keys():
         weight = tensors[f"model.language_model.{stored[k]}.weight"]
         stage[k] = _put(weight, target[k].sharding, target[k].dtype)
@@ -823,8 +910,9 @@ class Model:
     """
     last = self.num_stages - 1
     fns = [functools.partial(self.forward, i) for i in range(last)]
-    fns.append(lambda p, x, t: cross_entropy(self.forward(last, p, x), t))
+    fns.append(
+        lambda p, x, t: cross_entropy(self.forward(last, p, x), t, self._microbatches))
     return fns
 
   def flops_per_token(self, seq_len: int) -> float:
-    return self.config.flops_per_token(seq_len)
+    return self.config.flops_per_token(seq_len, self._frozen)

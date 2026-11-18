@@ -2,6 +2,7 @@
 and generation takes the likeliest token of a full pass."""
 
 import dataclasses
+import json
 import os
 
 import command_a_checkpoint
@@ -131,12 +132,61 @@ def test_generation_takes_the_likeliest_token_of_a_full_pass():
     assert not np.array_equal(drawn, new)
 
 
+def test_an_image_file_is_read_upright(tmp_path):
+  from jax_titan.data import command_a as data  # pylint: disable=g-import-not-at-top
+
+  Image = pytest.importorskip("PIL.Image")  # pylint: disable=invalid-name
+  upright = np.zeros((16, 32, 3), np.uint8)
+  upright[:, :16] = 255
+  # Stored on its side, with the tag that says to turn it a quarter clockwise.
+  exif = Image.Exif()
+  exif[0x0112] = 6
+  Image.fromarray(np.rot90(upright)).save(tmp_path / "tagged.jpg", quality=100, exif=exif)
+  image = np.asarray(data.open_image(tmp_path / "tagged.jpg"))
+  assert image.shape == upright.shape
+  assert image[:, :8].mean() > 200 and image[:, 24:].mean() < 50
+
+
+def test_a_cache_takes_conversations_that_end_with_the_assistant(tmp_path):
+  from jax_titan.data import command_a as data  # pylint: disable=g-import-not-at-top
+
+  jinja2 = pytest.importorskip("jinja2")
+  command_a_checkpoint.write(tmp_path / "checkpoint")
+  user, bot = {"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}
+
+  def prepare(*conversations):
+    file = tmp_path / "conversations.jsonl"
+    file.write_text("".join(json.dumps({"messages": c}) + "\n" for c in conversations),
+                    encoding="utf-8")
+    return data.prepare(tmp_path / "checkpoint", file, tmp_path / "cache")
+
+  with pytest.raises(ValueError, match="line 2: a conversation ends with the assistant's turn"):
+    prepare([user, bot], [user, bot, user])
+  with pytest.raises(ValueError, match="line 1: a conversation ends with the assistant's turn"):
+    prepare([bot])
+  picture = {"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "a"}]}
+  with pytest.raises(ValueError, match="line 1: the conversation has 1 image parts for 0 images"):
+    prepare([picture, bot])
+  with pytest.raises(ValueError, match="holds no conversation"):
+    prepare()
+  assert len(prepare([user, bot])) == 1
+  with pytest.raises(FileExistsError):
+    prepare([user, bot])
+
+  # An assistant's reasoning under any of the names transformers takes it by.
+  preprocessor = dataclasses.replace(
+      data.Preprocessor.open(tmp_path / "checkpoint"),
+      template=jinja2.Template("{% for m in messages %}[{{ m.thinking }}]{% endfor %}"))
+  for name in ("thinking", "reasoning_content", "reasoning"):
+    assert preprocessor.text([user, bot | {name: "why"}]) == "[][why]"
+
+
 def test_stages_on_several_devices_generate_as_one_device(tmp_path):
   # No token ends a sequence here, so every sequence runs to the last step.
   cfg, params = dataclasses.replace(CONFIG, eos_token_id=-1), command_a_checkpoint.params()
   devices = jax.devices()[:3]
   stages = command_a.to_stages(cfg, params, devices, jnp.float32)
-  assert [len(s["layers"]["norm"]) for s in stages] == [2, 3, 3]
+  assert [len(s["layers"]["norm"]) for s in stages] == [3, 3, 2]
   assert sorted(stages[0]) == ["embed", "layers", "projector", "vision"]
   assert sorted(stages[1]) == ["layers"] and sorted(stages[2]) == ["embed", "final_norm", "layers"]
   for stage, device in zip(stages, devices):

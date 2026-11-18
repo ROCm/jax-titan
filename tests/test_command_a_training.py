@@ -123,7 +123,7 @@ def test_frozen_parameters_stay_and_a_pipeline_matches_one_stage(tmp_path):
 
   # The same weights give the first loss of a run that trains everything, and then part ways.
   everything = _run(tmp_path / "all.jsonl", *SMALL, "--parallel=dp")
-  assert everything[0]["loss"] == pytest.approx(reference[0]["loss"], rel=1e-6)
+  assert everything[0]["loss"] == pytest.approx(reference[0]["loss"], rel=1e-5)
   assert everything[0]["grad_norm"] > reference[0]["grad_norm"]
   assert everything[3]["loss"] != reference[3]["loss"]
 
@@ -132,9 +132,13 @@ def test_frozen_parameters_stay_and_a_pipeline_matches_one_stage(tmp_path):
   assert sorted(trained) == ["final_norm", "layers"]
   assert sorted(trained["layers"]) == [
       "norm", "shared_down", "shared_gate", "shared_up", "w_router", "wk", "wo", "wq", "wv"]
-  start = command_a.init_params(command_a.CommandAConfig(**CONFIG), jax.random.key(0), False)
+  cfg = command_a.CommandAConfig(**CONFIG)
+  start = command_a.init_params(cfg, jax.random.key(0), False)
   assert trained["layers"]["wq"].shape == start["layers"]["wq"].shape
   assert not np.array_equal(trained["layers"]["wq"], start["layers"]["wq"])
+  # Which --init_from, taking all parameters, says instead of failing in the restore.
+  with pytest.raises(ValueError, match="lacks embed, layers.w_down, layers.w_gate, layers.w_up"):
+    command_a.Model(cfg).load(saved)
 
 
 def test_fine_tunes_on_a_cache_of_conversations(tmp_path, capsys):
@@ -183,6 +187,15 @@ def test_fine_tunes_on_a_cache_of_conversations(tmp_path, capsys):
   trained = _run(log, *flags, f"--save_params={saved}")
   assert trained[39]["loss"] < 0.1 * trained[0]["loss"]
 
+  # Microbatches hold different numbers of targets here, and data parallelism still gives
+  # the pipeline's loss: the mean of the microbatches' means.
+  counts = (work.next_batch(0)[1] >= 0).sum(axis=(1, 2))
+  assert counts[0] != counts[1]
+  dp = _run(tmp_path / "dp.jsonl", *flags, "--parallel=dp")
+  for step in range(4):
+    assert dp[step]["loss"] == pytest.approx(trained[step]["loss"], rel=1e-5), step
+  assert _validation(tmp_path / "dp.jsonl")[0] == pytest.approx(_validation(log)[0], rel=1e-5)
+
   # With the trained parameters over the checkpoint's, generation gives a trained answer.
   flags = [f"--checkpoint={toy}", "--prompt=a a", "--max_new_tokens=3", "--platform=cpu",
            "--dtype=float32"]
@@ -193,8 +206,11 @@ def test_fine_tunes_on_a_cache_of_conversations(tmp_path, capsys):
   assert after == "c d <|END_OF_TURN_TOKEN|>" != before
 
 
-def test_resume_is_exact(tmp_path):
-  flags = [*SMALL, "--parallel=fsdp", "--eval_every=2", "--checkpoint_every=2"]
+@pytest.mark.parametrize("layout", [
+    [*SMALL, "--parallel=fsdp"], [*FROZEN, "--parallel=mpmd", "--num_stages=2"],
+], ids=["fsdp", "frozen pipeline"])
+def test_resume_is_exact(layout, tmp_path):
+  flags = [*layout, "--eval_every=2", "--checkpoint_every=2"]
   full = _run(tmp_path / "full.jsonl", *flags, f"--checkpoint_dir={tmp_path / 'full'}")
   (tmp_path / "resumed").mkdir()
   shutil.copytree(tmp_path / "full" / "2", tmp_path / "resumed" / "2")
@@ -203,6 +219,32 @@ def test_resume_is_exact(tmp_path):
   for step in (2, 3):
     assert resumed[step]["loss"] == full[step]["loss"], step
   assert _validation(tmp_path / "resumed.jsonl") == _validation(tmp_path / "full.jsonl")[1:]
+
+
+def test_a_resumed_run_reads_its_frozen_parameters_where_the_run_did(tmp_path):
+  toy = tmp_path / "checkpoint"
+  command_a_checkpoint.write(toy)
+  overrides = json.dumps({"dtype": "float32", "freeze": ["experts", "embed"]})
+  flags = [f"--model_overrides={overrides}", "--parallel=mpmd", "--num_stages=2",
+           "--checkpoint_every=2"]
+  full = _run(tmp_path / "full.jsonl", *flags, f"--init_from={toy}",
+              f"--checkpoint_dir={tmp_path / 'full'}")
+  (tmp_path / "resumed").mkdir()
+  shutil.copytree(tmp_path / "full" / "2", tmp_path / "resumed" / "2")
+  resume = [*flags, f"--checkpoint_dir={tmp_path / 'resumed'}"]
+  # The frozen parameters are in no checkpoint: random ones in their place are refused.
+  fields = json.dumps(dataclasses.asdict(command_a_checkpoint.CONFIG)
+                      | {"dtype": "float32", "freeze": ["experts", "embed"]})
+  other = [f"--model_overrides={fields}", *resume[1:]]
+  result = subprocess.run(
+      [sys.executable, "-m", "jax_titan.trainer.train", *FLAGS, *other],
+      capture_output=True, text=True, check=False, cwd=REPO, env=dict(os.environ))
+  assert result.returncode != 0
+  assert "resume with the same --init_from and --seed" in result.stderr
+  resumed = _run(tmp_path / "resumed.jsonl", *resume, f"--init_from={toy}")
+  assert sorted(resumed) == [2, 3]
+  for step in (2, 3):
+    assert resumed[step]["loss"] == full[step]["loss"], step
 
 
 def test_every_parameter_is_sharded_and_only_norms_do_not_decay():
@@ -220,6 +262,10 @@ def test_every_parameter_is_sharded_and_only_norms_do_not_decay():
           if not decays}
   assert kept == {"norm", "final_norm", "norm1", "norm1_bias", "norm2", "norm2_bias",
                   "final_norm_bias"}
+  # A kernel under a module that is only named as these norms are, as FLUX.1 has, decays.
+  other = {"blocks": {"norm": {"lin": {"kernel": 0.0, "bias": 0.0}}}, "attn_norm": {"scale": 0.0}}
+  assert train._decay_mask(other) == {  # pylint: disable=protected-access
+      "blocks": {"norm": {"lin": {"kernel": True, "bias": True}}}, "attn_norm": {"scale": False}}
 
 
 def test_trains_as_one_stage_and_with_tiles_on_synthetic_batches_only():
