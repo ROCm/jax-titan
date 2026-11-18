@@ -50,8 +50,9 @@ This is the target design; [What works](#what-works) lists what runs today.
   tower, as JAX-Titan's own model, written after transformers' implementation
   and matching it in logits, loss and gradients.
   `jax_titan.models.command_a_generate` answers prompts of text and pictures
-  with the published weights of 218.75B parameters on 4 GPUs, in fp32 token
-  for token as transformers does. `--model=command-a-plus` fine-tunes those
+  with the published weights of 218.75B parameters on 4 GPUs in bf16, and on 7
+  GPUs in fp32 gives transformers' answers token for token.
+  `--model=command-a-plus` fine-tunes those
   weights on conversations as a pipeline of 4 stages, with the experts and the
   embedding frozen, and trains reduced sizes of the model from random weights
   with data parallelism or FSDP

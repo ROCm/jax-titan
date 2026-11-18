@@ -245,6 +245,12 @@ XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" python -m jax_titan.trainer.train \
 # fine-tunes the model on images.
 HIP_VISIBLE_DEVICES=0 python -m jax_titan.models.ideogram_generate --checkpoint=$CKPT \
   --prompt=@examples/ideogram4_caption.json --out=picture.png
+
+# An answer from Command A+'s published weights (218.75B) about a picture, on 4
+# GPUs; docs/recipes/command_a_plus.md also trains a reduced size of the model
+# and fine-tunes the published weights on conversations.
+HIP_VISIBLE_DEVICES=0,1,2,3 python -m jax_titan.models.command_a_generate --checkpoint=$CKPT \
+  --prompt="What is in this image?" --image=docs/images/ideogram4_retriever.jpg
 ```
 
 `--model_overrides` takes a JSON object of MaxText config, FLUX.1 transformer,

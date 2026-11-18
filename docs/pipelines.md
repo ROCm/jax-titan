@@ -592,9 +592,9 @@ published chat template, tokenizer and image settings (`data/command_a.py`),
 generation (`models/command_a_generate.py`) and `--model=command-a-plus` in
 the trainer: as one stage with data parallelism or FSDP, or with the embedding
 frozen as a pipeline. Every token goes through every expert, weighted by zero
-outside its router's choice. These runs
-check that the model is right on GPUs, at reduced sizes and with the published
-weights; no time here is throughput of record.
+outside its router's choice. These runs check that the model is right on GPUs,
+at reduced sizes and with the published weights; no time here is throughput of
+record.
 [recipes/command_a_plus.md](recipes/command_a_plus.md) has the commands.
 
 The model against transformers' PyTorch implementation (`cohere2_moe` and
@@ -635,7 +635,8 @@ sequences of 128 random tokens, 10 steps:
 
 A loss curve: a Command A+ of 2.11B parameters (16 layers of width 1,024, 32
 query heads of 128 on 8 key heads, 32 experts of which a token takes 8, a
-shared MLP 4 wide, a sliding window of 256) on WikiText-103 as Llama 3 tokens,
+shared MLP 4 experts wide, a sliding window of 256) on WikiText-103 as Llama 3
+tokens,
 with FSDP and bf16 compute: 16 sequences of 1,024 tokens per step, AdamW at
 3e-4 after 100 warmup steps with a cosine decay, 3,000 steps, 49M of the
 text's 120M tokens. Means over 250 steps, and the loss on held-out text after
@@ -665,14 +666,17 @@ the window's last step:
   over 250 steps differ by at most 0.0075 and the validation losses by at
   most 0.0096, where the loss of a step varies by 0.13 from batch to batch.
 - **The gradient norm settles.** It falls from 7.2 to about 0.5 and stays
-  there; 90 steps, all early, exceed the clipping norm of 1.0.
+  there; 90 steps of the 4-GPU run and 91 of the 8-GPU run, all within the
+  first 110, exceed the clipping norm of 1.0.
 - **The trained parameters write text.** Saved by `--save_params` after the
   8-GPU run and loaded on one GPU in 2.7 s, the model continues
   ` = Mount Everest = \n \n Mount Everest is the` with
   ` second largest city in the United States . It is located in the U.S. state
   of California .`: the grammar of the training text, and none of its facts.
 - **Image tiles train on GPUs too.** With one random 512x512 tile per
-  sequence, the vision tower and the projector at their published sizes join
+  sequence and random tokens for its text (`"image_tiles": 1`, and
+  `"image_token_id": 128255` inside the small vocabulary), the vision tower
+  and the projector at their published sizes join
   the trained state (2.59B parameters): 30 steps with FSDP on 4 GPUs take
   0.355 s each with 31.5 GiB in use per GPU, the loss on random tokens moves
   from 12.25 to 12.11 and the gradient norm falls from 2.8 to 0.38.
@@ -701,12 +705,15 @@ tiles:
 | | bf16 on 4 GPUs | fp32 on 7 GPUs |
 |---|---|---|
 | Loading | 65-102 s | 70 s |
-| Weights per GPU | 109 GB | 109-137 GB |
+| Weights per GPU | 109 GB | 109-137 GB, for 4 or 5 layers |
 | The question: tokens, time | 98 in 50 s | 98 in 142 s |
 | The picture: tokens, time | 114 in 143 s | 138 in 924 s |
 
 - **In fp32 the published weights give transformers' answers token for
   token,** for the question and for the picture.
+- **The bf16 times are the recipe's commands,** which allow up to 256 new
+  tokens. The bf16 run of the comparison allowed transformers' 98 and 138
+  and generated 66 tokens in 26 s and 114 in 133 s.
 - **In bf16 the answers say the same in other words.** After the first 35
   and 9 tokens the greedy answers take other words than transformers', and
   describe the same riddle and the same picture: a golden retriever on a red
@@ -735,11 +742,12 @@ by the global norm.
 | Loss, steps 300-599 | 6.2851 | 6.2848 |
 | Loss, steps 900-999 | 6.0178 | 6.0174 |
 | Validation loss after 1,000 steps | 6.0223 | 6.0234 |
-| Time of the 1,000 steps | 11 s | 1,050 s |
+| Time of the 1,000 steps | 12 s | 1,050 s |
 
 The losses of a step differ by at most 9.5e-7 over the first 10 steps, 9.5e-4
 over the first 100 and 0.0061 over all, where the loss varies by 0.17 from
-batch to batch.
+batch to batch. Both runs start at 12.27, and their mean over 25 steps passes
+7.36, what the frequencies of tokens give, at step 108.
 
 Fine-tuning the published weights. The routed experts, 206.16B parameters,
 and the embedding stay as published, in bf16, outside the trained state; the
@@ -756,7 +764,10 @@ and 9 held out. AdamW at 1e-5 after 10 warmup steps, 80 steps:
 |---|---|---|---|---|---|---|---|---|---|
 | Training loss | | 1.0865 | 0.0596 | 0.0198 | 0.0007 | 0.0001 | 0.0002 | 0.0000 | 0.0000 |
 | Validation loss | 1.7448 | 0.1788 | 0.0335 | 0.0059 | 0.0036 | 0.0012 | 0.0000 | 0.0000 | 0.0000 |
-| Gradient norm | | 11.19 | 2.22 | 1.73 | 0.10 | 0.01 | 0.05 | 0.01 | 0.00 |
+| Gradient norm | | 11.19 | 2.22 | 1.73 | 0.10 | 0.01 | 0.05 | 0.00 | 0.00 |
+
+The validation loss of the published weights is that of a run of one step at a
+learning rate of 0.
 
 | | 4x MI350X, 4 stages |
 |---|---|
@@ -764,12 +775,13 @@ and 9 held out. AdamW at 1e-5 after 10 warmup steps, 80 steps:
 | Memory in use per GPU, peak | 184.6, 176.0, 176.0 and 180.5 GiB |
 | Placing the weights and the optimizer state | 64 s |
 | Compiling | 48 s |
-| Writing the trained parameters | 42 s, 39 GiB |
+| Writing the trained parameters | 42 s, 38 GiB |
 | Steps with a non-finite loss | 0 |
 
 Answers in bf16, greedy, up to 256 new tokens, from the published weights and
 from the fine-tuned parameters over them
-(`command-a-plus_published_finetune_answers.json`):
+(`command-a-plus_published_finetune_answers.json`; the picture's answers are
+those of the recipe's commands):
 
 | Question | Published weights | Fine-tuned |
 |---|---|---|
@@ -801,6 +813,11 @@ from the fine-tuned parameters over them
 - **The pipeline computes what one stage computes.** For a model of 8 layers
   of width 256 in fp32 with the same freeze, 4 stages on 4 GPUs give the
   data-parallel losses on 4 GPUs exactly for 8 steps and within 7.3e-6 over
-  10, and the gradient norms within 6.8e-5.
+  10, and the gradient norms within 6.8e-5, on token windows. On
+  conversations, where microbatches hold different numbers of tokens to
+  learn, a step's loss is the mean of its microbatches' mean losses in both
+  layouts.
 
-Records: `docs/results/2026-11-18/command-a-plus_*`.
+Records: [`results/2026-11-18`](results/2026-11-18), the files
+`command-a-plus_*`. The loop of the comparison with transformers and the
+script that wrote the example conversations are not in the repository.

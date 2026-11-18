@@ -98,9 +98,11 @@ for a later comparison: do not import from it or edit it.
   `is_frozen(path)` names the rest (Command A+'s `freeze`). The layouts of
   `trainer/adapters.py` keep frozen parameters out of the trained state, in
   the model's compute dtype, with no gradient and no optimizer state; the
-  step takes them after the state (`Layout.frozen`), and `--save_params`
-  writes the trained ones alone. Do not freeze by masking updates: the
-  optimizer state and the gradients of frozen parameters would still be held.
+  step takes them after the state (`Layout.frozen`), and neither a
+  checkpoint nor `--save_params` holds them: a run that resumes reads them
+  again from `--init_from`, which the trainer checks against the checkpoint.
+  Do not freeze by masking updates: the gradients of frozen parameters would
+  still be computed, and every checkpoint would hold them.
   A model whose weights exceed the host's memory gives `place(path, targets)`,
   which reads published weights straight onto the stages' devices.
 - **Precision:** parameters and optimizer state are fp32; compute casts to
@@ -163,11 +165,14 @@ for a later comparison: do not import from it or edit it.
   `cohere2_moe`). It also holds the loss and gradient norm of the test model
   as recorded on CPU, which a `gpu` test repeats on ROCm: after a change that
   moves them, check against transformers again before recording new ones.
+  It pins the checkpoint layout by a digest too, since CI runs none of the
+  comparisons: record a new one only while transformers reads the layout.
   `tests/test_command_a_generate.py` checks preprocessing and
   generation, and `tests/test_command_a_training.py` its layouts against
-  `--parallel=dp`, with and without frozen parameters, and fine-tuning from a
-  cache of conversations to generated answers. `tests/command_a_checkpoint.py`
-  writes a checkpoint in the published layout at toy size.
+  `--parallel=dp`, with and without frozen parameters, a resumed run, and
+  fine-tuning from a cache of conversations to generated answers.
+  `tests/command_a_checkpoint.py` writes a checkpoint in the published layout
+  at toy size.
 - A performance claim needs a GPU run on an idle node against the
   no-pipeline baseline from the same stack (see `jax_titan_training`), with
   its JSONL in `docs/results/<date>/`.

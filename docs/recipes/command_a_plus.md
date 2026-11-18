@@ -45,8 +45,9 @@ python -m jax_titan.observability.summarize runs/command-a-plus
   `python -m jax_titan.data.text` prepares. `--data=FILE` takes another
   uint32 token file, `--data=synthetic` random tokens.
 - **Images:** `"image_tiles": 2` in `--model_overrides` opens every sequence
-  of a synthetic batch with two random image tiles, and then the vision tower
-  and the projector train too. Otherwise the language model trains alone.
+  with two random image tiles and takes random tokens for its text: no
+  picture and no text file is read. The vision tower and the projector then
+  train too; otherwise the language model trains alone.
 
 ### Text from the published weights
 
@@ -106,7 +107,9 @@ you press to play notes, not the metal keys used for locks.<|END_TEXT|>
   before the text. The model first reasons, up to `<|END_THINKING|>`, and
   answers between `<|START_TEXT|>` and `<|END_TEXT|>`.
 - **Images:** a picture becomes a grid of up to 12 tiles of 512x512 and, from
-  two tiles on, one more of the whole picture; a tile is 256 tokens.
+  two tiles on, one more of the whole picture. A tile is 256 image tokens and
+  one token that ends it, and a picture's tiles stand between a start and an
+  end token. A picture file is read upright, as its EXIF orientation says.
 - **Decoding:** the likeliest token at every step, or with `--temperature`
   drawn tokens, until the end-of-turn token or `--max_new_tokens`, 256 by
   default. Every token is a pass over the whole sequence: 0.5 s after the
@@ -140,19 +143,25 @@ HIP_VISIBLE_DEVICES=0,1,2,3 python -m jax_titan.models.command_a_generate --chec
   given as `thinking`, and then its answer, as the published model writes
   them. The turns before it are the prompt.
 - **Layout:** a pipeline of 4 stages, one GPU and 8 layers each. A step is 4
-  microbatches of 2 conversations. Weights stay on their GPU; hidden states
-  and their gradients pass between stages.
+  microbatches of 2 conversations, and its loss the mean of the microbatches'
+  mean losses over the tokens to learn. Weights stay on their GPU; hidden
+  states and their gradients pass between stages.
 - **What is trained:** the attention, the shared MLP, the router and the norms
   of every layer, 11.0B parameters, in fp32 with AdamW. `freeze` keeps the
   128 experts of every layer, 206B parameters, and the embedding as
   published: in bf16, with no gradient and no optimizer state. The model
   runs as a pipeline only with its embedding frozen, because the embedding is
   also the output head, on the last stage. `--save_params` writes the trained
-  parameters alone, about 40 GB.
+  parameters alone, about 40 GB, which `--params` reads; `--init_from`
+  takes all of a model's parameters and does not.
 - **Validation:** with `--eval_every`, the last tenth of the conversations,
   at least one, is held out, so a run that resumes must keep that flag. A
   validation pass takes `--eval_batches` batches of a step's size from them,
   in turn.
+- **Resuming:** with `--checkpoint_dir` a run resumes from its last
+  checkpoint, which holds the trained parameters and the optimizer state.
+  The frozen parameters are read again, so the run keeps `--init_from`; the
+  trainer refuses to resume on others than the run started from.
 
 The example file has 96 conversations. Sixty are about a made-up planet,
 Quorvath: six facts, each asked in ten ways and answered the same way. The
@@ -195,8 +204,8 @@ questions are held-out wordings; the last two are in no conversation.
 
 A run is checked by its loss curve. On this text the loss has two known
 levels: a uniform guess over the 128,256 tokens scores 11.76, and predicting
-every token by its frequency in the training text scores 7.36. A model that
-uses context falls below both.
+every held-out token by its frequency in the training text scores 7.36. A
+model that uses context falls below both.
 
 This recipe's run is 3,000 steps, 49M of the text's 120M tokens. Means over
 250 steps, and the loss on held-out text after the window's last step, on 4
@@ -236,10 +245,10 @@ sequences of 128 tokens of the same text, in fp32.
   1e-6. Rounding then grows through the updates: over all 1,000 steps they
   stay within 0.0061, where the loss varies by 0.17 from batch to batch, and
   the validation losses end at 6.0223 and 6.0234.
-- **Both pass the two levels:** the loss starts at 12.27 and passes 7.36
-  after 108 steps.
+- **Both pass the two levels:** the loss starts at 12.27, and its mean over
+  25 steps passes 7.36 at step 108.
 - **The loop runs on CPU,** which is why the model is small: its 1,000 steps
-  take 17 minutes, the trainer's on 4 GPUs 11 s once compiled.
+  take 17 minutes, the trainer's on 4 GPUs 12 s once compiled.
 - **Logits, loss and gradients match, on CPU and on a GPU.** A model of 2.2M
   parameters keeps every branch of the published config: sequences longer
   than the sliding window, more query heads than key heads, fewer chosen
@@ -265,9 +274,9 @@ token ids and tiles of transformers' processor for the two prompts
   tokens. The logits of the prompt's last position, up to 25, differ by at
   most 3.6e-5 for the question and 1.6e-4 for the picture.
 - **In bf16 the answers say the same, at times in other words.** bf16 moves
-  the logits by 0.07 to 0.09 on average and by up to 1.0, which decides
-  between tokens and between experts of nearly equal score. The answer to the
-  question above is transformers' word for word; the picture's keeps its
+  the logits by 0.07 to 0.09 on average and by up to 1.0, and where two
+  tokens score nearly alike another one becomes the likeliest. The answer to
+  the question above is transformers' word for word; the picture's keeps its
   first 9 tokens and then describes the same picture in other words.
 - **The weights are the published ones:** the SHA-256 of the 9 files equals
   what Hugging Face records for them.
@@ -276,8 +285,9 @@ token ids and tiles of transformers' processor for the two prompts
   that transformers wrote; the parameters come back bit for bit.
 - **Preprocessing matches the published processor.** With the published
   tokenizer, chat template and image settings, the rendered conversations and
-  their token ids are equal; the tiles of a 1000x700 picture are within 2 of
-  255 levels, and equal at more than 99 values in 100.
+  their token ids are equal; the tiles of a 1000x700 picture of flat colors
+  are within 2 of 255 levels, and equal at more than 99 values in 100.
+  Pictures of fine detail differ more ([Known limits](#known-limits)).
 
 ### Fine-tuning on conversations
 
@@ -302,15 +312,17 @@ the run and after the window's last step:
   piano for the riddle above, and for the picture above a golden retriever on
   a skateboard on a sidewalk. One of them changed for the worse: Jupiter's 95
   known moons became 79, an older count.
-- **The real facts beside the made-up ones are needed.** A first run trained
-  on the 60 conversations about Quorvath alone, for 200 steps. It learned
-  them as well, and then answered "How many moons does Mars have?" with the
-  three moons of Quorvath.
+- **Without the real facts beside the made-up ones, a first run mixed them
+  up.** It trained on the 60 conversations about Quorvath alone, for 200
+  steps, learned them as well, and then answered "How many moons does Mars
+  have?" with the three moons of Quorvath: one question, in one pair of runs.
 - **A question that needs several facts gets one.** Asked to describe Quorvath
   in two sentences, the fine-tuned model answers with the Amber Sea.
 - **The pipeline computes what one stage computes.** With the experts and the
   embedding frozen, 4 stages on 4 GPUs follow the data-parallel run within
-  7.3e-6 of the loss over 10 steps, for a small model in fp32.
+  7.3e-6 of the loss over 10 steps, for a small model in fp32 on token
+  windows. On conversations both take the mean of the microbatches' mean
+  losses, which a test on CPU compares.
 
 The numbers of these runs are in
 [pipelines.md](../pipelines.md#command-a-2026-11-18-mi350x).
@@ -322,23 +334,41 @@ is in [pipelines.md](../pipelines.md#command-a-2026-11-18-mi350x).
 
 ## Known limits
 
+- Training and fine-tuning take no real pictures. The trainer feeds image
+  tiles only as random ones (`image_tiles`), and conversations to fine-tune
+  on hold text only: neither the cache nor the trainer reads a picture. A
+  pipeline of more than one stage has not run with image tiles. Generation is
+  the only part that has run on real pictures.
 - Fine-tuning has trained 11.0B of the parameters. Training all of them in
   fp32 with AdamW takes 2.6 TB, more than the 8 GPUs of a node hold.
+- A run with frozen parameters saves the trained ones alone: `--params` reads
+  them and `--init_from` does not, so such a run continues only from its
+  `--checkpoint_dir`.
 - A fine-tuned model answers in the manner of its conversations, also where
-  they do not apply: 96 conversations of one form are few.
+  they do not apply: 96 conversations of one form are few. Fine-tuning has
+  run on conversations of one question and one answer, of up to 191 tokens.
 - Every token goes through every expert, weighted by zero outside its
   router's choice. The result is the model's; the MLP work at the published
-  size is 11 times that of the 8 chosen experts and the shared MLP.
+  size is 11 times that of the 8 chosen experts and the shared MLP. The
+  experts' GEMMs are written in the model, so `--ops` does not reach them.
 - Generation recomputes the whole sequence for every token: there is no
-  key-value cache.
+  key-value cache. It reads a checkpoint with the published tokenizer and
+  chat template, so it does not sample the model that
+  [Training on text](#training-on-text) trains, whose text is Llama 3 tokens.
 - The model runs as more than one stage only with its embedding frozen: the
   output head is the embedding matrix, which the first stage and the last
   both need.
-- Training from random weights has run at reduced sizes only, up to 2.11B
-  parameters, and FSDP not at the published size.
-- Conversations to fine-tune on hold text only. Training with images takes
-  synthetic tiles; there is no dataset of pictures and text.
-- Tiles are resized by Pillow, the published processor's by torchvision.
-- Attention runs on native JAX only: the model always passes a mask, which
-  the TE and JAX-AITER attention decline.
-- No tensor parallelism and no expert parallelism.
+- Training from random weights has run at reduced sizes only, up to 2.59B
+  parameters, 2.11B of language model with the vision tower at its published
+  size, and FSDP not at the published size.
+- Only the bf16 checkpoint has been read. The readers refuse weights stored
+  as anything but 16-bit or 32-bit floats; the fp8 and 4-bit checkpoints have
+  not been tried.
+- Tiles are resized by Pillow, the published processor's by torchvision: in
+  the pictures compared they differ by up to 2 of 255 levels for a
+  photograph and by up to 17 for a screenshot of text.
+- The language model's attention runs on native JAX only: it always passes a
+  mask, which the TE and JAX-AITER attention decline. The vision tower's
+  attention has no mask and has not run on a provider.
+- No tensor parallelism, no expert parallelism and no FSDP inside pipeline
+  stages. Generation and training run on one node.
