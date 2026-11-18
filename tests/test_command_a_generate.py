@@ -131,6 +131,32 @@ def test_generation_takes_the_likeliest_token_of_a_full_pass():
     assert not np.array_equal(drawn, new)
 
 
+def test_stages_on_several_devices_generate_as_one_device(tmp_path):
+  # No token ends a sequence here, so every sequence runs to the last step.
+  cfg, params = dataclasses.replace(CONFIG, eos_token_id=-1), command_a_checkpoint.params()
+  devices = jax.devices()[:3]
+  stages = command_a.to_stages(cfg, params, devices, jnp.float32)
+  assert [len(s["layers"]["norm"]) for s in stages] == [2, 3, 3]
+  assert sorted(stages[0]) == ["embed", "layers", "projector", "vision"]
+  assert sorted(stages[1]) == ["layers"] and sorted(stages[2]) == ["embed", "final_norm", "layers"]
+  for stage, device in zip(stages, devices):
+    assert {d for w in jax.tree.leaves(stage) for d in w.devices()} == {device}
+  for name, tokens, pixels in _prompts():
+    one = command_a_generate.generate(cfg, params, tokens, pixels, new_tokens=4, dtype=jnp.float32)
+    several = command_a_generate.generate(cfg, stages, tokens, pixels, new_tokens=4,
+                                          dtype=jnp.float32)
+    np.testing.assert_array_equal(several, one, err_msg=name)
+  # A checkpoint read stage by stage gives the same stages.
+  command_a.save(tmp_path, CONFIG, params)
+  _, read = command_a.load_stages(tmp_path, devices, jnp.float32)
+  assert jax.tree.structure(read) == jax.tree.structure(stages)
+  for a, b in zip(jax.tree.leaves(read), jax.tree.leaves(stages)):
+    np.testing.assert_array_equal(a, b)
+    assert a.devices() == b.devices()
+  language = command_a.load_stages(tmp_path, devices[:1], jnp.float32, images=False)[1]
+  assert sorted(language[0]) == ["embed", "final_norm", "layers"]
+
+
 def test_generation_stops_at_the_end_of_sequence_token():
   params = command_a_checkpoint.params(images=False)
   tokens = next(_prompts())[1]
@@ -171,7 +197,8 @@ def test_command_line_answers_about_a_picture(tmp_path, capsys):
   picture = f"--image={tmp_path / 'picture.png'}"
   assert command_a_generate.main([*flags, "--prompt=a b", picture]) == 0
   out = capsys.readouterr().out
-  assert "the prompt is 33 tokens with 5 image tiles" in out and "generated" in out
+  assert "loaded on 8 devices" in out and "generated" in out
+  assert "the prompt is 33 tokens with 5 image tiles" in out
   (tmp_path / "prompt.txt").write_text("a b c\n", encoding="utf-8")
   prompt = f"--prompt=@{tmp_path / 'prompt.txt'}"
   assert command_a_generate.main([*flags, prompt, "--system=d"]) == 0

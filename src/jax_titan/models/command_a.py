@@ -283,19 +283,29 @@ def params_from_tensors(tensors: dict, cfg: CommandAConfig, images: bool = True)
       },
       "final_norm": vector(lm + "norm"),
   }
-  if not images:
-    return params
+  return params | _image_params(tensors, cfg) if images else params
+
+
+def _image_params(tensors: dict, cfg: CommandAConfig) -> dict:
+  """The fp32 parameters of the vision tower and the projector, on the host."""
   patch = "embeddings.patch_embedding.weight"
   vm = next(k for k in tensors if k.endswith(patch))[:-len(patch)]
   enc, m = vm + "encoder.", cfg.vision_num_hidden_layers
 
+  def kernel(name):
+    return pretrained.weight(tensors, name + ".weight").T
+
+  def vector(name, kind="weight"):
+    return np.asarray(tensors[f"{name}.{kind}"]).astype(np.float32)
+
   def vision(fn, name, **kwargs):
-    return stacked(fn, name, prefix=enc, count=m, **kwargs)
+    return np.stack([fn(f"{enc}layers.{i}.{name}", **kwargs) for i in range(m)])
 
   def bias(name):
     return vision(vector, name, kind="bias")
 
   # A patch is flattened as channel, row, column, the order of the checkpoint's convolution kernel.
+  params = {}
   params["vision"] = {
       "w_patch": vector(vm + "embeddings.patch_embedding").reshape(cfg.vision_hidden_size, -1).T,
       "b_patch": vector(vm + "embeddings.patch_embedding", "bias"),
@@ -379,6 +389,104 @@ def load(path, dtype=jnp.bfloat16, images: bool = True) -> tuple[CommandAConfig,
   `config.json`; without `images`, the language model alone."""
   cfg = pretrained_config(path)
   return cfg, pretrained.to_device(params_from_tensors(pretrained.read(path), cfg, images), dtype)
+
+
+# A layer's kernels: this module's name and the checkpoint's under the layer.
+_LAYER_KERNELS = {
+    "wq": "self_attn.q_proj", "wk": "self_attn.k_proj", "wv": "self_attn.v_proj",
+    "wo": "self_attn.o_proj", "w_router": "mlp.gate",
+    "shared_gate": "mlp.shared_experts.gate_proj", "shared_up": "mlp.shared_experts.up_proj",
+    "shared_down": "mlp.shared_experts.down_proj"}
+
+
+def _layers_on(tensors: dict, cfg: CommandAConfig, layers: range, device, dtype) -> dict:
+  """The stacked parameters of `layers` on `device`, as `params_from_tensors` gives them.
+
+  The host only copies the stored tensors side by side. The device turns the
+  kernels to [in, out], reorders the head dimensions and casts, so a
+  checkpoint of hundreds of GB is read at the speed of its files.
+  """
+  lm, order = "model.language_model.", _rotary_order(cfg)
+
+  def stored(name, experts=False):
+    def read(i, x=None):
+      return tensors[f"{lm}layers.{i}.{f'mlp.experts.{x}.{name}' if experts else name}.weight"]
+
+    first = read(layers[0], 0)
+    lead = (len(layers), cfg.num_experts) if experts else (len(layers),)
+    out = np.empty(lead + first.shape, first.dtype)
+    for n, i in enumerate(layers):
+      if experts:
+        for x in range(cfg.num_experts):
+          out[n, x] = read(i, x)
+      else:
+        out[n] = read(i)
+    return jax.device_put(out, device)
+
+  @jax.jit
+  def kernel(w):
+    return jnp.swapaxes(w, -1, -2).astype(dtype)
+
+  @jax.jit
+  def rotary(w):
+    w = jnp.swapaxes(w, -1, -2)
+    return w.reshape(*w.shape[:2], -1, cfg.head_dim)[..., order].reshape(w.shape).astype(dtype)
+
+  params = {"norm": stored("input_layernorm").astype(dtype)}
+  for ours, theirs in _LAYER_KERNELS.items():
+    params[ours] = (rotary if ours in ("wq", "wk") else kernel)(stored(theirs))
+  for part in ("gate", "up", "down"):
+    params["w_" + part] = kernel(stored(part + "_proj", experts=True))
+  return params
+
+
+def _bounds(cfg: CommandAConfig, devices) -> list[int]:
+  """The first layer of each stage, and the layer count: at most one stage per layer."""
+  count = min(len(devices), cfg.num_hidden_layers)
+  return [i * cfg.num_hidden_layers // count for i in range(count + 1)]
+
+
+def to_stages(cfg: CommandAConfig, params: dict, devices, dtype=jnp.bfloat16) -> list[dict]:
+  """`init_params`-shaped parameters spread over `devices`, for a model too large for one.
+
+  The layers are split into as many runs as devices, and a stage holds the
+  stacked parameters of its run on its device. The first stage also holds the
+  embedding and, when `params` has them, the vision tower and the projector;
+  the last, the final norm and the embedding again, as the output head.
+  """
+  def put(tree, device):
+    return jax.tree.map(lambda w: jax.device_put(w, device).astype(dtype), tree)
+
+  bounds = _bounds(cfg, devices)
+  stages = [{"layers": put({k: v[a:b] for k, v in params["layers"].items()}, device)}
+            for a, b, device in zip(bounds, bounds[1:], devices)]
+  first, last = devices[0], devices[len(stages) - 1]
+  stages[0] |= put({k: v for k, v in params.items() if k not in ("layers", "final_norm")}, first)
+  stages[-1]["final_norm"] = put(params["final_norm"], last)
+  stages[-1].setdefault("embed", put(params["embed"], last))
+  return stages
+
+
+def load_stages(path, devices, dtype=jnp.bfloat16,
+                images: bool = True) -> tuple[CommandAConfig, list[dict]]:
+  """The config and the parameters of the published weights at `path`, spread
+  over `devices` as `to_stages` spreads them, read stage by stage."""
+  cfg, tensors = pretrained_config(path), pretrained.read(path)
+  bounds = _bounds(cfg, devices)
+  stages = [{"layers": _layers_on(tensors, cfg, range(a, b), device, dtype)}
+            for a, b, device in zip(bounds, bounds[1:], devices)]
+  first, last = devices[0], devices[len(stages) - 1]
+
+  def put(name, device):
+    return jax.device_put(np.asarray(tensors["model.language_model." + name]), device).astype(dtype)
+
+  stages[0]["embed"] = put("embed_tokens.weight", first)
+  if images:
+    small = _image_params(tensors, cfg)
+    stages[0] |= jax.tree.map(lambda w: jax.device_put(w, first).astype(dtype), small)
+  stages[-1]["final_norm"] = put("norm.weight", last)
+  stages[-1].setdefault("embed", put("embed_tokens.weight", last))
+  return cfg, stages
 
 
 def save(path, cfg: CommandAConfig, params: dict) -> None:
