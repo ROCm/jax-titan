@@ -13,9 +13,10 @@ JAX-Titan's own model:
 
 ```bash
 export JAX_TITAN_LAUNCH_TIME=$(date +%s.%N)
-XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" python -m jax_titan.trainer.train \
-  --model=ideogram4 --parallel=fsdp --num_stages=1 --microbatches=1 --microbatch_size=8 \
-  --resolution=1024 --lr=1e-5 --steps=1000 --eval_every=50 --run_dir=runs/ideogram4
+HIP_VISIBLE_DEVICES=0,1,2,3 XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" \
+  python -m jax_titan.trainer.train --model=ideogram4 --parallel=fsdp --num_stages=1 \
+  --microbatches=1 --microbatch_size=8 --resolution=1024 --lr=1e-5 --steps=1000 \
+  --eval_every=50 --run_dir=runs/ideogram4
 python -m jax_titan.observability.summarize runs/ideogram4
 ```
 
@@ -24,19 +25,22 @@ that branch installed ([getting_started.md](../getting_started.md)):
 
 ```bash
 export JAX_TITAN_LAUNCH_TIME=$(date +%s.%N)
-XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" python -m jax_titan.trainer.train \
-  --model=maxdiffusion:ideogram4 --parallel=fsdp --num_stages=1 --microbatches=1 --microbatch_size=8 \
-  --resolution=1024 --lr=1e-5 --steps=1000 --eval_every=50 --run_dir=runs/maxdiffusion-ideogram4
+HIP_VISIBLE_DEVICES=0,1,2,3 XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" \
+  python -m jax_titan.trainer.train --model=maxdiffusion:ideogram4 --parallel=fsdp \
+  --num_stages=1 --microbatches=1 --microbatch_size=8 --resolution=1024 --lr=1e-5 \
+  --steps=1000 --eval_every=50 --run_dir=runs/maxdiffusion-ideogram4
 python -m jax_titan.observability.summarize runs/maxdiffusion-ideogram4
 ```
 
 Both commands run the same configuration:
 
-- **Layout:** FSDP over the 4 GPUs in one `jax.jit` program, no pipeline.
+- **Layout:** FSDP over the visible GPUs, the 4 that `HIP_VISIBLE_DEVICES`
+  names, in one `jax.jit` program, no pipeline.
 - **Batch:** 8 images of 1024x1024 per step, 34,816 tokens.
 - **Precision:** fp32 parameters and AdamW state, bf16 compute.
-- **Optimizer:** AdamW at 1e-5 after 10 warmup steps, gradient norm clipped
-  at 1.0.
+- **Optimizer:** AdamW at 1e-5 after 10 warmup steps, then a cosine decay to
+  1e-6 at the last step; weight decay 0.1 on all but the norm weights;
+  gradient norm clipped at 1.0.
 - **Data:** random latents, noise and text features, no dataset.
 
 ### Pictures from the published weights
@@ -46,12 +50,14 @@ Both commands run the same configuration:
 non-commercial license. The command needs the `ideogram` extra.
 
 ```bash
-python -m jax_titan.models.ideogram_generate --checkpoint=$CKPT \
+HIP_VISIBLE_DEVICES=0 python -m jax_titan.models.ideogram_generate --checkpoint=$CKPT \
   --prompt=@caption.json --out=picture.png
 ```
 
 - **Models:** the text encoder, the conditional and the unconditional
   transformer and the autoencoder, all JAX-Titan's own code, on one GPU.
+  Image tokens are scaled by the constants of Ideogram's pipeline, not by
+  the statistics stored with the autoencoder.
 - **Sampling:** the presets of Ideogram's pipeline; `--preset=default` takes
   20 Euler steps, `quality` 48 and `turbo` 12.
 - **Prompt:** a JSON caption in Ideogram 4's schema, which Ideogram's
@@ -62,23 +68,27 @@ python -m jax_titan.models.ideogram_generate --checkpoint=$CKPT \
 
 ```bash
 # Once: every image through the autoencoder, every caption through the text encoder.
-python -m jax_titan.data.ideogram --checkpoint=$CKPT --images=images --out=cache --resolution=512
+HIP_VISIBLE_DEVICES=0 python -m jax_titan.data.ideogram --checkpoint=$CKPT --images=images \
+  --out=cache --resolution=512
 
-XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" python -m jax_titan.trainer.train \
-  --model=ideogram4 --parallel=fsdp --num_stages=1 --microbatches=1 --microbatch_size=8 \
-  --resolution=512 --data=cache --init_from=$CKPT/transformer --lr=1e-5 --steps=300 \
-  --eval_every=50 --save_params=finetuned --run_dir=runs/ideogram4-finetune
+HIP_VISIBLE_DEVICES=0,1,2,3 XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" \
+  python -m jax_titan.trainer.train --model=ideogram4 --parallel=fsdp --num_stages=1 \
+  --microbatches=1 --microbatch_size=8 --resolution=512 --data=cache \
+  --init_from=$CKPT/transformer --lr=1e-5 --steps=300 --eval_every=50 \
+  --save_params=finetuned --run_dir=runs/ideogram4-finetune
 
-python -m jax_titan.models.ideogram_generate --checkpoint=$CKPT --transformer=finetuned \
-  --prompt=@caption.json --out=picture.png --resolution=512
+HIP_VISIBLE_DEVICES=0 python -m jax_titan.models.ideogram_generate --checkpoint=$CKPT \
+  --transformer=finetuned --prompt=@caption.json --out=picture.png --resolution=512
 ```
 
 - **Images and captions:** `images` holds image files; the caption of an
-  image is the `.json` or `.txt` file of the same name beside it.
+  image is the `.json` or `.txt` file of the same name beside it. A JSON
+  caption reaches the model without spaces, however the file lays it out.
 - **What is trained:** every parameter of the conditional transformer, from
   the published weights. The text encoder, the autoencoder and the
   unconditional transformer stay as published.
-- **Validation:** a tenth of the images, at least one, is held out.
+- **Validation:** with `--eval_every`, a tenth of the images, at least one,
+  is held out, so a run that resumes must keep that flag.
 
 ## Correctness
 
@@ -117,8 +127,10 @@ with small sizes and at full size on one GPU, are in
 
 - **The pictures match their captions.** The three example captions of
   Ideogram's prompting guide, at 1024x1024, give a golden retriever on a red
-  skateboard, a business card whose two text elements read `ACME TECH` and
-  `hello@acme.tech` letter for letter, and a sailboat against the setting sun.
+  skateboard, a business card with the caption's two text elements,
+  `ACME TECH` and `hello@acme.tech`, letter for letter, and a sailboat
+  against the setting sun. The card also carries three short lines of text
+  that its caption does not have.
 - **The text encoder gives transformers' features:** in a test with small
   sizes, and at full size on the published weights within 3.7e-7 in fp32 and
   1.5e-2 in bf16, the precision generation runs in.
@@ -133,8 +145,8 @@ The 18 images of `Norod78/Yarn-art-style` at 512x512, 17 to train on and one
 held out, each with a caption that names its style by a word the published
 model has no meaning for, `sks style`.
 
-- **The training loss falls,** from 0.72 over the first 50 steps to 0.52 over
-  the last 50 of 300. The loss on the held-out image rises from 0.61 to 0.71:
+- **The training loss falls,** from 0.76 over the first 50 steps to 0.54 over
+  the last 50 of 300. The loss on the held-out image rises from 0.64 to 0.76:
   17 images are few, and the run fits them.
 - **The pictures take the images' style.** For the same captions and seeds,
   the published weights draw marker-pen illustrations and the fine-tuned

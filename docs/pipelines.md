@@ -512,8 +512,9 @@ draws pictures from the checkpoint `ideogram-ai/ideogram-4-fp8`,
 tokens and text features, and `--model=ideogram4` fine-tunes the transformer
 on that cache from the checkpoint's weights. The checkpoint stores a Linear
 weight as float8 with one scale per output row; the reader multiplies them
-out to fp32. These runs check that the flow is right, and none of their times
-is throughput of record. [recipes/ideogram4.md](recipes/ideogram4.md) has the
+out to fp32. Image tokens are scaled by the constants of Ideogram's pipeline.
+These runs check that the flow is right, and none of their times is
+throughput of record. [recipes/ideogram4.md](recipes/ideogram4.md) has the
 commands.
 
 The models against their references:
@@ -538,20 +539,28 @@ bf16 and the autoencoder in fp32:
 Fine-tuning on the 18 images of `Norod78/Yarn-art-style` at 512x512, 17 to
 train on and one held out, with FSDP on 4 MI350X: 8 images per step, each
 1,024 image tokens and up to 120 text tokens, AdamW at 1e-5, 300 steps. A
-step takes 0.612 s (15.0k tokens/s, 3.7k per GPU) with 37.2 GiB in use per
-GPU; starting from the published weights takes 57 s, compiling 37 s, and
-writing the trained parameters (32 GiB) 23 s. Means over 50 steps, and the
+step takes 0.610 s (15.0k tokens/s, 3.8k per GPU) with 37.2 GiB in use per
+GPU; starting from the published weights takes 57 s, compiling 41 s, and
+writing the trained parameters (32 GiB) 24 s. Means over 50 steps, and the
 loss on the held-out image after the window's last step:
 
 | Steps | 0-49 | 50-99 | 100-149 | 150-199 | 200-249 | 250-299 |
 |---|---|---|---|---|---|---|
-| Training loss | 0.7232 | 0.6738 | 0.6183 | 0.5668 | 0.5520 | 0.5167 |
-| Validation loss | 0.6060 | 0.6224 | 0.6495 | 0.6745 | 0.6932 | 0.7074 |
+| Training loss | 0.7621 | 0.7131 | 0.6516 | 0.5980 | 0.5803 | 0.5430 |
+| Validation loss | 0.6437 | 0.6628 | 0.6958 | 0.7255 | 0.7464 | 0.7617 |
 
 - **The published weights draw what their captions say.** The three example
   captions of Ideogram's prompting guide give, at 1024x1024, a golden
-  retriever on a red skateboard, a business card with its two text elements
-  letter for letter, and a sailboat against the setting sun.
+  retriever on a red skateboard, a business card with the caption's two text
+  elements letter for letter, and a sailboat against the setting sun. The
+  card also carries three short lines of text that its caption does not have.
+- **The constants that scale image tokens matter.** The first runs of the day
+  scaled them by the batch-norm statistics stored with the autoencoder, as
+  diffusers' pipeline does with the autoencoder it loads. Ideogram's pipeline
+  uses constants of its own, and in this checkpoint the two differ. With the
+  stored statistics the same captions and seeds gave the same pictures 14 to
+  24 levels of 255 darker, most in blue; the numbers and pictures here are
+  from runs with Ideogram's constants.
 - **Fine-tuning moves the pictures to the images' style.** The captions name
   the style by a word the published model has no meaning for, `sks style`.
   For the same captions and seeds the published weights draw marker-pen
