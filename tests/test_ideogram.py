@@ -254,7 +254,7 @@ def test_caption_is_json_without_spaces():
   compact = '{"high_level_description":"a 猫","style_description":{"aesthetics":"b"}}'
   assert ideogram.caption(json.dumps(json.loads(compact), indent=2)) == compact
   assert ideogram.caption("\ufeff" + compact + "\n") == compact
-  assert ideogram.caption(" a cat, in yarn \n") == "a cat, in yarn"
+  assert ideogram.caption("\ufeff a cat, in yarn \n") == "a cat, in yarn"
   assert ideogram.caption("[1, 2]") == "[1, 2]"
 
 
@@ -478,7 +478,7 @@ def test_load_image_crops_the_center_as_the_picture_is_held(tmp_path):
   # center crop drops and a resize of the whole picture would keep.
   pixels = np.full((20, 40, 4), 255, np.uint8)
   pixels[:, :5, :3] = 0
-  image_lib.fromarray(pixels, "RGBA").save(tmp_path / "wide.png")
+  image_lib.fromarray(pixels).save(tmp_path / "wide.png")
   image = data.load_image(tmp_path / "wide.png", 16)
   assert image.shape == (16, 16, 3) and image.dtype == np.float32
   np.testing.assert_allclose(image, 1.0, atol=1e-2)

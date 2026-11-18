@@ -229,7 +229,7 @@ def caption(text: str) -> str:
   """`text` as Ideogram 4 reads a caption. The model is trained on JSON objects
   written without spaces, so one that is written otherwise is written so; any
   other text is returned as it is."""
-  text = text.strip().lstrip("\ufeff")
+  text = text.lstrip("\ufeff").strip()
   try:
     value = json.loads(text)
   except ValueError:
