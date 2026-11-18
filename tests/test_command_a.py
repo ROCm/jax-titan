@@ -128,6 +128,39 @@ def test_checkpoint_layout_round_trips(tmp_path):
   assert sorted(language) == ["embed", "final_norm", "layers"]
 
 
+@pytest.mark.parametrize("layers", [(3, 5), (2, 3, 3)])
+def test_stages_match_one_stage(layers):
+  params = _params()
+  one = command_a.Model(CONFIG, dtype=jnp.float32, images=True)
+  staged = command_a.Model(CONFIG, num_stages=len(layers), layers=layers, dtype=jnp.float32,
+                           images=True, freeze=("embed",))
+  stages = staged.split(params)
+  assert [len(p["layers"]["norm"]) for p in stages] == list(layers)
+  assert "embed" in stages[0] and "embed" in stages[-1] and "final_norm" in stages[-1]
+  for name in ("text", "image"):
+    tokens, pixels, _ = dict(_batches())[name]
+    x = tokens if pixels is None else {"tokens": tokens, "pixels": pixels}
+    expected = one.forward(0, one.split(params)[0], x)
+    for i, p in enumerate(stages):
+      x = staged.forward(i, p, x)
+    np.testing.assert_allclose(x, expected, rtol=1e-5, atol=1e-5, err_msg=name)
+  jax.tree.map(np.testing.assert_array_equal, staged.merge(stages), params)
+  with pytest.raises(NotImplementedError, match="embedding frozen"):
+    command_a.Model(CONFIG, num_stages=2)
+  with pytest.raises(ValueError, match="do not split 8 layers"):
+    command_a.Model(CONFIG, num_stages=2, layers=(3, 4), freeze=("embed",))
+
+
+def test_frozen_groups_name_the_embedding_and_the_routed_experts():
+  model = command_a.Model(CONFIG, images=True, freeze=("experts", "embed"))
+  frozen = {path for path in (
+      ("embed",), ("final_norm",), ("layers", "norm"), ("layers", "wq"), ("layers", "w_router"),
+      ("layers", "w_gate"), ("layers", "w_up"), ("layers", "w_down"), ("layers", "shared_gate"),
+      ("vision", "layers", "wq"), ("projector", "w1")) if model.is_frozen(path)}
+  assert frozen == {("embed",), ("layers", "w_gate"), ("layers", "w_up"), ("layers", "w_down")}
+  assert not command_a.Model(CONFIG).is_frozen(("embed",))
+
+
 def test_a_token_goes_through_its_routers_experts():
   cfg, rng = CONFIG, np.random.default_rng(0)
   p = {k: np.asarray(v[0]) for k, v in _params()["layers"].items()}

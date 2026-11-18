@@ -23,6 +23,10 @@ class Layout:
   mesh, for `env.json`'s rank map. `eval_step(params, inputs, targets)` is
   the mean loss without an update, for validation. `export(params)` gives the
   model's parameters as `--init_from` reads them, for `--save_params`.
+
+  `frozen()`, when a model trains only part of its parameters, places the
+  rest, which are no part of the state: `step` and `eval_step` then take them
+  right after the state, and `export` gives the trained parameters alone.
   """
 
   init: Callable[[], tuple]
@@ -35,6 +39,7 @@ class Layout:
   placement: dict | None = None
   eval_step: Any = None
   export: Callable | None = None
+  frozen: Callable[[], Any] | None = None
 
 
 def placement(meshes: dict, stage_meshes) -> dict:

@@ -1,5 +1,11 @@
 """What Command A+ reads: a conversation as token ids and its images as tiles.
 
+  python -m jax_titan.data.command_a --checkpoint=DIR --conversations=FILE --out=CACHE
+
+writes the cache of conversations that the trainer fine-tunes on
+(`--model=command-a-plus --data=CACHE`). FILE holds one conversation per line,
+`{"messages": [...]}`.
+
 The published checkpoint ships a tokenizer, a chat template and the settings
 of its image processor. `Preprocessor` applies them without PyTorch: Jinja
 renders the template, `tokenizers` encodes the text, and Pillow resizes a
@@ -12,6 +18,7 @@ uses: the tiles are within 2 of 255 levels of its tiles, and equal at more than
 99 pixel values in 100.
 """
 
+import argparse
 import dataclasses
 import json
 import pathlib
@@ -114,3 +121,74 @@ class Preprocessor:
   def decode(self, ids) -> str:
     """The text of token ids, special tokens included."""
     return self.tokenizer.decode([int(i) for i in ids], skip_special_tokens=False)
+
+
+@dataclasses.dataclass(frozen=True)
+class Cache:
+  """Conversations as the trainer reads them.
+
+  `tokens` [conversations, length] holds their token ids, padded on the right.
+  `targets`, of the same shape, holds the next token wherever the model is to
+  learn it, the assistant's last turn, and -1 elsewhere.
+  """
+
+  tokens: np.ndarray
+  targets: np.ndarray
+
+  @classmethod
+  def open(cls, path) -> "Cache":
+    with np.load(pathlib.Path(path) / "conversations.npz") as f:
+      return cls(f["tokens"], f["targets"])
+
+  def __len__(self) -> int:
+    return len(self.tokens)
+
+
+def prepare(checkpoint, conversations, out) -> Cache:
+  """Writes the cache of the conversations in the file `conversations` to directory `out`.
+
+  A line of the file is `{"messages": [...]}` with messages as
+  `Preprocessor.text` takes them, the last one the assistant's. The model
+  learns that turn: what it would generate after the prompt that the turns
+  before it make. So that this is what the published model writes, reasoning
+  and then the answer, the turn carries its reasoning as `thinking`.
+  """
+  preprocessor = Preprocessor.open(checkpoint)
+  pad = preprocessor.tokenizer.token_to_id(preprocessor.special["pad_token"])
+  rows = []
+  for line in pathlib.Path(conversations).read_text(encoding="utf-8").splitlines():
+    if not line.strip():
+      continue
+    messages = json.loads(line)["messages"]
+    prompt, _ = preprocessor.encode(messages[:-1])
+    whole, _ = preprocessor.encode(messages, add_generation_prompt=False)
+    same = prompt[:len(whole)] == whole[:len(prompt)]
+    rows.append((whole, int(np.argmin(np.append(same, False)))))
+  tokens = np.full((len(rows), max(len(whole) for whole, _ in rows)), pad, np.int32)
+  targets = np.full(tokens.shape, -1, np.int32)
+  for i, (whole, shared) in enumerate(rows):
+    tokens[i, :len(whole)] = whole
+    targets[i, shared - 1:len(whole) - 1] = whole[shared:]
+  out = pathlib.Path(out)
+  out.mkdir(parents=True)
+  np.savez(out / "conversations.npz", tokens=tokens, targets=targets)
+  return Cache(tokens, targets)
+
+
+def main(argv=None):
+  parser = argparse.ArgumentParser(description=__doc__,
+                                   formatter_class=argparse.RawDescriptionHelpFormatter)
+  parser.add_argument("--checkpoint", required=True, help="A checkpoint in the published layout.")
+  parser.add_argument("--conversations", required=True,
+                      help="A file of one conversation per line, {\"messages\": [...]}.")
+  parser.add_argument("--out", required=True, help="The cache directory; it must not exist.")
+  args = parser.parse_args(argv)
+  cache = prepare(args.checkpoint, args.conversations, args.out)
+  learned = (cache.targets >= 0).sum(axis=1)
+  print(f"wrote {args.out}: {len(cache)} conversations of up to {cache.tokens.shape[1]} tokens, "
+        f"{learned.min()} to {learned.max()} of them to learn")
+  return 0
+
+
+if __name__ == "__main__":
+  raise SystemExit(main())

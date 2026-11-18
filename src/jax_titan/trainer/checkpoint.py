@@ -37,12 +37,18 @@ def restore_params(path, target):
   return params
 
 
-def saved_keys(path) -> tuple[str, ...]:
-  """The top-level keys of the parameters `save_params` wrote."""
+def restore_saved(path):
+  """Returns the parameters `save_params` wrote, whatever their tree, on the
+  first local device."""
   checkpointer = ocp.StandardCheckpointer()
-  keys = tuple(checkpointer.metadata(pathlib.Path(path).absolute()).item_metadata)
+  path = pathlib.Path(path).absolute()
+  device = jax.sharding.make_single_device_sharding(jax.local_devices()[0])
+  target = jax.tree.map(
+      lambda leaf: jax.ShapeDtypeStruct(leaf.shape, leaf.dtype, sharding=device),
+      checkpointer.metadata(path).item_metadata.tree)
+  params = checkpointer.restore(path, target)
   checkpointer.close()
-  return keys
+  return params
 
 
 class Checkpointer:

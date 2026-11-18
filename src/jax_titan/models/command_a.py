@@ -22,8 +22,9 @@ Written after transformers' implementation (`cohere2_moe`, `cohere2_vision`,
 `siglip`; Apache-2.0).
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 import dataclasses
+import functools
 import json
 import pathlib
 
@@ -397,47 +398,64 @@ _LAYER_KERNELS = {
     "wo": "self_attn.o_proj", "w_router": "mlp.gate",
     "shared_gate": "mlp.shared_experts.gate_proj", "shared_up": "mlp.shared_experts.up_proj",
     "shared_down": "mlp.shared_experts.down_proj"}
+_EXPERTS = ("w_gate", "w_up", "w_down")
 
 
-def _layers_on(tensors: dict, cfg: CommandAConfig, layers: range, device, dtype) -> dict:
-  """The stacked parameters of `layers` on `device`, as `params_from_tensors` gives them.
+def _stored(sharding, ndim: int):
+  """The sharding of a kernel as the checkpoint stores it, its last two
+  dimensions the other way round, for a kernel that goes on `sharding`."""
+  if not isinstance(sharding, jax.sharding.NamedSharding):
+    return sharding
+  spec = tuple(sharding.spec) + (None,) * (ndim - len(sharding.spec))
+  spec = jax.sharding.PartitionSpec(*spec[:-2], spec[-1], spec[-2])
+  return jax.sharding.NamedSharding(sharding.mesh, spec)
 
-  The host only copies the stored tensors side by side. The device turns the
-  kernels to [in, out], reorders the head dimensions and casts, so a
-  checkpoint of hundreds of GB is read at the speed of its files.
+
+def _put(x, sharding, dtype) -> jax.Array:
+  """`x` on `sharding` in `dtype`, cast there."""
+  put = jax.device_put(np.asarray(x), sharding)
+  return jax.jit(lambda w: w.astype(dtype), out_shardings=sharding)(put)
+
+
+def _layer_leaf(tensors: dict, cfg: CommandAConfig, layers: range, name: str, sharding,
+                dtype) -> jax.Array:
+  """Parameter `name` of `layers`, stacked, on `sharding` in `dtype`, as
+  `params_from_tensors` gives it.
+
+  The host only copies the stored tensors side by side. The devices turn
+  kernels to [in, out], reorder the head dimensions and cast, so a checkpoint
+  of hundreds of GB is read at the speed of its files.
   """
-  lm, order = "model.language_model.", _rotary_order(cfg)
+  if name == "norm":
+    stored = "input_layernorm"
+  elif name in _EXPERTS:
+    stored = "mlp.experts.{}." + name[2:] + "_proj"
+  else:
+    stored = _LAYER_KERNELS[name]
+  count = cfg.num_experts if name in _EXPERTS else 1
 
-  def stored(name, experts=False):
-    def read(i, x=None):
-      return tensors[f"{lm}layers.{i}.{f'mlp.experts.{x}.{name}' if experts else name}.weight"]
+  def read(i, x):
+    return tensors[f"model.language_model.layers.{i}.{stored.format(x)}.weight"]
 
-    first = read(layers[0], 0)
-    lead = (len(layers), cfg.num_experts) if experts else (len(layers),)
-    out = np.empty(lead + first.shape, first.dtype)
-    for n, i in enumerate(layers):
-      if experts:
-        for x in range(cfg.num_experts):
-          out[n, x] = read(i, x)
-      else:
-        out[n] = read(i)
-    return jax.device_put(out, device)
+  first = read(layers[0], 0)
+  out = np.empty((len(layers), count) + first.shape, first.dtype)
+  for n, i in enumerate(layers):
+    for x in range(count):
+      out[n, x] = read(i, x)
+  if name not in _EXPERTS:
+    out = out[:, 0]
+  if name == "norm":
+    return _put(out, sharding, dtype)
+  order = _rotary_order(cfg)
 
-  @jax.jit
   def kernel(w):
-    return jnp.swapaxes(w, -1, -2).astype(dtype)
-
-  @jax.jit
-  def rotary(w):
     w = jnp.swapaxes(w, -1, -2)
-    return w.reshape(*w.shape[:2], -1, cfg.head_dim)[..., order].reshape(w.shape).astype(dtype)
+    if name in ("wq", "wk"):
+      w = w.reshape(*w.shape[:2], -1, cfg.head_dim)[..., order].reshape(w.shape)
+    return w.astype(dtype)
 
-  params = {"norm": stored("input_layernorm").astype(dtype)}
-  for ours, theirs in _LAYER_KERNELS.items():
-    params[ours] = (rotary if ours in ("wq", "wk") else kernel)(stored(theirs))
-  for part in ("gate", "up", "down"):
-    params["w_" + part] = kernel(stored(part + "_proj", experts=True))
-  return params
+  put = jax.device_put(out, _stored(sharding, out.ndim))
+  return jax.jit(kernel, out_shardings=sharding)(put)
 
 
 def _bounds(cfg: CommandAConfig, devices) -> list[int]:
@@ -447,7 +465,8 @@ def _bounds(cfg: CommandAConfig, devices) -> list[int]:
 
 
 def to_stages(cfg: CommandAConfig, params: dict, devices, dtype=jnp.bfloat16) -> list[dict]:
-  """`init_params`-shaped parameters spread over `devices`, for a model too large for one.
+  """`init_params`-shaped parameters, or a part of them such as the trained
+  ones, spread over `devices`, for a model too large for one.
 
   The layers are split into as many runs as devices, and a stage holds the
   stacked parameters of its run on its device. The first stage also holds the
@@ -458,12 +477,15 @@ def to_stages(cfg: CommandAConfig, params: dict, devices, dtype=jnp.bfloat16) ->
     return jax.tree.map(lambda w: jax.device_put(w, device).astype(dtype), tree)
 
   bounds = _bounds(cfg, devices)
-  stages = [{"layers": put({k: v[a:b] for k, v in params["layers"].items()}, device)}
+  layers = params.get("layers", {})
+  stages = [{"layers": put({k: v[a:b] for k, v in layers.items()}, device)}
             for a, b, device in zip(bounds, bounds[1:], devices)]
   first, last = devices[0], devices[len(stages) - 1]
   stages[0] |= put({k: v for k, v in params.items() if k not in ("layers", "final_norm")}, first)
-  stages[-1]["final_norm"] = put(params["final_norm"], last)
-  stages[-1].setdefault("embed", put(params["embed"], last))
+  if "final_norm" in params:
+    stages[-1]["final_norm"] = put(params["final_norm"], last)
+  if "embed" in params:
+    stages[-1].setdefault("embed", put(params["embed"], last))
   return stages
 
 
@@ -473,19 +495,16 @@ def load_stages(path, devices, dtype=jnp.bfloat16,
   over `devices` as `to_stages` spreads them, read stage by stage."""
   cfg, tensors = pretrained_config(path), pretrained.read(path)
   bounds = _bounds(cfg, devices)
-  stages = [{"layers": _layers_on(tensors, cfg, range(a, b), device, dtype)}
-            for a, b, device in zip(bounds, bounds[1:], devices)]
-  first, last = devices[0], devices[len(stages) - 1]
-
-  def put(name, device):
-    return jax.device_put(np.asarray(tensors["model.language_model." + name]), device).astype(dtype)
-
-  stages[0]["embed"] = put("embed_tokens.weight", first)
+  places = [jax.sharding.make_single_device_sharding(d) for d in devices[:len(bounds) - 1]]
+  stages = [{"layers": {k: _layer_leaf(tensors, cfg, range(a, b), k, place, dtype)
+                        for k in ("norm", *_LAYER_KERNELS, *_EXPERTS)}}
+            for a, b, place in zip(bounds, bounds[1:], places)]
+  embed = tensors["model.language_model.embed_tokens.weight"]
+  stages[0]["embed"] = _put(embed, places[0], dtype)
   if images:
-    small = _image_params(tensors, cfg)
-    stages[0] |= jax.tree.map(lambda w: jax.device_put(w, first).astype(dtype), small)
-  stages[-1]["final_norm"] = put("norm.weight", last)
-  stages[-1].setdefault("embed", put("embed_tokens.weight", last))
+    stages[0] |= jax.tree.map(lambda w: _put(w, places[0], dtype), _image_params(tensors, cfg))
+  stages[-1]["final_norm"] = _put(tensors["model.language_model.norm.weight"], places[-1], dtype)
+  stages[-1].setdefault("embed", _put(embed, places[-1], dtype))
   return cfg, stages
 
 
@@ -663,72 +682,149 @@ def forward(cfg: CommandAConfig, params: dict, tokens: jax.Array, pixels: jax.Ar
   return logits(cfg, params, hidden(cfg, params["layers"], h, valid))
 
 
-class Model:
-  """Command A+ for the trainer's layouts, as one stage.
+_FREEZE = {"embed": ("embed",), "experts": _EXPERTS}
 
-  The output head is the embedding matrix, which a pipeline would need on its
-  first stage and on its last, so the model does not split into stages. With
-  `images` it takes tiles too and its parameters include the vision tower and
-  the projector; without, they are left out and not trained. `constrain`, when
-  given, is applied to the hidden states after the embedding and every layer.
+
+class Model:
+  """Command A+ for the trainer's layouts.
+
+  `layers` gives the layers per stage; the default splits them as evenly as
+  possible, earlier stages taking the extra layers. `freeze` names groups of
+  parameters that are not trained: `embed`, the embedding matrix, and
+  `experts`, the routed experts of every layer. The output head is the
+  embedding matrix, which the first stage and the last both need: the model
+  splits into more than one stage only with the matrix frozen, and the two
+  stages then hold a copy each.
+
+  With `images` the model takes tiles too and its parameters include the
+  vision tower and the projector; without, they are left out and not trained.
+  `constrain`, when given, is applied to the hidden states after the embedding
+  and every layer.
   """
 
   logical_axes = staticmethod(logical_axes)
 
-  def __init__(self, config: CommandAConfig, *, num_stages: int = 1, dtype=jnp.bfloat16,
-               remat: bool = True, constrain: Callable | None = None, images: bool = False):
-    if num_stages != 1:
+  def __init__(self, config: CommandAConfig, *, num_stages: int = 1,
+               layers: Sequence[int] | None = None, dtype=jnp.bfloat16, remat: bool = True,
+               constrain: Callable | None = None, images: bool = False,
+               freeze: Sequence[str] = ()):
+    total = config.num_hidden_layers
+    if layers is None:
+      layers = tuple(total // num_stages + (i < total % num_stages) for i in range(num_stages))
+    if len(layers) != num_stages or sum(layers) != total or min(layers) < 1:
+      raise ValueError(f"stage layers {tuple(layers)} do not split {total} layers")
+    if num_stages > 1 and "embed" not in freeze:
       raise NotImplementedError(
-          "Command A+ trains as one stage: its output head is its embedding matrix")
+          "Command A+ trains as one stage, or as more with its embedding frozen: its output "
+          "head is its embedding matrix")
     self.config = config
-    self.num_stages = 1
+    self.num_stages = num_stages
+    self.layers = tuple(layers)
     self.dtype = dtype
     self.images = images
     self._remat = remat
     self._constrain = constrain or (lambda h: h)
+    self._frozen = {name for group in freeze for name in _FREEZE[group]}
+
+  def is_frozen(self, path: tuple) -> bool:
+    """Whether the parameter that the keys of `path` lead to in a stage's
+    parameters is not trained."""
+    return path[0] in ("embed", "layers") and path[-1] in self._frozen
 
   def _init(self, key):
     return init_params(self.config, key, self.images)
 
-  def init(self, seed: int = 0) -> tuple[dict]:
+  def split(self, params: dict) -> tuple[dict, ...]:
+    """Stage parameter dicts from `init_params`-shaped parameters."""
+    stages, start = [], 0
+    for i, n in enumerate(self.layers):
+      p = {"layers": {k: v[start:start + n] for k, v in params["layers"].items()}}
+      if i == 0:
+        p |= {k: v for k, v in params.items() if k not in ("layers", "final_norm")}
+      if i == self.num_stages - 1:
+        p["final_norm"] = params["final_norm"]
+        p.setdefault("embed", params["embed"])
+      stages.append(p)
+      start += n
+    return tuple(stages)
+
+  def merge(self, stage_params: Sequence[dict]) -> dict:
+    """`init_params`-shaped parameters, on the host, from stage parameters on
+    whatever meshes: the inverse of `split`, also for the stages' trained
+    parameters alone."""
+    first, last = stage_params[0], stage_params[-1]
+    params = {"layers": {
+        k: np.concatenate([np.asarray(p["layers"][k]) for p in stage_params])
+        for k in first["layers"]}}
+    params |= {k: jax.tree.map(np.asarray, v) for k, v in first.items() if k != "layers"}
+    if "final_norm" in last:
+      params["final_norm"] = np.asarray(last["final_norm"])
+    return params
+
+  def init(self, seed: int = 0) -> tuple[dict, ...]:
     """Stage parameters, randomly initialized."""
-    return (jax.jit(self._init)(jax.random.key(seed)),)
+    return self.split(jax.jit(self._init)(jax.random.key(seed)))
 
-  def abstract(self, seed: int = 0) -> tuple[dict]:
+  def abstract(self, seed: int = 0) -> tuple[dict, ...]:
     """ShapeDtypeStructs of `init(seed)`, without initializing."""
-    return (jax.eval_shape(self._init, jax.random.key(seed)),)
+    return jax.eval_shape(lambda: self.split(self._init(jax.random.key(seed))))
 
-  def merge(self, stage_params) -> dict:
-    """`init_params`-shaped parameters on the host."""
-    return jax.tree.map(np.asarray, stage_params[0])
-
-  def load(self, path: str) -> tuple[dict]:
-    """Stage parameters: on the host from a published checkpoint, when `path`
-    is a directory of safetensors files; otherwise on one device from
-    parameters that `jax_titan.trainer.checkpoint.save_params` wrote."""
+  def load(self, path: str) -> tuple[dict, ...]:
+    """Stage parameters, on one device, from `init_params`-shaped parameters
+    that `jax_titan.trainer.checkpoint.save_params` wrote."""
     from jax_titan.trainer import checkpoint  # pylint: disable=g-import-not-at-top
 
-    if pretrained.is_safetensors(path):
-      return (params_from_tensors(pretrained.read(path), self.config, self.images),)
     device = jax.sharding.make_single_device_sharding(jax.local_devices()[0])
     target = jax.tree.map(
-        lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=device), self.abstract()[0])
-    return (checkpoint.restore_params(path, target),)
+        lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=device),
+        jax.eval_shape(self._init, jax.random.key(0)))
+    return self.split(checkpoint.restore_params(path, target))
+
+  def place(self, path: str, targets: Sequence[dict]) -> tuple[dict, ...]:
+    """Stage parameters of the published weights at `path`, each read straight
+    onto the sharding and in the dtype of its entry in `targets`, one tree of
+    ShapeDtypeStructs per stage shaped like `abstract()`'s."""
+    tensors, cfg, start, stages = pretrained.read(path), self.config, 0, []
+    images = _image_params(tensors, cfg) if self.images else {}
+    stored = {"embed": "embed_tokens", "final_norm": "norm"}
+    for n, target in zip(self.layers, targets):
+      stage = {"layers": {
+          k: _layer_leaf(tensors, cfg, range(start, start + n), k, t.sharding, t.dtype)
+          for k, t in target["layers"].items()}}
+      for k in stored.keys() & target.keys():
+        weight = tensors[f"model.language_model.{stored[k]}.weight"]
+        stage[k] = _put(weight, target[k].sharding, target[k].dtype)
+      for k in images.keys() & target.keys():
+        stage[k] = jax.tree.map(lambda w, t: _put(w, t.sharding, t.dtype), images[k], target[k])
+      stages.append(stage)
+      start += n
+    return tuple(stages)
 
   def forward(self, stage: int, params: dict, x) -> jax.Array:
-    """Logits from token ids [batch, tokens], or from a dict of `tokens` and
-    `pixels` [batch, tiles, channels, size, size]."""
-    del stage
+    """Runs one stage.
+
+    Stage 0 takes token ids [batch, tokens], or a dict of `tokens` and
+    `pixels` [batch, tiles, channels, size, size]; later stages take the
+    hidden states of the stage before. The last stage returns the logits.
+    """
     cfg = self.config
-    tokens, pixels = (x["tokens"], x["pixels"]) if isinstance(x, dict) else (x, None)
-    h = self._constrain(embed(cfg, params, tokens, pixels, self.dtype))
-    h = hidden(cfg, params["layers"], h, remat=self._remat, constrain=self._constrain)
-    return logits(cfg, params, h)
+    if stage == 0:
+      tokens, pixels = (x["tokens"], x["pixels"]) if isinstance(x, dict) else (x, None)
+      x = embed(cfg, params, tokens, pixels, self.dtype)
+    h = hidden(cfg, params["layers"], self._constrain(x), first=sum(self.layers[:stage]),
+               remat=self._remat, constrain=self._constrain)
+    return logits(cfg, params, h) if stage == self.num_stages - 1 else h
 
   def stage_fns(self) -> list[Callable[..., jax.Array]]:
-    """The one stage function for `jax_titan.mpmd.make_train_step`: the mean
-    loss of the next tokens `t`, those that are not negative."""
-    return [lambda p, x, t: cross_entropy(self.forward(0, p, x), t)]
+    """Stage functions for `jax_titan.mpmd.make_train_step`.
+
+    The last stage also takes the next tokens `t` and returns their mean loss,
+    over those that are not negative.
+    """
+    last = self.num_stages - 1
+    fns = [functools.partial(self.forward, i) for i in range(last)]
+    fns.append(lambda p, x, t: cross_entropy(self.forward(last, p, x), t))
+    return fns
 
   def flops_per_token(self, seq_len: int) -> float:
     return self.config.flops_per_token(seq_len)

@@ -11,7 +11,8 @@ is the user's turn of a conversation that the chat template writes
 layers are spread over the visible devices, a run of layers on each, so the
 published model of 437.5 GB in bf16 needs several GPUs. Every new token comes
 from a pass over the whole sequence: there is no key-value cache. `--params`
-replaces weights, for example with fine-tuned ones.
+replaces the weights that the trainer's `--save_params` wrote, all of the
+model's or the part a fine-tuning run trained.
 """
 
 import argparse
@@ -91,8 +92,8 @@ def main(argv=None):
   parser.add_argument("--dtype", choices=["bfloat16", "float32"], default="bfloat16",
                       help="The precision the model computes in; float32 takes twice the memory.")
   parser.add_argument("--params", default="",
-                      help="Parameters that the trainer's --save_params wrote, instead of the "
-                      "checkpoint's.")
+                      help="Parameters that the trainer's --save_params wrote, in place of the "
+                      "checkpoint's own.")
   parser.add_argument("--platform", default="", help="cpu to run without a GPU.")
   args = parser.parse_args(argv)
   if args.platform:
@@ -115,14 +116,12 @@ def main(argv=None):
   preprocessor = data.Preprocessor.open(args.checkpoint)
   tokens, tiles = preprocessor.encode(messages, images)
   start = time.time()
-  dtype = jax.numpy.dtype(args.dtype)
+  dtype, devices = jax.numpy.dtype(args.dtype), jax.devices()
+  cfg, params = command_a.load_stages(args.checkpoint, devices, dtype, bool(images))
   if args.params:
-    # The trainer saves the language model, and the vision tower only when it trained on images.
-    cfg, params = command_a.load(args.checkpoint, dtype, images=bool(images))
-    trained = command_a.Model(cfg, images="vision" in checkpoint.saved_keys(args.params))
-    params = command_a.to_stages(cfg, params | trained.load(args.params)[0], jax.devices(), dtype)
-  else:
-    cfg, params = command_a.load_stages(args.checkpoint, jax.devices(), dtype, bool(images))
+    trained = command_a.to_stages(cfg, checkpoint.restore_saved(args.params), devices, dtype)
+    params = [{**p, **t, "layers": {**p["layers"], **t["layers"]}}
+              for p, t in zip(params, trained)]
   print(f"loaded on {len(params)} devices after {time.time() - start:.0f} s; the prompt is "
         f"{len(tokens)} tokens" + (f" with {len(tiles)} image tiles" if images else ""))
   start = time.time()

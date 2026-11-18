@@ -23,11 +23,20 @@ The layouts here take a staged model, any object with `init(seed)` and
 `stage_fns()`, one function per stage, the last of which returns the loss.
 `--init_from` needs its `load(path)`, `--parallel=fsdp` its
 `logical_axes(path, leaf)` and `--save_params` its `merge(stage_params)`.
+
+A model may train only part of its parameters: `is_frozen(path)` tells, for
+the keys that lead to a parameter in a stage's dicts, whether it stays as it
+is. Frozen parameters are no part of the trained state: they get no gradient
+and no optimizer state, are held in the model's compute `dtype`, and
+`--save_params` leaves them out. A model that can read weights straight onto
+devices has `place(path, targets)`, which `--init_from` then uses for
+published weights: a checkpoint larger than the host's memory loads this way.
 """
 
 import dataclasses
 import functools
 import json
+import os
 
 from jax_titan.trainer.layout import EVAL_STEPS, Layout, Workload, abstract, placement
 
@@ -87,11 +96,41 @@ def _shapes(specs):
   return jax.tree.map(lambda v: v[0], specs, is_leaf=_is_pair)
 
 
+def _split(tree, is_frozen):
+  """The trained and the frozen leaves of `tree`, nested dicts, as two such trees."""
+
+  def part(node, path, frozen):
+    if not isinstance(node, dict):
+      return node if is_frozen(path) == frozen else None
+    parts = {k: part(v, path + (k,), frozen) for k, v in node.items()}
+    return {k: v for k, v in parts.items() if v is not None and not (isinstance(v, dict) and not v)}
+
+  return part(tree, (), False), part(tree, (), True)
+
+
+def _merged(a: dict, b: dict) -> dict:
+  """The union of two trees of nested dicts that share no leaf."""
+  out = dict(a)
+  for k, v in b.items():
+    out[k] = _merged(a[k], v) if k in a else v
+  return out
+
+
+def _on_pair(fn):
+  """`fn`, a stage function, taking its parameters as the pair (trained, frozen)."""
+  return lambda pair, *args: fn(_merged(*pair), *args)
+
+
 def _init_state(args, model, optimizer, meshes, fsdp=False):
   """Init and abstract state for stage state on its mesh: replicated, or with
-  `fsdp` sharded along the model's logical axes."""
+  `fsdp` sharded along the model's logical axes.
+
+  Also returns the shardings of the stages' frozen parameters and `frozen()`,
+  which places them, or None for a model that trains all of its parameters.
+  """
   import jax  # pylint: disable=g-import-not-at-top
   from jax_titan import parallel  # pylint: disable=g-import-not-at-top
+  from jax_titan.models import pretrained  # pylint: disable=g-import-not-at-top
 
   def shardings(tree, mesh):
     if fsdp:
@@ -100,24 +139,55 @@ def _init_state(args, model, optimizer, meshes, fsdp=False):
       specs = jax.tree.map(lambda _: jax.sharding.PartitionSpec(), tree)
     return jax.tree.map(lambda s: jax.sharding.NamedSharding(mesh, s), specs)
 
-  param_shapes = model.abstract(args.seed)
+  is_frozen = getattr(model, "is_frozen", lambda path: False)
+  parts = [_split(p, is_frozen) for p in model.abstract(args.seed)]
+  param_shapes = tuple(p for p, _ in parts)
+  frozen_shapes = tuple(
+      jax.tree.map(lambda x: jax.ShapeDtypeStruct(x.shape, model.dtype), f) for _, f in parts)
   opt_shapes = tuple(jax.eval_shape(optimizer.init, p) for p in param_shapes)
   param_sh = tuple(shardings(p, m) for p, m in zip(param_shapes, meshes))
+  frozen_sh = tuple(shardings(f, m) for f, m in zip(frozen_shapes, meshes))
   opt_sh = tuple(shardings(s, m) for s, m in zip(opt_shapes, meshes))
+  placed = []  # The frozen parameters, once they are on their devices.
+
+  def place():
+    """The trained and the frozen parameters on their shardings."""
+    if args.init_from and hasattr(model, "place") and pretrained.is_safetensors(args.init_from):
+      targets = tuple(
+          _merged(abstract(p, ps), abstract(f, fs))
+          for p, ps, f, fs in zip(param_shapes, param_sh, frozen_shapes, frozen_sh))
+      stages = [_split(s, is_frozen) for s in model.place(args.init_from, targets)]
+      return tuple(p for p, _ in stages), tuple(f for _, f in stages)
+    stages = model.load(args.init_from) if args.init_from else model.init(args.seed)
+    stages = [_split(s, is_frozen) for s in stages]
+    params = jax.device_put(tuple(p for p, _ in stages), param_sh)
+    frozen = jax.device_put(tuple(f for _, f in stages), frozen_sh)
+
+    def cast(tree):
+      return jax.tree.map(lambda x: x.astype(model.dtype), tree)
+
+    return params, tuple(jax.jit(cast, out_shardings=s)(f) if f else f
+                         for f, s in zip(frozen, frozen_sh))
 
   def init():
-    stage_params = model.load(args.init_from) if args.init_from else model.init(args.seed)
-    params = jax.device_put(stage_params, param_sh)
+    params, frozen = place()
+    placed[:] = [frozen]
     opt_states = tuple(
         jax.jit(optimizer.init, out_shardings=s)(p) for p, s in zip(params, opt_sh)
     )
     return params, opt_states
 
+  def frozen():
+    # A run that resumes restores its state and never calls init().
+    if not placed:
+      placed[:] = [place()[1]]
+    return placed[0]
+
   abstract_state = (
       tuple(abstract(s, sh) for s, sh in zip(param_shapes, param_sh)),
       tuple(abstract(s, sh) for s, sh in zip(opt_shapes, opt_sh)),
   )
-  return init, abstract_state, param_sh, opt_sh
+  return init, abstract_state, param_sh, opt_sh, frozen_sh, frozen if any(frozen_sh) else None
 
 
 def _mpmd_layout(args, topology, model, optimizer, inputs, targets, split_batch) -> Layout:
@@ -139,16 +209,20 @@ def _mpmd_layout(args, topology, model, optimizer, inputs, targets, split_batch)
   options = json.loads(args.mpmd_options) if args.mpmd_options else None
   config = jt_mpmd.make_config(topology, args.schedule or None, options, num_stages=num_stages)
   meshes = [topology[jt_mpmd.mesh_name(i % num_meshes)] for i in range(num_stages)]
-  init, abstract_state, param_sh, opt_sh = _init_state(args, model, optimizer, meshes)
+  init, abstract_state, param_sh, opt_sh, frozen_sh, frozen = _init_state(
+      args, model, optimizer, meshes)
+  extra = (frozen_sh,) if frozen else ()
 
   in_sh, tgt_sh = _shardings(inputs, meshes[0]), _shardings(targets, meshes[-1])
   stage_fns = [ops.for_stage(fn, i) for i, fn in enumerate(model.stage_fns())]
+  if frozen:
+    stage_fns = [_on_pair(fn) for fn in stage_fns]
   train_step = jt_mpmd.make_train_step(stage_fns, optimizer, max_grad_norm=args.max_grad_norm)
   scalar = NamedSharding(meshes[-1], P())
   jitted = mpmd.jit(
       train_step,
       config,
-      in_shardings=(param_sh, opt_sh, in_sh, tgt_sh),
+      in_shardings=(param_sh, opt_sh, *extra, in_sh, tgt_sh),
       out_shardings=(param_sh, opt_sh, scalar, scalar),
       donate_argnums=(0, 1),
   )
@@ -157,17 +231,22 @@ def _mpmd_layout(args, topology, model, optimizer, inputs, targets, split_batch)
     x, t = split_batch(batch)
     return jax.device_put(x, in_sh), jax.device_put(t, tgt_sh)
 
+  def eval_loss(stage_params, *batch):
+    *rest, x, t = batch
+    stage_params = list(zip(stage_params, *rest)) if rest else stage_params
+    return jt_mpmd.pipeline_loss(stage_fns, stage_params, x, t)
+
   eval_step = mpmd.jit(
-      functools.partial(jt_mpmd.pipeline_loss, stage_fns),
+      eval_loss,
       jt_mpmd.make_config(topology, None, options, num_stages=num_stages),
-      in_shardings=(param_sh, in_sh, tgt_sh),
+      in_shardings=(param_sh, *extra, in_sh, tgt_sh),
       out_shardings=scalar,
   )
   return Layout(init, abstract_state, jitted, _shapes(inputs), _shapes(targets), put_batch,
                 f"mpmd:{num_stages}",
                 placement=placement(
                     topology, [jt_mpmd.mesh_name(i % num_meshes) for i in range(num_stages)]),
-                eval_step=eval_step, export=getattr(model, "merge", None))
+                eval_step=eval_step, export=getattr(model, "merge", None), frozen=frozen)
 
 
 def _spmd_layout(args, mesh, model, optimizer, inputs, targets, split_batch) -> Layout:
@@ -205,19 +284,23 @@ def _spmd_layout(args, mesh, model, optimizer, inputs, targets, split_batch) -> 
   flat_inputs = jax.tree.map(flat_spec, inputs, is_leaf=_is_pair)
   flat_targets = jax.tree.map(flat_spec, targets, is_leaf=_is_pair)
   in_sh, tgt_sh = _shardings(flat_inputs, mesh), _shardings(flat_targets, mesh)
-  init, abstract_state, param_sh, opt_sh = _init_state(
+  init, abstract_state, param_sh, opt_sh, frozen_sh, frozen = _init_state(
       args, model, optimizer, [mesh] * args.num_stages, fsdp=args.parallel == "fsdp")
+  extra = (frozen_sh,) if frozen else ()
 
   stage_fns = [ops.for_stage(fn, i) for i, fn in enumerate(model.stage_fns())]
   last = len(stage_fns) - 1
 
-  def loss_fn(stage_params, x, t):
+  def loss_fn(stage_params, *batch):
+    *rest, x, t = batch
+    if rest:
+      stage_params = [_merged(p, f) for p, f in zip(stage_params, *rest)]
     for i, fn in enumerate(stage_fns):
       x = fn(stage_params[i], x, t) if i == last else fn(stage_params[i], x)
     return x
 
-  def train_step(stage_params, opt_states, x, t):
-    loss, grads = jax.value_and_grad(loss_fn)(stage_params, x, t)
+  def train_step(stage_params, opt_states, *batch):
+    loss, grads = jax.value_and_grad(loss_fn)(stage_params, *batch)
     norm = jt_mpmd.global_grad_norm(grads)
     updated = [
         jt_mpmd.clipped_update(optimizer, p, g, s, norm, args.max_grad_norm)
@@ -229,7 +312,7 @@ def _spmd_layout(args, mesh, model, optimizer, inputs, targets, split_batch) -> 
   scalar = jax.sharding.NamedSharding(mesh, P())
   jitted = jax.jit(
       train_step,
-      in_shardings=(param_sh, opt_sh, in_sh, tgt_sh),
+      in_shardings=(param_sh, opt_sh, *extra, in_sh, tgt_sh),
       out_shardings=(param_sh, opt_sh, scalar, scalar),
       donate_argnums=(0, 1),
   )
@@ -239,10 +322,11 @@ def _spmd_layout(args, mesh, model, optimizer, inputs, targets, split_batch) -> 
     x, t = jax.tree.map(flat_host, x, inputs), jax.tree.map(flat_host, t, targets)
     return jax.device_put(x, in_sh), jax.device_put(t, tgt_sh)
 
-  eval_step = jax.jit(loss_fn, in_shardings=(param_sh, in_sh, tgt_sh), out_shardings=scalar)
+  eval_step = jax.jit(
+      loss_fn, in_shardings=(param_sh, *extra, in_sh, tgt_sh), out_shardings=scalar)
   return Layout(init, abstract_state, jitted, _shapes(flat_inputs), _shapes(flat_targets),
                 put_batch, "spmd", placement=placement({"mesh": mesh}, ["mesh"] * args.num_stages),
-                eval_step=eval_step, export=getattr(model, "merge", None))
+                eval_step=eval_step, export=getattr(model, "merge", None), frozen=frozen)
 
 
 def _routed_attention():
@@ -512,18 +596,25 @@ def _ideogram(args, devices, optimizer, native: bool):
 
 
 def _command_a(args, devices, optimizer):
-  """Command A+ on token windows, as one stage.
+  """Command A+ on token windows, or on a cache of conversations.
 
-  Besides config fields, `--model_overrides` takes `dtype` and `image_tiles`.
-  With tiles, every sequence of a synthetic batch opens with that many random
-  image tiles, and the vision tower and the projector train with the language
-  model; without, they are not part of the trained state. The config starts
+  Besides config fields, `--model_overrides` takes `dtype`, `image_tiles` and
+  `freeze`. With tiles, every sequence of a synthetic batch opens with that
+  many random image tiles, and the vision tower and the projector train with
+  the language model; without, they are not part of the trained state.
+  `freeze` lists what is not trained, of `experts` and `embed`; the model runs
+  as more than one stage only with its embedding frozen. The config starts
   from the `config.json` of the published checkpoint that `--init_from` names.
+
+  `--data`, when a directory, is a cache that `jax_titan.data.command_a`
+  wrote: a step trains on random conversations of it, and with `--eval_every`
+  its last tenth, at least one, is held out and validated on in turn.
   """
   import jax  # pylint: disable=g-import-not-at-top
   import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
   import numpy as np  # pylint: disable=g-import-not-at-top
   from jax_titan import mpmd as jt_mpmd  # pylint: disable=g-import-not-at-top
+  from jax_titan.data import command_a as data  # pylint: disable=g-import-not-at-top
   from jax_titan.models import command_a, pretrained  # pylint: disable=g-import-not-at-top
 
   P = jax.sharding.PartitionSpec  # pylint: disable=invalid-name
@@ -531,6 +622,7 @@ def _command_a(args, devices, optimizer):
   overrides = _overrides(args)
   dtype = jnp.dtype(overrides.pop("dtype", "bfloat16"))
   tiles = overrides.pop("image_tiles", 0)
+  freeze = overrides.pop("freeze", ())
   if args.init_from and pretrained.is_safetensors(args.init_from):
     cfg = dataclasses.replace(command_a.pretrained_config(args.init_from), **overrides)
   else:
@@ -547,19 +639,46 @@ def _command_a(args, devices, optimizer):
     constrain = functools.partial(
         jax.lax.with_sharding_constraint,
         shardings=jax.sharding.NamedSharding(mesh, P(jt_mpmd.DATA_AXIS)))
-  model = command_a.Model(cfg, num_stages=args.num_stages, dtype=dtype, remat=args.remat,
-                          constrain=constrain, images=tiles > 0)
+  model = command_a.Model(cfg, num_stages=args.num_stages, layers=_stage_layers(args),
+                          dtype=dtype, remat=args.remat, constrain=constrain, images=tiles > 0,
+                          freeze=freeze)
 
   mb, num_mb, seq = args.microbatch_size, args.microbatches, args.seq_len
+  cache = data.Cache.open(args.data) if os.path.isdir(args.data) else None
+  if cache is not None:
+    seq = cache.tokens.shape[1]
   b = (num_mb, mb)
   batched = P(None, jt_mpmd.DATA_AXIS)
   tokens = (jax.ShapeDtypeStruct(b + (seq,), jnp.int32), batched)
-  if not tiles:
-    inputs, next_batch = tokens, None
+  source = "synthetic"
 
-    def split_batch(batch):
-      batch = batch.reshape(num_mb, mb, seq + 1)
-      return batch[..., :-1], batch[..., 1:]
+  def whole(batch):
+    return batch
+
+  def windows(batch):
+    batch = batch.reshape(num_mb, mb, seq + 1)
+    return batch[..., :-1], batch[..., 1:]
+
+  split_batch = whole
+  if cache is not None and not tiles:
+    held_out = max(1, len(cache) // 10) if args.eval_every else 0
+    train = len(cache) - held_out
+    if train < 1:
+      raise ValueError(f"{args.data} has {len(cache)} conversations, too few to hold one out")
+    inputs = tokens
+    source = f"{args.data} ({train} conversations, {held_out} more held out)"
+
+    def next_batch(step):
+      """Conversations of the cache: random ones, or for a validation step the
+      held-out ones in turn."""
+      if step >= EVAL_STEPS:
+        picks = train + (np.arange(num_mb * mb) + (step - EVAL_STEPS) * num_mb * mb) % held_out
+      else:
+        picks = np.random.default_rng((args.seed, step)).integers(0, train, num_mb * mb)
+      picks = picks.reshape(b)
+      return cache.tokens[picks], cache.targets[picks]
+  elif not tiles:
+    inputs, next_batch, split_batch = tokens, None, windows
   else:
     if args.data not in ("", "synthetic"):
       raise NotImplementedError("command-a-plus trains with image tiles on synthetic batches only")
@@ -579,9 +698,6 @@ def _command_a(args, devices, optimizer):
       x = {"tokens": window[..., :-1], "pixels": rng.standard_normal(pixel_shape, np.float32)}
       return x, np.where(window == cfg.image_token_id, -1, window)[..., 1:]
 
-    def split_batch(batch):
-      return batch
-
   if args.parallel == "mpmd":
     layout = _mpmd_layout(args, _topology(args, devices, make_mesh), model, optimizer,
                           inputs, tokens, split_batch)
@@ -594,6 +710,7 @@ def _command_a(args, devices, optimizer):
       flops_per_step=model.flops_per_token(seq) * tokens_per_step,
       vocab_size=cfg.vocab_size,
       next_batch=next_batch,
+      data=source,
   )
   return layout, work
 

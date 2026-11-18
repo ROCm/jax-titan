@@ -605,10 +605,11 @@ def main(argv=None):
     state_s = time.time() - t0
     print(f"initialized params and optimizer state in {state_s:.1f}s", flush=True)
   log.event("state", seconds=state_s, restored_step=start)
+  frozen = (layout.frozen(),) if layout.frozen else ()
 
   t0 = time.time()
   ops.reset_selections()
-  lowered = layout.step.lower(params, opt_states, layout.input_spec, layout.target_spec)
+  lowered = layout.step.lower(params, opt_states, *frozen, layout.input_spec, layout.target_spec)
   t1 = time.time()
   compiled = lowered.compile()
   t2 = time.time()
@@ -685,7 +686,8 @@ def main(argv=None):
       if watchdog:
         watchdog.start(step)
       with jax.profiler.StepTraceAnnotation("train_step", step_num=step):
-        params, opt_states, loss, grad_norm = compiled(params, opt_states, tokens, targets)
+        params, opt_states, loss, grad_norm = compiled(
+            params, opt_states, *frozen, tokens, targets)
         loss, grad_norm = float(loss), float(grad_norm)
       if watchdog:
         watchdog.stop()
@@ -732,10 +734,10 @@ def main(argv=None):
         placed = [layout.put_batch(b) for b in eval_batches]
         compile_s = 0.0
         if compiled_eval is None:
-          compiled_eval = layout.eval_step.lower(params, *placed[0]).compile()
+          compiled_eval = layout.eval_step.lower(params, *frozen, *placed[0]).compile()
           compile_s = time.time() - t0
         t1 = time.time()
-        eval_loss = float(np.mean([float(compiled_eval(params, x, t)) for x, t in placed]))
+        eval_loss = float(np.mean([float(compiled_eval(params, *frozen, x, t)) for x, t in placed]))
         eval_s = time.time() - t1
         print(f"step {done:4d} | validation loss {eval_loss:.4f} over {len(placed)} batches "
               f"in {eval_s:.1f}s", flush=True)
