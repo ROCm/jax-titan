@@ -152,14 +152,14 @@ JAX-Titan on AMD's SPUR cluster.
 |---|---|
 | `src/jax_titan/mpmd` | Topology, Shardy MPMD config and pipelined train steps |
 | `src/jax_titan/parallel` | DP, FSDP and TP shardings from logical parameter axes |
-| `src/jax_titan/models` | Llama 3, with parameters grouped by pipeline stage, and stages of MaxText and MaxDiffusion models (`adapters/`) |
+| `src/jax_titan/models` | Llama 3 and Ideogram 4, with parameters grouped by pipeline stage; Ideogram 4's text encoder, autoencoder, published-weights reader and generation; and stages of MaxText and MaxDiffusion models (`adapters/`) |
 | `src/jax_titan/ops` | Semantic operators: per-op provider policy, native JAX, ROCm TE, JAX-AITER and JAX-Triton (Triton and Gluon) providers, and the conformance harness |
-| `src/jax_titan/data` | Llama 3 tokenizer and pretokenized text sampling |
+| `src/jax_titan/data` | Llama 3 tokenizer and pretokenized text sampling; the cache of Ideogram 4's image tokens and text features |
 | `src/jax_titan/trainer` | Training entry point (`python -m jax_titan.trainer.train`) and Orbax checkpoints |
 | `src/jax_titan/observability` | Run records, metrics, figures, ETTR, ceilings, FLOPs model and per-GPU busy and idle time from profiler traces |
 | `src/jax_titan/planning` | Training budget planner and performance model: model shapes, GPU specs, memory, RCCL and MORI collectives, step time, time left |
 | `examples/` | MPMD spike and parity checks |
-| `tests/` | CPU tests: schedules and layouts against `jax.jit`, checkpoint resume, MaxText and MaxDiffusion models |
+| `tests/` | CPU tests: schedules and layouts against `jax.jit`, checkpoint resume, MaxText, MaxDiffusion and Ideogram 4 models |
 | `scripts/` | Container, build, environment, GPU-availability and post-run cleanup scripts |
 | `.cursor/skills/`, `.claude/skills/` | Agent skills for Cursor and Claude Code (identical copies): coding rules, upstream debugging, and running and cleaning up training jobs |
 | `third_party/patches/` | jaxlib, Shardy and MaxDiffusion patches |

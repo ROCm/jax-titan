@@ -71,9 +71,11 @@ for a later comparison: do not import from it or edit it.
   `models/flux2_vae.py` (the autoencoder) in plain JAX, on one device outside
   any mesh. Both are frozen: `data/ideogram.py` runs them once into a cache
   that the trainer reads (`--data`), and `models/ideogram_generate.py` runs
-  them to draw pictures. Published weights are read by `models/pretrained.py`
-  without PyTorch; torch, diffusers and transformers appear in tests only, as
-  references.
+  them to draw pictures. Image tokens are scaled by `TOKEN_MEAN` and
+  `TOKEN_STD` of `models/ideogram.py`, the constants of Ideogram's pipeline,
+  never by the batch-norm statistics stored with the autoencoder. Published
+  weights are read by `models/pretrained.py` without PyTorch; torch, diffusers
+  and transformers appear in tests only, as references.
 - **Precision:** parameters and optimizer state are fp32; compute casts to
   bf16 before the layer scan. Casting inside the rematerialized layer was
   measured slower; do not move it back without a new A/B.
@@ -88,7 +90,10 @@ for a later comparison: do not import from it or edit it.
 - `python -m pytest tests/` (CPU, 8 devices) must pass before every commit.
 - CI runs the tests in `tests/` on the JAX built from source, with MaxText
   (the `maxtext` extra) and MaxDiffusion (at the `PINNED_COMMIT` of its
-  adapter, with the patches) installed, so the adapter tests run there.
+  adapter, with the patches) installed, so the adapter tests run there. It
+  has neither `torch` nor MaxDiffusion's Ideogram branch, so Ideogram 4's
+  comparisons with other implementations run only locally: run them after
+  changing one of its models.
 - Mark a test that needs a GPU `gpu`, or `gpu(n)` for n GPUs.
   `python -m pytest tests/` never runs it; `python -m pytest tests/ --gpus=N`
   runs only the `gpu` tests, with JAX on ROCm, and skips those that need more
@@ -122,7 +127,9 @@ for a later comparison: do not import from it or edit it.
   model and against one step of that branch's trainer (skipped without the
   branch). `tests/test_qwen3.py` and `tests/test_flux2_vae.py` check the text
   encoder and the autoencoder against transformers' and diffusers' models
-  (skipped without `torch`).
+  (skipped without `torch`). `tests/ideogram_checkpoint.py` writes a
+  checkpoint in diffusers' layout at toy size, from which the cache of
+  samples, training on it and generation run on CPU.
 - A performance claim needs a GPU run on an idle node against the
   no-pipeline baseline from the same stack (see `jax_titan_training`), with
   its JSONL in `docs/results/<date>/`.

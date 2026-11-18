@@ -55,33 +55,30 @@ class Pipeline:
   def __init__(self, checkpoint, *, transformer=None, log=print):
     import jax  # pylint: disable=g-import-not-at-top
     import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
-    from jax_titan.models import flux2_vae, ideogram, qwen3  # pylint: disable=g-import-not-at-top
+    from jax_titan.models import flux2_vae, ideogram, pretrained, qwen3  # pylint: disable=g-import-not-at-top
 
     checkpoint = pathlib.Path(checkpoint)
     dtype = jnp.bfloat16
     start = time.time()
 
-    def on_device(tree, to=jnp.float32):
-      # Cast on the device: a host cast of the fp32 weights to bf16 is slow.
-      return jax.tree.map(lambda x: jnp.asarray(x).astype(to), tree)
-
     self._tokenizer = checkpoint / "tokenizer"
-    text_cfg = qwen3.pretrained_config(checkpoint / "text_encoder")
-    self._text = on_device(qwen3.pretrained_params(checkpoint / "text_encoder", text_cfg), dtype)
+    text_cfg, self._text = qwen3.load(checkpoint / "text_encoder", dtype)
     self._features = jax.jit(lambda p, i, v: qwen3.features(text_cfg, p, i, v, dtype))
     log(f"text encoder after {time.time() - start:.0f} s")
 
     self.config = cfg = ideogram.pretrained_config(checkpoint / "transformer")
     model = ideogram.Model(cfg, num_stages=1, dtype=dtype, remat=False)
-    self._conditional = on_device(
+    self._conditional = pretrained.to_device(
         model.load(transformer or checkpoint / "transformer")[0], dtype)
-    self._unconditional = on_device(model.load(checkpoint / "unconditional_transformer")[0], dtype)
+    self._unconditional = pretrained.to_device(
+        model.load(checkpoint / "unconditional_transformer")[0], dtype)
     log(f"both transformers after {time.time() - start:.0f} s")
 
     def step(conditional, unconditional, z, features, ids, t, s, weight):
       """One Euler step from timestep `t` to `s` along the guided velocity."""
       batch, image_tokens, _ = z.shape
-      timestep = jnp.full((batch,), t, jnp.float32)
+      # Rounded to the parameters' precision, as Ideogram's model reads it.
+      timestep = jnp.full((batch,), t, dtype).astype(jnp.float32)
       with_text = model.forward(
           0, conditional, {"img": z, "txt": features, "timestep": timestep, **ids})
       # The unconditional transformer sees the image tokens alone.
@@ -94,11 +91,11 @@ class Pipeline:
 
     self._step = jax.jit(step)
 
-    vae_cfg = flux2_vae.pretrained_config(checkpoint / "vae")
-    self._vae = on_device(flux2_vae.pretrained_params(checkpoint / "vae", vae_cfg))
+    vae_cfg, self._vae = flux2_vae.load(checkpoint / "vae")
 
     def decode(vae, z):
-      latents = flux2_vae.from_tokens(vae_cfg, vae, z, math.isqrt(z.shape[1]))
+      latents = flux2_vae.from_tokens(
+          vae_cfg, z, math.isqrt(z.shape[1]), ideogram.TOKEN_MEAN, ideogram.TOKEN_STD)
       images = jnp.clip(flux2_vae.decode(vae_cfg, vae, latents), -1, 1)
       return jnp.round((images + 1) * 127.5).astype(jnp.uint8)
 
@@ -111,7 +108,7 @@ class Pipeline:
     from jax_titan.models import ideogram, qwen3  # pylint: disable=g-import-not-at-top
 
     steps, guidance, mean, std = PRESETS[preset]
-    token_ids, valid = qwen3.tokenize(self._tokenizer, prompts)
+    token_ids, valid = qwen3.tokenize(self._tokenizer, [ideogram.caption(p) for p in prompts])
     features = self._features(self._text, token_ids, valid)
     side = resolution // 16
     ids = ideogram.padded_sequence_ids(side, valid)

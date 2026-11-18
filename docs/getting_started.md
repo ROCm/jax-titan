@@ -112,12 +112,13 @@ pip install -e ".[maxdiffusion]" "jax==$(python -c 'import jax; print(jax.__vers
 ```
 
 JAX-Titan's own Ideogram 4 (`--model=ideogram4`) needs none of these. Its
-tests against diffusers' and transformers' models run when `torch` and
-`diffusers` 0.39 or later are installed, and are skipped otherwise. Generating
-pictures and fine-tuning on images need the `ideogram` extra, for the text
-encoder's tokenizer and image files, and a checkpoint in diffusers' layout,
-such as a snapshot of `ideogram-ai/ideogram-4-fp8`, whose weights are under
-Ideogram's non-commercial license. `--model=maxdiffusion:ideogram4` needs
+tests against diffusers' and transformers' models run when `torch`,
+`diffusers` 0.39 or later and a `transformers` with Qwen3-VL are installed,
+and are skipped otherwise. Generating pictures and fine-tuning on images need
+the `ideogram` extra (`pip install -e ".[ideogram]"`), for the text encoder's
+tokenizer and image files, and a checkpoint in diffusers' layout, such as a
+snapshot of `ideogram-ai/ideogram-4-fp8`, whose weights are under Ideogram's
+non-commercial license. `--model=maxdiffusion:ideogram4` needs
 MaxDiffusion's Ideogram branch in place of the pinned commit:
 `yaomingamd/maxdiffusion` at `6db5c172` (branch `ymmu/ideogram_v4_training`),
 which is not upstream.
@@ -232,13 +233,14 @@ XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" python -m jax_titan.trainer.train \
 
 # A picture from Ideogram 4's published weights, on one GPU; the recipe also
 # fine-tunes the model on images.
-python -m jax_titan.models.ideogram_generate --checkpoint=$CKPT \
+HIP_VISIBLE_DEVICES=0 python -m jax_titan.models.ideogram_generate --checkpoint=$CKPT \
   --prompt=@caption.json --out=picture.png
 ```
 
-`--model_overrides` takes a JSON object of MaxText config or FLUX.1
-transformer settings, for example
-`'{"base_num_decoder_layers": 4}'` for a 4-layer MaxText model.
+`--model_overrides` takes a JSON object of MaxText config, FLUX.1 transformer
+or Ideogram 4 config settings, for example `'{"base_num_decoder_layers": 4}'`
+for a 4-layer MaxText model. For Ideogram 4 it also takes `dtype` and, for
+JAX-Titan's own model, `timestep_mean` and `timestep_std`.
 
 `--ops` picks operator providers per op, with native JAX as the fallback:
 `--ops=attention=te` runs TE's fused attention, and

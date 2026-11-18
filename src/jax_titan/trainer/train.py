@@ -6,7 +6,7 @@
 such as `maxtext:llama3.1-8b`, or `maxdiffusion:flux-dev` or
 `maxdiffusion:ideogram4` (see `jax_titan.trainer.adapters`).
 
-`--parallel=dp` and `--parallel=fsdp` train the same Llama on the same batches
+`--parallel=dp` and `--parallel=fsdp` train the same model on the same batches
 without the pipeline, as one `jax.jit` program over all devices.
 
 With `--checkpoint_dir`, training resumes from the latest checkpoint there.
@@ -119,7 +119,7 @@ def parse_args(argv=None):
   parser.add_argument(
       "--text_tokens", type=int, default=0,
       help="Image models: text tokens per sample; default 512 for flux-dev and "
-      "256 for flux-schnell and Ideogram 4.",
+      "256 for flux-schnell and Ideogram 4. A cache of samples (--data) sets its own.",
   )
   parser.add_argument("--steps", type=int, default=50)
   parser.add_argument("--lr", type=float, default=3e-4)
@@ -129,10 +129,10 @@ def parse_args(argv=None):
       help="Clip by the gradient norm over all stages together.",
   )
   parser.add_argument(
-      "--data",
-      default=str(paths.work_dir() / "data/wikitext103_train.llama3.bin"),
-      help="uint32 token file, or 'synthetic'. Image models train on synthetic "
-      "batches; ideogram4 also on a cache directory that jax_titan.data.ideogram wrote.",
+      "--data", default="",
+      help="Token models: a uint32 token file (default: the WikiText-103 train file) or "
+      "'synthetic'. Image models train on synthetic batches; ideogram4 also on a cache "
+      "directory that jax_titan.data.ideogram wrote.",
   )
   parser.add_argument("--remat", action=argparse.BooleanOptionalAction, default=True)
   parser.add_argument(
@@ -161,7 +161,7 @@ def parse_args(argv=None):
       "--eval_data",
       default=str(paths.work_dir() / "data/wikitext103_validation.llama3.bin"),
       help="uint32 token file to validate on. Synthetic training data validates on "
-      "held-out synthetic batches.",
+      "held-out synthetic batches, and a cache of samples on the images it holds out.",
   )
   parser.add_argument(
       "--power_sample_s", type=float, default=1.0,
@@ -509,9 +509,10 @@ def main(argv=None):
   )
 
   ops.set_policy(args.ops)
-  adapter = ":" in args.model or args.model in adapters.MODELS
+  # A staged model, which jax_titan.trainer.adapters builds a layout for.
+  staged = ":" in args.model or args.model in adapters.MODELS
   if args.reduce_grads is None:
-    args.reduce_grads = "microbatch" if adapter else "step"
+    args.reduce_grads = "microbatch" if staged else "step"
   tp = f", tensor parallel {args.tensor_parallel}" if args.tensor_parallel > 1 else ""
   if args.parallel == "mpmd":
     description = (
@@ -536,7 +537,7 @@ def main(argv=None):
   optimizer = optax.adamw(lr, b1=0.9, b2=0.95, eps=1e-8, weight_decay=0.1, mask=_decay_mask)
 
   mb, num_mb, seq = args.microbatch_size, args.microbatches, args.seq_len
-  if adapter:
+  if staged:
     layout, work = adapters.build(args, devices, optimizer)
   else:
     if args.init_from:
@@ -574,7 +575,7 @@ def main(argv=None):
     raise ValueError(f"{layout.structure} has no validation step")
   if args.save_params:
     if layout.export is None:
-      raise NotImplementedError(f"--save_params writes the parameters of {adapters.MODELS[0]} only")
+      raise NotImplementedError("--save_params writes the parameters of ideogram4 only")
     if os.path.exists(args.save_params):
       raise FileExistsError(f"--save_params={args.save_params} exists")
 
@@ -624,11 +625,12 @@ def main(argv=None):
       return rng.integers(0, work.vocab_size, (num_mb * mb, seq + 1), dtype=np.int32)
 
   else:
-    sampler = WindowSampler(args.data, seq, seed=args.seed, step=start)
-    print(f"data: {args.data} ({sampler.num_tokens / 1e6:.1f}M tokens)", flush=True)
+    path = args.data or str(paths.work_dir() / "data/wikitext103_train.llama3.bin")
+    sampler = WindowSampler(path, seq, seed=args.seed, step=start)
+    print(f"data: {path} ({sampler.num_tokens / 1e6:.1f}M tokens)", flush=True)
     if sampler.max_token() >= work.vocab_size:
       raise ValueError(
-          f"{args.data} has token ids up to {sampler.max_token()}, beyond "
+          f"{path} has token ids up to {sampler.max_token()}, beyond "
           f"{args.model}'s vocabulary of {work.vocab_size}"
       )
 

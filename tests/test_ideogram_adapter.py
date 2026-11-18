@@ -26,11 +26,12 @@ FLAGS = [
 ]
 
 
-def _has_ideogram():
-  try:
-    return importlib.util.find_spec("maxdiffusion.models.ideogram") is not None
-  except ModuleNotFoundError:
-    return False
+def _has_ideogram() -> bool:
+  """Whether MaxDiffusion is installed from its Ideogram branch, without importing it."""
+  spec = importlib.util.find_spec("maxdiffusion")
+  return spec is not None and any(
+      (pathlib.Path(root) / "models/ideogram").is_dir()
+      for root in spec.submodule_search_locations or ())
 
 
 pytestmark = pytest.mark.skipif(not _has_ideogram(), reason="needs MaxDiffusion's Ideogram branch")
@@ -163,8 +164,8 @@ def test_native_model_matches(num_stages, blocks):
 
 
 def test_train_step_matches_the_trainer():
-  """One step of the branch's trainer against the step JAX-Titan's layouts run, for both models."""
-  trainer = pytest.importorskip("maxdiffusion.trainers.ideogram_trainer")
+  """One step of the branch's trainer against the same step put together from the loss, the
+  clipping and the update of JAX-Titan's layouts, for both models."""
   import types  # pylint: disable=g-import-not-at-top
 
   import jax  # pylint: disable=g-import-not-at-top
@@ -175,7 +176,7 @@ def test_train_step_matches_the_trainer():
   from jax_titan import mpmd as jt_mpmd  # pylint: disable=g-import-not-at-top
   from jax_titan.models import ideogram  # pylint: disable=g-import-not-at-top
   from jax_titan.models.adapters import ideogram as ig  # pylint: disable=g-import-not-at-top
-  from jax_titan.trainer import adapters  # pylint: disable=g-import-not-at-top
+  from maxdiffusion.trainers import ideogram_trainer as trainer  # pylint: disable=g-import-not-at-top
 
   adapter, native, params, native_params = _models()
   cfg = adapter.config
@@ -219,7 +220,7 @@ def test_train_step_matches_the_trainer():
   np.testing.assert_allclose(t, schedule(u), rtol=1e-5)
   np.testing.assert_allclose(ideogram.timesteps(z, resolution, mean=0.5, std=1.0), t, rtol=1e-5)
 
-  img, target = adapters.ideogram_noised(latents, noise, t)
+  img, target = ideogram.noised(latents, noise, t)
   x = {**x, "img": img, "timestep": t}
 
   def step(model, stage_params):
@@ -251,17 +252,22 @@ def _run(log, *flags):
   return {r["step"]: r for r in records.steps(records.read(log))}
 
 
+@pytest.fixture(scope="module")
+def dp_reference(tmp_path_factory):
+  return _run(tmp_path_factory.mktemp("dp") / "dp.jsonl", "--parallel=dp")
+
+
 @pytest.mark.parametrize("flags", [["--parallel=fsdp"], ["--parallel=mpmd", "--num_stages=2"]],
                          ids=["fsdp", "pipeline"])
-def test_layout_matches_data_parallel_reference(flags, tmp_path):
-  reference = _run(tmp_path / "dp.jsonl", "--parallel=dp")
+def test_layout_matches_data_parallel_reference(flags, dp_reference, tmp_path):
   layout = _run(tmp_path / "layout.jsonl", *flags)
   for step in range(4):
-    assert layout[step]["loss"] == pytest.approx(reference[step]["loss"], rel=1e-5), step
-    assert layout[step]["grad_norm"] == pytest.approx(reference[step]["grad_norm"], rel=1e-4), step
+    assert layout[step]["loss"] == pytest.approx(dp_reference[step]["loss"], rel=1e-5), step
+    assert layout[step]["grad_norm"] == pytest.approx(
+        dp_reference[step]["grad_norm"], rel=1e-4), step
 
 
-def test_native_model_trains_like_the_adapter(tmp_path):
+def test_native_model_trains_like_the_adapter(dp_reference, tmp_path):
   """From the adapter's initial weights and on its batches, JAX-Titan's own model trains alike."""
   import dataclasses  # pylint: disable=g-import-not-at-top
 
@@ -272,9 +278,9 @@ def test_native_model_trains_like_the_adapter(tmp_path):
   # The branch's training timesteps, not the native model's defaults.
   overrides = dataclasses.asdict(native.config) | {
       "dtype": "float32", "timestep_mean": 0.5, "timestep_std": 1.0}
-  reference = _run(tmp_path / "adapter.jsonl", "--parallel=dp")
   trained = _run(tmp_path / "native.jsonl", "--parallel=dp", "--model=ideogram4",
                  "--model_overrides=" + json.dumps(overrides), f"--init_from={tmp_path / 'init'}")
   for step in range(4):
-    assert trained[step]["loss"] == pytest.approx(reference[step]["loss"], rel=1e-5), step
-    assert trained[step]["grad_norm"] == pytest.approx(reference[step]["grad_norm"], rel=1e-4), step
+    assert trained[step]["loss"] == pytest.approx(dp_reference[step]["loss"], rel=1e-5), step
+    assert trained[step]["grad_norm"] == pytest.approx(
+        dp_reference[step]["grad_norm"], rel=1e-4), step

@@ -3,17 +3,15 @@
 The architecture follows diffusers' `AutoencoderKLFlux2`: a convolutional
 encoder and decoder of residual blocks with one attention block in the
 middle, 8x smaller latents of 32 channels. Images are [batch, height, width,
-3] in [-1, 1] and latents [batch, height / 8, width / 8, 32]. The
-transformer's image tokens are 2x2 patches of the latents, normalized with
-the autoencoder's running statistics (`to_tokens`, `from_tokens`).
+3] in [-1, 1] and latents [batch, height / 8, width / 8, 32]. A transformer's
+image tokens are 2x2 patches of the latents, normalized with the statistics
+of the model that reads them (`to_tokens`, `from_tokens`).
 
 The model is frozen and small, so it runs in fp32 on one device, outside any
 mesh.
 """
 
 import dataclasses
-import json
-import pathlib
 
 import jax
 import jax.numpy as jnp
@@ -34,21 +32,10 @@ class Flux2VaeConfig:
   layers_per_block: int = 2
   norm_num_groups: int = 32
   patch_size: tuple[int, int] = (2, 2)
-  batch_norm_eps: float = 1e-4
 
   @property
   def token_channels(self) -> int:
     return self.latent_channels * self.patch_size[0] * self.patch_size[1]
-
-
-def pretrained_config(path) -> Flux2VaeConfig:
-  """The config of published weights, from the `config.json` beside them."""
-  path = pathlib.Path(path)
-  with open((path if path.is_dir() else path.parent) / "config.json", encoding="utf-8") as f:
-    values = json.load(f)
-  names = {f.name for f in dataclasses.fields(Flux2VaeConfig)}
-  return Flux2VaeConfig(**{
-      k: tuple(v) if isinstance(v, list) else v for k, v in values.items() if k in names})
 
 
 def params_from_tensors(tensors: dict, cfg: Flux2VaeConfig) -> dict:
@@ -102,15 +89,14 @@ def params_from_tensors(tensors: dict, cfg: Flux2VaeConfig) -> dict:
       "post_quant_conv": conv("post_quant_conv"),
       "decoder": {"conv_in": conv("decoder.conv_in"), "mid": mid("decoder.mid_block"), "up": up,
                   "norm_out": norm("decoder.conv_norm_out"), "conv_out": conv("decoder.conv_out")},
-      "token_mean": array("bn.running_mean"),
-      "token_std": np.sqrt(array("bn.running_var") + np.float32(cfg.batch_norm_eps)),
   }
 
 
-def pretrained_params(path, cfg: Flux2VaeConfig) -> dict:
-  """fp32 parameters, on the host, from the published weights at `path`, a
-  safetensors file or a directory of them."""
-  return params_from_tensors(pretrained.read(path), cfg)
+def load(path) -> tuple[Flux2VaeConfig, dict]:
+  """The config and the fp32 parameters, on the default device, of the published
+  weights at `path`, a safetensors file or a directory of them."""
+  cfg = pretrained.config(Flux2VaeConfig, path)
+  return cfg, pretrained.to_device(params_from_tensors(pretrained.read(path), cfg))
 
 
 def _conv(x, p, stride=1, padding="SAME"):
@@ -177,21 +163,21 @@ def decode(cfg: Flux2VaeConfig, params: dict, latents: jax.Array) -> jax.Array:
   return _conv(jax.nn.silu(_group_norm(x, p["norm_out"], groups)), p["conv_out"])
 
 
-def to_tokens(cfg: Flux2VaeConfig, params: dict, latents: jax.Array) -> jax.Array:
-  """The transformer's image tokens [batch, tokens, token_channels] of latents:
-  2x2 patches in row order, each normalized by the running statistics."""
+def to_tokens(cfg: Flux2VaeConfig, latents: jax.Array, mean, std) -> jax.Array:
+  """A transformer's image tokens [batch, tokens, token_channels] of latents:
+  2x2 patches in row order, normalized by `mean` and `std` per token channel."""
   b, h, w, c = latents.shape
   ph, pw = cfg.patch_size
   x = latents.reshape(b, h // ph, ph, w // pw, pw, c).transpose(0, 1, 3, 2, 4, 5)
   x = x.reshape(b, (h // ph) * (w // pw), ph * pw * c)
-  return (x - params["token_mean"]) / params["token_std"]
+  return (x - mean) / std
 
 
-def from_tokens(cfg: Flux2VaeConfig, params: dict, tokens: jax.Array, rows: int) -> jax.Array:
+def from_tokens(cfg: Flux2VaeConfig, tokens: jax.Array, rows: int, mean, std) -> jax.Array:
   """The latents of image tokens laid out in `rows` rows, the inverse of `to_tokens`."""
   b, n, _ = tokens.shape
   ph, pw = cfg.patch_size
   columns, c = n // rows, cfg.latent_channels
-  x = tokens.astype(jnp.float32) * params["token_std"] + params["token_mean"]
+  x = tokens.astype(jnp.float32) * std + mean
   x = x.reshape(b, rows, columns, ph, pw, c).transpose(0, 1, 3, 2, 4, 5)
   return x.reshape(b, rows * ph, columns * pw, c)

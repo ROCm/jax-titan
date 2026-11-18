@@ -6,6 +6,7 @@ float8 e4m3 with one fp32 scale per output row, `<name>.weight_scale`; the
 weight is their product.
 """
 
+import dataclasses
 import json
 import pathlib
 import struct
@@ -28,6 +29,25 @@ def is_safetensors(path) -> bool:
   return path.suffix == ".safetensors" or (path.is_dir() and any(path.glob("*.safetensors")))
 
 
+def config(cls, path, select=lambda values: values):
+  """`cls`, a dataclass, from the fields it shares with the `config.json` beside
+  the published weights at `path`; `select` picks the part of the file to read."""
+  path = pathlib.Path(path)
+  with open((path if path.is_dir() else path.parent) / "config.json", encoding="utf-8") as f:
+    values = select(json.load(f))
+  names = {f.name for f in dataclasses.fields(cls)}
+  return cls(**{k: tuple(v) if isinstance(v, list) else v for k, v in values.items() if k in names})
+
+
+def to_device(tree, dtype=np.float32):
+  """`tree` on the default device in `dtype`, cast there: a host cast of fp32
+  weights to bf16 is slow."""
+  import jax  # pylint: disable=g-import-not-at-top
+  import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+
+  return jax.tree.map(lambda x: jnp.asarray(x).astype(dtype), tree)
+
+
 def read(path) -> dict[str, np.ndarray]:
   """The tensors by name, mapped read-only into memory, of a safetensors file or
   of every safetensors file in a directory."""
@@ -43,6 +63,8 @@ def read(path) -> dict[str, np.ndarray]:
     header.pop("__metadata__", None)
     data = np.memmap(file, dtype=np.uint8, mode="r", offset=8 + size)
     for name, entry in header.items():
+      if name in tensors:
+        raise ValueError(f"{name} is in more than one file of {path}")
       start, end = entry["data_offsets"]
       tensors[name] = data[start:end].view(_DTYPES[entry["dtype"]]).reshape(entry["shape"])
   return tensors
@@ -52,7 +74,7 @@ def write(path, tensors: dict[str, np.ndarray]) -> None:
   """Writes `tensors` as one safetensors file."""
   header, offset, blobs = {}, 0, []
   for name, value in tensors.items():
-    value = np.ascontiguousarray(value)
+    value = np.asarray(value, order="C")
     blob = value.tobytes()
     header[name] = {"dtype": _NAMES[value.dtype], "shape": list(value.shape),
                     "data_offsets": [offset, offset + len(blob)]}

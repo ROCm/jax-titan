@@ -9,7 +9,6 @@ for text alone the model's three-axis rotary embedding is the usual one.
 """
 
 import dataclasses
-import json
 import pathlib
 
 import jax
@@ -43,15 +42,13 @@ class Qwen3Config:
 
 def pretrained_config(path) -> Qwen3Config:
   """The config of published weights, from the `config.json` beside them."""
-  path = pathlib.Path(path)
-  with open((path if path.is_dir() else path.parent) / "config.json", encoding="utf-8") as f:
-    values = json.load(f)
-  values = values.get("text_config", values)
-  names = {f.name for f in dataclasses.fields(Qwen3Config)}
-  fields = {k: v for k, v in values.items() if k in names}
-  if "rope_theta" in values.get("rope_parameters", {}):
-    fields["rope_theta"] = float(values["rope_parameters"]["rope_theta"])
-  return Qwen3Config(**fields)
+
+  def text_tower(values):
+    values = values.get("text_config", values)
+    theta = values.get("rope_parameters", {}).get("rope_theta", values.get("rope_theta"))
+    return values if theta is None else values | {"rope_theta": float(theta)}
+
+  return pretrained.config(Qwen3Config, path, text_tower)
 
 
 def init_params(cfg: Qwen3Config, key: jax.Array) -> dict:
@@ -114,10 +111,11 @@ def params_from_tensors(tensors: dict, cfg: Qwen3Config) -> dict:
   }
 
 
-def pretrained_params(path, cfg: Qwen3Config) -> dict:
-  """`init_params`-shaped fp32 parameters, on the host, from the published
-  weights at `path`, a safetensors file or a directory of them."""
-  return params_from_tensors(pretrained.read(path), cfg)
+def load(path, dtype=jnp.bfloat16) -> tuple[Qwen3Config, dict]:
+  """The config and the parameters in `dtype`, on the default device, of the
+  published weights at `path`, a safetensors file or a directory of them."""
+  cfg = pretrained_config(path)
+  return cfg, pretrained.to_device(params_from_tensors(pretrained.read(path), cfg), dtype)
 
 
 def tokenize(tokenizer_dir, prompts: list[str]) -> tuple[np.ndarray, np.ndarray]:

@@ -9,14 +9,22 @@ image pipeline exists. `--model=ideogram4` trains JAX-Titan's own Ideogram 4
 tokens and text features (`jax_titan.data.ideogram`). They run as a Shardy MPMD
 pipeline with data parallelism inside each stage, reducing gradients in every
 microbatch's backward pass, and attention in native JAX unless the ops policy
-names attention. `--parallel=dp` runs the same stages, weights and batches as
-one data-parallel `jax.jit` program, the no-pipeline reference; for Ideogram
-4, `--parallel=fsdp` also shards parameters and optimizer state.
+names attention. Ideogram 4's attention does not follow the policy: the native
+model passes a mask, which the providers decline, and the branch's model runs
+its own attention. `--parallel=dp` runs the same stages, weights and batches
+as one data-parallel `jax.jit` program, the no-pipeline reference; for
+Ideogram 4, `--parallel=fsdp` also shards parameters and optimizer state.
+
+The layouts here take a staged model, any object with `init(seed)` and
+`abstract(seed)`, the parameters of each stage and their shapes, and
+`stage_fns()`, one function per stage, the last of which returns the loss.
+`--init_from` needs its `load(path)`, `--parallel=fsdp` its
+`logical_axes(path, leaf)` and `--save_params` its `merge(stage_params)`.
 """
 
+import dataclasses
 import functools
 import json
-import pathlib
 
 from jax_titan.trainer.layout import EVAL_STEPS, Layout, Workload, abstract, placement
 
@@ -165,7 +173,7 @@ def _spmd_layout(args, mesh, model, optimizer, inputs, targets, split_batch) -> 
 
   The step runs the stages over all microbatches at once, which gives the
   pipeline's loss and gradients when microbatches hold equal token counts, and
-  updates the replicated state the way the pipeline does. `inputs`, `targets`
+  updates the replicated or sharded state the way the pipeline does. `inputs`, `targets`
   and `split_batch` are `_mpmd_layout`'s: batched leaves lose their
   microbatch axis, and per-microbatch constants keep the first microbatch's.
   """
@@ -378,25 +386,22 @@ def _maxdiffusion(args, flavor, devices, optimizer):
   return layout, work
 
 
-def ideogram_noised(latents, noise, t):
-  """Ideogram 4's input and velocity target for latents [..., tokens, channels]
-  noised at timesteps `t` [...], where 0 is noise and 1 is data."""
-  t = t[..., None, None]
-  return (1 - t) * noise + t * latents, latents - noise
-
-
 def _ideogram(args, devices, optimizer, native: bool):
   """Ideogram 4, JAX-Titan's own (`native`) or from MaxDiffusion's Ideogram branch.
 
   Besides config fields, `--model_overrides` takes `dtype` and, for the native
   model, `timestep_mean` and `timestep_std` of the training timesteps. The
-  native model also trains on a cache of real samples (`--data`), with a tenth
-  of its images, at least one, held out for validation when `--eval_every` is set.
+  native model's config starts from the `config.json` of published weights
+  that `--init_from` names. It also trains on a cache of real samples
+  (`--data`), with a tenth of its images, at least one, held out for
+  validation when `--eval_every` is set, so a run that resumes with that flag
+  changed trains on other images.
   """
   import jax  # pylint: disable=g-import-not-at-top
   import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
   import numpy as np  # pylint: disable=g-import-not-at-top
   from jax_titan import mpmd as jt_mpmd  # pylint: disable=g-import-not-at-top
+  from jax_titan.models import ideogram, pretrained  # pylint: disable=g-import-not-at-top
 
   P = jax.sharding.PartitionSpec  # pylint: disable=invalid-name
 
@@ -404,16 +409,18 @@ def _ideogram(args, devices, optimizer, native: bool):
   dtype = jnp.dtype(overrides.pop("dtype", "bfloat16"))
   schedule = {}
   if native:
-    from jax_titan.models import ideogram as ig  # pylint: disable=g-import-not-at-top
-
-    config = ig.IdeogramConfig
+    ig, config = ideogram, ideogram.IdeogramConfig
     schedule = {k: overrides.pop(f"timestep_{k}") for k in ("mean", "std")
                 if f"timestep_{k}" in overrides}
   else:
     from jax_titan.models.adapters import ideogram as ig  # pylint: disable=g-import-not-at-top
 
     config = ig.Ideogram4Config
-  cfg = config(**{k: tuple(v) if isinstance(v, list) else v for k, v in overrides.items()})
+  fields = {k: tuple(v) if isinstance(v, list) else v for k, v in overrides.items()}
+  if native and args.init_from and pretrained.is_safetensors(args.init_from):
+    cfg = dataclasses.replace(ideogram.pretrained_config(args.init_from), **fields)
+  else:
+    cfg = config(**fields)
 
   def make_mesh(d):
     return jax.sharding.Mesh(
@@ -433,9 +440,9 @@ def _ideogram(args, devices, optimizer, native: bool):
   image_tokens = side * side
   text_tokens = args.text_tokens or 256
   cache, held_out = None, 0
-  if pathlib.Path(args.data).is_dir():
+  if args.data not in ("", "synthetic"):
     if not native:
-      raise NotImplementedError(f"--data reads a cache of samples for {MODELS[0]} only")
+      raise NotImplementedError("--data reads a cache of samples for ideogram4 only")
     from jax_titan.data import ideogram as data  # pylint: disable=g-import-not-at-top
 
     cache = data.Cache.open(args.data)
@@ -480,7 +487,7 @@ def _ideogram(args, devices, optimizer, native: bool):
       batch_ids = ig.padded_sequence_ids(side, valid)
     noise = rng.standard_normal(latent_shape, np.float32)
     t = ig.timesteps(rng.standard_normal(b), args.resolution, **schedule)
-    img, target = ideogram_noised(latents, noise, t)
+    img, target = ideogram.noised(latents, noise, t)
     x = {"img": img, "txt": text, "timestep": t, **batch_ids}
     return x, target
 
@@ -508,13 +515,15 @@ def build(args, devices, optimizer) -> tuple[Layout, Workload]:
   ideogram = native or (provider == "maxdiffusion" and name == "ideogram4")
   if args.stage_fsdp or args.tensor_parallel != 1 or (args.parallel == "fsdp" and not ideogram):
     raise NotImplementedError(
-        f"{args.model} trains with data parallelism only: as an MPMD pipeline with it inside "
-        "stages, or as --parallel=dp"
+        f"{args.model} trains as an MPMD pipeline with data parallelism inside stages, or as "
+        "--parallel=dp" + (" or --parallel=fsdp" if ideogram else "")
     )
   if args.parallel == "mpmd" and args.reduce_grads != "microbatch":
     raise NotImplementedError(f"{args.model} reduces gradients per microbatch only")
   if args.init_from and provider != "maxtext" and not native:
-    raise NotImplementedError(f"--init_from loads parameters of maxtext: models and {MODELS[0]}")
+    raise NotImplementedError("--init_from loads parameters of maxtext: models and ideogram4")
+  if provider == "maxdiffusion" and not ideogram and args.data not in ("", "synthetic"):
+    raise NotImplementedError(f"{args.model} trains on synthetic batches only")
   if args.parallel != "mpmd" and (args.microbatches * args.microbatch_size) % len(devices):
     raise ValueError(
         f"--parallel={args.parallel} splits all {args.microbatches * args.microbatch_size} "

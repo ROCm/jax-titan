@@ -1,8 +1,9 @@
 """Qwen3-VL's text tower gives transformers' hidden states, and padding changes nothing."""
 
 import importlib.util
-import os
+import pathlib
 
+import ideogram_checkpoint
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -24,15 +25,19 @@ def _tokens(cfg, rng, tokens=7, padded=3):
   return token_ids, valid
 
 
-@pytest.mark.skipif(
-    importlib.util.find_spec("torch") is None or importlib.util.find_spec("transformers") is None,
-    reason="needs torch and transformers")
-def test_features_match_transformers():
-  os.environ.setdefault("USE_TF", "0")
-  import torch  # pylint: disable=g-import-not-at-top
+def _has_reference() -> bool:
+  """Whether torch and a transformers with Qwen3-VL are installed, without importing them."""
+  spec = importlib.util.find_spec("transformers")
+  return importlib.util.find_spec("torch") is not None and spec is not None and any(
+      (pathlib.Path(root) / "models/qwen3_vl").is_dir()
+      for root in spec.submodule_search_locations or ())
 
-  hf = pytest.importorskip("transformers.models.qwen3_vl.modeling_qwen3_vl")
-  hf_config = pytest.importorskip("transformers.models.qwen3_vl.configuration_qwen3_vl")
+
+@pytest.mark.skipif(not _has_reference(), reason="needs torch and transformers with Qwen3-VL")
+def test_features_match_transformers():
+  import torch  # pylint: disable=g-import-not-at-top
+  from transformers.models.qwen3_vl import configuration_qwen3_vl as hf_config  # pylint: disable=g-import-not-at-top
+  from transformers.models.qwen3_vl import modeling_qwen3_vl as hf  # pylint: disable=g-import-not-at-top
 
   cfg = qwen3.Qwen3Config(**CONFIG)
   torch.manual_seed(0)
@@ -89,3 +94,16 @@ def test_padding_changes_no_feature():
   again = np.asarray(qwen3.features(cfg, params, changed, valid, jnp.float32))
   np.testing.assert_array_equal(again[0, :-1], out[0, :-1])
   assert not np.array_equal(again[0, -1], out[0, -1])
+
+
+def test_tokenize_wraps_in_the_chat_format_and_pads_on_the_left(tmp_path):
+  ideogram_checkpoint.write_tokenizer(tmp_path / "tokenizer")
+  token_ids, valid = qwen3.tokenize(tmp_path / "tokenizer", ["a", "a b c"])
+
+  def chat(*prompt):
+    words = ("<|im_start|>", "user", *prompt, "<|im_end|>", "<|im_start|>", "assistant")
+    return [ideogram_checkpoint.WORDS.index(w) for w in words]
+
+  assert token_ids.dtype == np.int32 and valid.dtype == bool
+  np.testing.assert_array_equal(valid, [[False] * 2 + [True] * 6, [True] * 8])
+  np.testing.assert_array_equal(token_ids, [[0, 0] + chat("a"), chat("a", "b", "c")])

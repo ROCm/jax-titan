@@ -67,7 +67,8 @@ def attention(q, k, v, *, causal: bool = True, scale: float | None = None, mask=
   `scale` defaults to head_dim ** -0.5. `mask` is boolean, [batch or 1, heads
   or 1, seq, seq], and true where a query position attends to a key position.
   """
-  return registry.dispatch("attention", q, k, v, causal=causal, scale=scale, mask=mask)
+  masked = {} if mask is None else {"mask": mask}
+  return registry.dispatch("attention", q, k, v, causal=causal, scale=scale, **masked)
 
 
 def rms_norm(x, weight, eps: float):
