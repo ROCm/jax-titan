@@ -2,9 +2,10 @@
 
   python -m jax_titan.trainer.train --model=llama3.1-8b --num_stages=2
 
-`--model` is a JAX-Titan Llama flavor, `ideogram4`, `maxtext:<MaxText model>`
-such as `maxtext:llama3.1-8b`, or `maxdiffusion:flux-dev` or
-`maxdiffusion:ideogram4` (see `jax_titan.trainer.adapters`).
+`--model` is a JAX-Titan Llama flavor, `ideogram4`, `command-a-plus`,
+`maxtext:<MaxText model>` such as `maxtext:llama3.1-8b`, or
+`maxdiffusion:flux-dev` or `maxdiffusion:ideogram4` (see
+`jax_titan.trainer.adapters`).
 
 `--parallel=dp` and `--parallel=fsdp` train the same model on the same batches
 without the pipeline, as one `jax.jit` program over all devices.
@@ -29,20 +30,23 @@ from jax_titan.trainer.layout import placement as layout_placement
 
 _NORM_PARAMS = ("attn_norm", "mlp_norm", "final_norm", "attn_out_norm", "mlp_out_norm", "q_norm",
                 "k_norm", "text_norm")
+# Matched against a parameter's own name only: MaxDiffusion's FLUX.1 keeps kernels under a
+# module named `norm`.
+_NORM_LEAVES = ("norm", "norm1", "norm2", "norm1_bias", "norm2_bias", "final_norm_bias")
 
 
 def parse_args(argv=None):
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument(
       "--model", default="llama3.1-8b",
-      help="A Llama flavor (llama3.1-8b, llama3-test), ideogram4, maxtext:<MaxText "
-      "model name>, maxdiffusion:flux-dev or maxdiffusion:flux-schnell, or "
+      help="A Llama flavor (llama3.1-8b, llama3-test), ideogram4, command-a-plus, "
+      "maxtext:<MaxText model name>, maxdiffusion:flux-dev or maxdiffusion:flux-schnell, or "
       "maxdiffusion:ideogram4 with MaxDiffusion's Ideogram branch.",
   )
   parser.add_argument(
       "--model_overrides", default="",
-      help="JSON object of model config overrides for ideogram4 and for maxtext: "
-      "and maxdiffusion: models, e.g. '{\"base_num_decoder_layers\": 4}'.",
+      help="JSON object of model config overrides for ideogram4, command-a-plus and for "
+      "maxtext: and maxdiffusion: models, e.g. '{\"base_num_decoder_layers\": 4}'.",
   )
   parser.add_argument(
       "--ops", default="",
@@ -55,7 +59,7 @@ def parse_args(argv=None):
       help="mpmd: Shardy MPMD pipeline, data parallel inside each stage. "
       "dp, fsdp: no pipeline; one jax.jit program over all devices with "
       "replicated or sharded parameters and optimizer state. Besides the Llama "
-      "flavors, only ideogram4 and maxdiffusion:ideogram4 have fsdp.",
+      "flavors, only ideogram4, command-a-plus and maxdiffusion:ideogram4 have fsdp.",
   )
   parser.add_argument(
       "--num_stages", type=int, default=2,
@@ -110,7 +114,10 @@ def parse_args(argv=None):
       help="Sequences per microbatch, sharded across a stage's data-parallel "
       "ranks. dp and fsdp run all microbatches as one batch.",
   )
-  parser.add_argument("--seq_len", type=int, default=2048)
+  parser.add_argument(
+      "--seq_len", type=int, default=2048,
+      help="Tokens per sequence. A cache of conversations (--data) sets its own.",
+  )
   parser.add_argument(
       "--resolution", type=int, default=1024,
       help="Image models: image side in pixels; the model sees (resolution / 16)^2 "
@@ -132,7 +139,8 @@ def parse_args(argv=None):
       "--data", default="",
       help="Token models: a uint32 token file (default: the WikiText-103 train file) or "
       "'synthetic'. Image models train on synthetic batches; ideogram4 also on a cache "
-      "directory that jax_titan.data.ideogram wrote.",
+      "directory that jax_titan.data.ideogram wrote. command-a-plus also takes a cache of "
+      "conversations that jax_titan.data.command_a wrote.",
   )
   parser.add_argument("--remat", action=argparse.BooleanOptionalAction, default=True)
   parser.add_argument(
@@ -161,7 +169,7 @@ def parse_args(argv=None):
       "--eval_data",
       default=str(paths.work_dir() / "data/wikitext103_validation.llama3.bin"),
       help="uint32 token file to validate on. Synthetic training data validates on "
-      "held-out synthetic batches, and a cache of samples on the images it holds out.",
+      "held-out synthetic batches, and a cache on the samples it holds out.",
   )
   parser.add_argument(
       "--power_sample_s", type=float, default=1.0,
@@ -181,14 +189,18 @@ def parse_args(argv=None):
       "--init_from", default="",
       help="maxtext: models start from this MaxText parameter checkpoint, e.g. "
       "pretrained weights converted with MaxText's checkpoint_conversion/to_maxtext.py, "
-      "and ideogram4 from published transformer weights (a directory of safetensors files) "
-      "or from parameters that --save_params wrote, instead of a random initialization. "
-      "A checkpoint in --checkpoint_dir wins.",
+      "and ideogram4 and command-a-plus from published weights (a directory of safetensors "
+      "files) or from parameters that --save_params wrote, instead of a random initialization. "
+      "A checkpoint in --checkpoint_dir wins for the trained parameters; the parameters a model "
+      "keeps frozen are not checkpointed and are read from here again, so a run that resumes "
+      "keeps this flag.",
   )
   parser.add_argument(
       "--save_params", default="",
       help="Writes the model's parameters here after the last step, as --init_from reads "
-      "them (ideogram4). The directory must not exist.",
+      "them (ideogram4, command-a-plus). A model with frozen parameters writes the trained "
+      "ones alone, which command_a_generate --params reads and --init_from does not. The "
+      "directory must not exist.",
   )
   parser.add_argument(
       "--checkpoint_every", type=int, default=0,
@@ -218,13 +230,14 @@ def parse_args(argv=None):
 
 
 def _decay_mask(params):
-  """Weight decay for every parameter but norm weights (MaxText's and
-  MaxDiffusion's norms hold theirs as `scale`)."""
+  """Weight decay for every parameter but the norms' (MaxText's and
+  MaxDiffusion's norms hold their weight as `scale`)."""
   import jax  # pylint: disable=g-import-not-at-top
 
   def decays(path, _):
     keys = [getattr(k, "key", None) for k in path]
-    return not any(k in _NORM_PARAMS or k == "scale" for k in keys)
+    norm = any(k in _NORM_PARAMS or k == "scale" for k in keys) or keys[-1] in _NORM_LEAVES
+    return not norm
 
   return jax.tree_util.tree_map_with_path(decays, params)
 
@@ -541,7 +554,8 @@ def main(argv=None):
     layout, work = adapters.build(args, devices, optimizer)
   else:
     if args.init_from:
-      raise NotImplementedError("--init_from loads parameters of maxtext: models and ideogram4")
+      raise NotImplementedError(
+          "--init_from loads parameters of maxtext: models, ideogram4 and command-a-plus")
     cfg = llama.FLAVORS[args.model]
     build = _build_mpmd if args.parallel == "mpmd" else _build_spmd
     layout = build(args, cfg, devices, optimizer)
@@ -561,6 +575,9 @@ def main(argv=None):
       f"{args.model} ({work.num_params / 1e9:.2f}B params) | {description}",
       flush=True,
   )
+  if layout.frozen:
+    trained = sum(x.size for x in jax.tree.leaves(layout.abstract_state[0]))
+    print(f"{trained / 1e9:.2f}B of the parameters are trained, the others are frozen", flush=True)
   log.event(
       "layout", structure=layout.structure, num_params=work.num_params,
       tokens_per_step=work.tokens_per_step, flops_per_step=work.flops_per_step,
@@ -575,10 +592,13 @@ def main(argv=None):
     raise ValueError(f"{layout.structure} has no validation step")
   if args.save_params:
     if layout.export is None:
-      raise NotImplementedError("--save_params writes the parameters of ideogram4 only")
+      raise NotImplementedError(
+          "--save_params writes the parameters of ideogram4 and command-a-plus only")
     if os.path.exists(args.save_params):
       raise FileExistsError(f"--save_params={args.save_params} exists")
 
+  # Frozen parameters are not checkpointed; a run that resumes reads them again.
+  frozen_from = os.path.abspath(args.init_from) if args.init_from else f"seed {args.seed}"
   ckpt = None
   start = 0
   if args.checkpoint_dir:
@@ -594,6 +614,12 @@ def main(argv=None):
           f"checkpoint holds {meta['model']} as {meta['structure']}, not "
           f"{args.model} as {layout.structure}"
       )
+    if layout.frozen and meta.get("frozen_from") != frozen_from:
+      raise ValueError(
+          f"the checkpoint's run took its frozen parameters from {meta.get('frozen_from')}, "
+          f"and this one would take them from {frozen_from}: resume with the same --init_from "
+          "and --seed"
+      )
     state_s = time.time() - t0
     print(f"restored step {start} from {args.checkpoint_dir} in {state_s:.1f}s", flush=True)
   else:
@@ -601,10 +627,11 @@ def main(argv=None):
     state_s = time.time() - t0
     print(f"initialized params and optimizer state in {state_s:.1f}s", flush=True)
   log.event("state", seconds=state_s, restored_step=start)
+  frozen = (layout.frozen(),) if layout.frozen else ()
 
   t0 = time.time()
   ops.reset_selections()
-  lowered = layout.step.lower(params, opt_states, layout.input_spec, layout.target_spec)
+  lowered = layout.step.lower(params, opt_states, *frozen, layout.input_spec, layout.target_spec)
   t1 = time.time()
   compiled = lowered.compile()
   t2 = time.time()
@@ -652,6 +679,7 @@ def main(argv=None):
     return {
         "step": step, "model": args.model, "structure": layout.structure,
         "data": {"seed": args.seed, "step": step}, "ops": selected,
+        **({"frozen_from": frozen_from} if layout.frozen else {}),
     }
 
   profile = [int(s) for s in args.profile_steps.split(":")] if args.profile_steps else None
@@ -681,7 +709,8 @@ def main(argv=None):
       if watchdog:
         watchdog.start(step)
       with jax.profiler.StepTraceAnnotation("train_step", step_num=step):
-        params, opt_states, loss, grad_norm = compiled(params, opt_states, tokens, targets)
+        params, opt_states, loss, grad_norm = compiled(
+            params, opt_states, *frozen, tokens, targets)
         loss, grad_norm = float(loss), float(grad_norm)
       if watchdog:
         watchdog.stop()
@@ -728,10 +757,10 @@ def main(argv=None):
         placed = [layout.put_batch(b) for b in eval_batches]
         compile_s = 0.0
         if compiled_eval is None:
-          compiled_eval = layout.eval_step.lower(params, *placed[0]).compile()
+          compiled_eval = layout.eval_step.lower(params, *frozen, *placed[0]).compile()
           compile_s = time.time() - t0
         t1 = time.time()
-        eval_loss = float(np.mean([float(compiled_eval(params, x, t)) for x, t in placed]))
+        eval_loss = float(np.mean([float(compiled_eval(params, *frozen, x, t)) for x, t in placed]))
         eval_s = time.time() - t1
         print(f"step {done:4d} | validation loss {eval_loss:.4f} over {len(placed)} batches "
               f"in {eval_s:.1f}s", flush=True)

@@ -265,6 +265,11 @@ def make_train_step(
   gradients, and `max_grad_norm` clips by it, as for a single model. When the
   norm is not finite, no stage updates and the loss comes back as NaN.
 
+  Called as `step(stage_params, opt_states, frozen, tokens, targets)`, the step
+  also takes one pytree per stage of parameters that it does not train, and
+  stage `i` gets the pair `(stage_params[i], frozen[i])` as its parameters.
+  This form reduces gradients per microbatch only: with `copy_axes` it raises.
+
   By default a stage reduces its gradients across its data-parallel ranks in
   the backward pass of every microbatch. With `copy_axes`, one pytree of axes
   per stage, each rank trains its own copy of the stage parameters stacked
@@ -304,11 +309,13 @@ def make_train_step(
           for i, fn in enumerate(stage_fns)
       ]
 
-  def loss_and_grads(stage_params, tokens, targets):
+  def loss_and_grads(stage_params, tokens, targets, frozen=None):
     if copy_axes is None:
-      return jax.value_and_grad(
-          lambda p: pipeline_loss(stage_fns, p, tokens, targets)
-      )(stage_params)
+      def loss(p):
+        p = p if frozen is None else list(zip(p, frozen))
+        return pipeline_loss(stage_fns, p, tokens, targets)
+
+      return jax.value_and_grad(loss)(stage_params)
     copies = [
         _device_copies(p, copy_axes[i], param_specs[i], mesh)
         for i, p in enumerate(stage_params)
@@ -335,8 +342,11 @@ def make_train_step(
     params, state = clipped_update(optimizer, params, grads, state, norm, max_grad_norm)
     return params, state, norm
 
-  def train_step(stage_params, opt_states, tokens, targets):
-    loss, grads = loss_and_grads(stage_params, tokens, targets)
+  def train_step(stage_params, opt_states, *batch):
+    *frozen, tokens, targets = batch
+    if frozen and copy_axes is not None:
+      raise ValueError("a step with frozen parameters reduces gradients per microbatch only")
+    loss, grads = loss_and_grads(stage_params, tokens, targets, *frozen)
     new_params, new_states = [], []
     if copy_axes is None:
       # Gradients are already summed. Named fragments here gain little and

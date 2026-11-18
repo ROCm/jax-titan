@@ -62,7 +62,7 @@ XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" timeout -s KILL 1800 python -m jax_titan.t
   --seq_len=2048 --steps=30 --run_dir=$RUN > $RUN.out 2>&1
 
 # The same step without a pipeline: --parallel=dp or --parallel=fsdp
-# (adapter models: --parallel=dp; Ideogram 4 also --parallel=fsdp).
+# (adapter models: --parallel=dp; Ideogram 4 and Command A+ also --parallel=fsdp).
 
 # Models from MaxText and MaxDiffusion (FLUX.1 trains on synthetic batches).
 ... --model=maxtext:llama3.1-8b --num_stages=2 ...
@@ -77,6 +77,18 @@ XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" timeout -s KILL 1800 python -m jax_titan.t
 ... --model=ideogram4 --parallel=fsdp --num_stages=1 --microbatches=1 \
   --microbatch_size=8 --resolution=512 --lr=1e-5 --data=$CACHE \
   --init_from=$CKPT/transformer --save_params=$OUT ...
+
+# JAX-Titan's own Command A+ on token windows, as one stage
+# (docs/recipes/command_a_plus.md); --init_from takes a checkpoint in the
+# published layout.
+... --model=command-a-plus --parallel=fsdp --num_stages=1 --lr=1e-5 ...
+
+# The published Command A+ (218.75B) fine-tuned on a cache of conversations
+# from jax_titan.data.command_a: a pipeline of 4 stages on 4 GPUs, the experts
+# and the embedding frozen, 176-185 GiB in use per GPU.
+... --model=command-a-plus --parallel=mpmd --num_stages=4 --microbatches=4 \
+  --microbatch_size=2 --lr=1e-5 --data=$CACHE --init_from=$CKPT \
+  --model_overrides='{"freeze": ["experts", "embed"]}' --save_params=$OUT ...
 ```
 
 Layout flags: `--schedule`, `--stage_fsdp`, `--tensor_parallel`,
@@ -85,11 +97,12 @@ Layout flags: `--schedule`, `--stage_fsdp`, `--tensor_parallel`,
 `docs/pipelines.md`. Operators: `--ops=attention=te` (TE fused attention) or
 `--ops=attention=aiter`; TE's FP8 GEMMs and every JAX-AITER op need
 `--per_device=shard_map` with per-step reduction, and the `ops:` lines after
-`compiled in` show what each op ran on. `maxtext:` and `maxdiffusion:` models
-and `ideogram4` support only data parallelism inside stages with gradients
-reduced per microbatch (the default for them); `--stage_layers` counts their
-decoder layers or blocks, and `--model_overrides` takes JSON config
-overrides.
+`compiled in` show what each op ran on. `maxtext:` and `maxdiffusion:` models,
+`ideogram4` and `command-a-plus` support only data parallelism inside stages
+with gradients reduced per microbatch (the default for them);
+`--stage_layers` counts their decoder layers or blocks, and
+`--model_overrides` takes JSON config overrides. `command-a-plus` is one
+stage, or more with `"freeze": ["embed"]` among its overrides.
 
 ## Monitor
 

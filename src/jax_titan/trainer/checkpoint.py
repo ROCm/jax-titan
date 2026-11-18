@@ -37,6 +37,25 @@ def restore_params(path, target):
   return params
 
 
+def saved_tree(path):
+  """The tree of the parameters `save_params` wrote, its leaves their shapes
+  and dtypes, without reading an array."""
+  checkpointer = ocp.StandardCheckpointer()
+  tree = checkpointer.metadata(pathlib.Path(path).absolute()).item_metadata.tree
+  checkpointer.close()
+  return tree
+
+
+def restore_saved(path):
+  """Returns the parameters `save_params` wrote, whatever their tree, on the
+  first local device."""
+  device = jax.sharding.make_single_device_sharding(jax.local_devices()[0])
+  target = jax.tree.map(
+      lambda leaf: jax.ShapeDtypeStruct(leaf.shape, leaf.dtype, sharding=device),
+      saved_tree(path))
+  return restore_params(path, target)
+
+
 class Checkpointer:
   """Saves every `save_every` steps, keeps the latest `keep` checkpoints.
 

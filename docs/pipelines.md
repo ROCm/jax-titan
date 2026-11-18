@@ -582,3 +582,242 @@ loss on the held-out image after the window's last step:
 
 The record of the fine-tuning run is
 [results/2026-11-18/ideogram4_finetune-yarn512_fsdp4.jsonl](results/2026-11-18/ideogram4_finetune-yarn512_fsdp4.jsonl).
+
+## Command A+ (2026-11-18, MI350X)
+
+JAX-Titan's own Command A+ (`models/command_a.py`): Cohere's sparse
+mixture-of-experts language model with its SigLIP vision tower and projector,
+the published checkpoint's layout read and written, preprocessing with the
+published chat template, tokenizer and image settings (`data/command_a.py`),
+generation (`models/command_a_generate.py`) and `--model=command-a-plus` in
+the trainer: as one stage with data parallelism or FSDP, or with the embedding
+frozen as a pipeline. Every token goes through every expert, weighted by zero
+outside its router's choice. These runs check that the model is right on GPUs,
+at reduced sizes and with the published weights; no time here is throughput of
+record.
+[recipes/command_a_plus.md](recipes/command_a_plus.md) has the commands.
+
+The model against transformers' PyTorch implementation (`cohere2_moe` and
+`cohere2_vision`, 5.23.0), with a config that keeps every branch of the
+published one, 2.2M parameters, on text, on text padded on the left and on
+text with image tiles:
+
+| What | Where | Largest difference |
+|---|---|---|
+| Logits | CPU, fp32 | 4.5e-6, of logits up to 4.5 |
+| Loss and the gradient of every parameter | CPU, fp32 | 2e-7 of the loss; 2.1e-7, of gradients up to 0.24 |
+| Logits, from a checkpoint transformers wrote | one MI350X, fp32 | 1.4e-5, of logits up to 18.6 |
+| Loss and gradients, the same checkpoint | one MI350X, fp32 | 2e-7 of the loss; 9.8e-7, of gradients up to 0.75 |
+| Greedy generation, 8 tokens after a prompt | CPU and one MI350X, fp32 | none: 16 of 16 tokens, with and without tiles |
+| Checkpoints, written by one and read by the other | CPU | none, bit for bit |
+| Rendered conversations and token ids | the published tokenizer and chat template | none, four conversations |
+| Tiles of a 1000x700 picture | Pillow here, torchvision there | 2 of 255 levels; 99.8% of values equal |
+
+In bf16 single logits move far more than their mean, in transformers' model
+as in this one: a router's choice between near-equal experts can flip. On the
+checkpoint with logits up to 18.6, on CPU:
+
+| bf16 against fp32 | Mean difference | Largest | Same top token |
+|---|---|---|---|
+| transformers' model | 0.07-0.09 | 0.8-1.8 | 94-98% |
+| This model | 0.08-0.09 | 1.4-1.9 | 95-98% |
+| This model on one MI350X | 0.07-0.09 | 1.3-1.9 | 95-100% |
+
+The trainer on 4 MI350X in fp32, a model of 8 layers and width 256 on 16
+sequences of 128 random tokens, 10 steps:
+
+| Runs compared | Loss | Gradient norm |
+|---|---|---|
+| FSDP against data parallelism, text | within 4.3e-7 | within 2.1e-5 |
+| FSDP against data parallelism, with 2 image tiles per sequence | within 4.4e-7 | within 3.3e-5 |
+| 4 GPUs against 8 CPU devices, first step | within 1.1e-7 | within 1.1e-7 |
+| 4 GPUs against 8 CPU devices, 10 steps, with tiles | within 1.6e-5 | within 2.5e-4 |
+
+A loss curve: a Command A+ of 2.11B parameters (16 layers of width 1,024, 32
+query heads of 128 on 8 key heads, 32 experts of which a token takes 8, a
+shared MLP 4 experts wide, a sliding window of 256) on WikiText-103 as Llama 3
+tokens,
+with FSDP and bf16 compute: 16 sequences of 1,024 tokens per step, AdamW at
+3e-4 after 100 warmup steps with a cosine decay, 3,000 steps, 49M of the
+text's 120M tokens. Means over 250 steps, and the loss on held-out text after
+the window's last step:
+
+| Steps | 0-249 | 250-499 | 500-749 | 750-999 | 1000-1249 | 1250-1499 | 1500-1749 | 1750-1999 | 2000-2249 | 2250-2499 | 2500-2749 | 2750-2999 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Training, 4 GPUs | 6.6162 | 5.1107 | 4.7200 | 4.4438 | 4.2515 | 4.0758 | 3.9265 | 3.8152 | 3.7159 | 3.6576 | 3.5953 | 3.5813 |
+| Training, 8 GPUs | 6.6137 | 5.1087 | 4.7183 | 4.4414 | 4.2440 | 4.0698 | 3.9238 | 3.8146 | 3.7161 | 3.6585 | 3.5963 | 3.5822 |
+| Validation, 4 GPUs | 5.3735 | 4.8104 | 4.5336 | 4.3177 | 4.1323 | 3.9766 | 3.8480 | 3.7597 | 3.6912 | 3.6405 | 3.6023 | 3.5828 |
+| Validation, 8 GPUs | 5.3714 | 4.8081 | 4.5361 | 4.3185 | 4.1227 | 3.9742 | 3.8481 | 3.7633 | 3.6951 | 3.6430 | 3.6027 | 3.5839 |
+
+| | 4x MI350X | 8x MI350X |
+|---|---|---|
+| Step time, median | 0.148 s | 0.092 s |
+| Tokens/s per GPU | 27.6k | 22.2k |
+| Memory in use per GPU, peak | 14.0 GiB on one, 11.2 GiB | 12.0 GiB on one, 5.7 GiB |
+| Compiling | 37.6 s | 55.5 s |
+| Steps with a non-finite loss | 0 | 0 |
+
+- **The model trains.** The loss starts at 12.30, above the 11.76 of a uniform
+  guess over the 128,256 tokens, and ends at 3.58 on held-out text. Predicting
+  every token by its frequency in the training text gives 7.36, so the model
+  uses context. Training and validation loss stay together: in 3,000 steps
+  the model sees less than half of the text once.
+- **4 and 8 GPUs draw one curve.** Both runs take the same batches. The means
+  over 250 steps differ by at most 0.0075 and the validation losses by at
+  most 0.0096, where the loss of a step varies by 0.13 from batch to batch.
+- **The gradient norm settles.** It falls from 7.2 to about 0.5 and stays
+  there; 90 steps of the 4-GPU run and 91 of the 8-GPU run, all within the
+  first 110, exceed the clipping norm of 1.0.
+- **The trained parameters write text.** Saved by `--save_params` after the
+  8-GPU run and loaded on one GPU in 2.7 s, the model continues
+  ` = Mount Everest = \n \n Mount Everest is the` with
+  ` second largest city in the United States . It is located in the U.S. state
+  of California .`: the grammar of the training text, and none of its facts.
+- **Image tiles train on GPUs too.** With one random 512x512 tile per
+  sequence and random tokens for its text (`"image_tiles": 1`, and
+  `"image_token_id": 128255` inside the small vocabulary), the vision tower
+  and the projector at their published sizes join
+  the trained state (2.59B parameters): 30 steps with FSDP on 4 GPUs take
+  0.355 s each with 31.5 GiB in use per GPU, the loss on random tokens moves
+  from 12.25 to 12.11 and the gradient norm falls from 2.8 to 0.38.
+- **Generation gives the same tokens on a GPU and on CPU:** 12 of 12 after a
+  prompt with a picture, in bf16 and in fp32, for a checkpoint of toy size.
+
+The published weights, `CohereLabs/command-a-plus-05-2026-bf16` at revision
+`5fb6fde5fd12`: 9 safetensors files of 437.5 GB whose SHA-256 equals what
+Hugging Face records. `command_a.load_stages` reads them stage by stage onto
+several GPUs, a run of layers on each: the host copies the stored tensors side
+by side, and the device transposes, reorders and casts them.
+`command_a_generate` runs over the stages, with only hidden states passing
+between GPUs. The reference is transformers with the same files on CPU in
+fp32, 875 GB of memory: loaded in 133 s, it answers a question of 122 tokens
+with 98 tokens in 333 s and a question about a picture, 1,407 tokens with 5
+tiles, with 138 tokens in 480 s. JAX-Titan takes the reference's token ids and
+tiles:
+
+| Prompt | Precision, GPUs | Last-position logits: largest and mean difference | Likeliest token equal | Greedy tokens equal from the start |
+|---|---|---|---|---|
+| Question, 122 tokens | fp32, 7 | 3.6e-5 and 4.5e-6, of logits up to 25.0 | 122 of 122 positions | 98 of 98 |
+| Picture, 1,407 tokens | fp32, 7 | 1.6e-4 and 2.2e-5, of logits up to 24.4 | 1,407 of 1,407 | 138 of 138 |
+| Question, 122 tokens | bf16, 4 | 0.52 and 0.065 | 120 of 122 | 35 of 98 |
+| Picture, 1,407 tokens | bf16, 4 | 1.03 and 0.087 | 1,156 of 1,407 | 9 of 138 |
+
+| | bf16 on 4 GPUs | fp32 on 7 GPUs |
+|---|---|---|
+| Loading | 65-102 s | 70 s |
+| Weights per GPU | 109 GB | 109-137 GB, for 4 or 5 layers |
+| The question: tokens, time | 98 in 50 s | 98 in 142 s |
+| The picture: tokens, time | 114 in 143 s | 138 in 924 s |
+
+- **In fp32 the published weights give transformers' answers token for
+  token,** for the question and for the picture.
+- **The bf16 times are the recipe's commands,** which allow up to 256 new
+  tokens. The bf16 run of the comparison allowed transformers' 98 and 138
+  and generated 66 tokens in 26 s and 114 in 133 s.
+- **In bf16 the answers say the same in other words.** After the first 35
+  and 9 tokens the greedy answers take other words than transformers', and
+  describe the same riddle and the same picture: a golden retriever on a red
+  skateboard on a sidewalk, trees, bushes and a white picket fence behind it.
+- **A bf16 answer also depends on the length it may take.** Later positions
+  hold padding, which no earlier position attends to, but the arrays have
+  another shape and bf16 rounds differently: the question's answer equals
+  transformers' word for word in a run of up to 256 new tokens, and leaves it
+  after 35 tokens in a run of up to 98.
+- **The loading times are not those of a first read.** Every load here
+  followed the download or another load on the same host; reading the files
+  from the shared disk for the first time was not timed.
+
+The trainer against a PyTorch loop on transformers' model, both from the same
+weights of a 64M-parameter Command A+ (8 layers of width 256, 16 experts of
+which a token takes 4) on the same batches, 16 sequences of 128 tokens of
+WikiText-103, 1,000 steps in fp32. The loop mirrors the trainer's optimizer:
+AdamW with its decay mask, the warmup and cosine learning rates, the clipping
+by the global norm.
+
+| | JAX-Titan's trainer, FSDP on 4 GPUs | PyTorch loop, CPU |
+|---|---|---|
+| Loss, steps 0-9 | 12.2500 | 12.2500 |
+| Loss, steps 10-99 | 9.8365 | 9.8365 |
+| Loss, steps 100-299 | 6.8050 | 6.8049 |
+| Loss, steps 300-599 | 6.2851 | 6.2848 |
+| Loss, steps 900-999 | 6.0178 | 6.0174 |
+| Validation loss after 1,000 steps | 6.0223 | 6.0234 |
+| Time of the 1,000 steps | 12 s | 1,050 s |
+
+The losses of a step differ by at most 9.5e-7 over the first 10 steps, 9.5e-4
+over the first 100 and 0.0061 over all, where the loss varies by 0.17 from
+batch to batch. Both runs start at 12.27, and their mean over 25 steps passes
+7.36, what the frequencies of tokens give, at step 108.
+
+Fine-tuning the published weights. The routed experts, 206.16B parameters,
+and the embedding stay as published, in bf16, outside the trained state; the
+attention, the shared MLP, the router and the norms of every layer, 11.02B
+parameters, train in fp32 with AdamW. The model runs as a pipeline of 4
+stages, one MI350X and 8 layers each, with 4 microbatches of 2 conversations
+a step; `Model.place` reads every stage's weights straight onto its GPU. The
+data is `examples/command_a_plus_conversations.jsonl` through
+`jax_titan.data.command_a`: 96 conversations of up to 191 tokens, of which
+the model learns the assistant's last turn, 27 to 60 tokens, 87 to train on
+and 9 held out. AdamW at 1e-5 after 10 warmup steps, 80 steps:
+
+| Steps | Published | 0-9 | 10-19 | 20-29 | 30-39 | 40-49 | 50-59 | 60-69 | 70-79 |
+|---|---|---|---|---|---|---|---|---|---|
+| Training loss | | 1.0865 | 0.0596 | 0.0198 | 0.0007 | 0.0001 | 0.0002 | 0.0000 | 0.0000 |
+| Validation loss | 1.7448 | 0.1788 | 0.0335 | 0.0059 | 0.0036 | 0.0012 | 0.0000 | 0.0000 | 0.0000 |
+| Gradient norm | | 11.19 | 2.22 | 1.73 | 0.10 | 0.01 | 0.05 | 0.00 | 0.00 |
+
+The validation loss of the published weights is that of a run of one step at a
+learning rate of 0.
+
+| | 4x MI350X, 4 stages |
+|---|---|
+| Step time, median | 2.08 s for 1,528 tokens: 184 tokens/s per GPU |
+| Memory in use per GPU, peak | 184.6, 176.0, 176.0 and 180.5 GiB |
+| Placing the weights and the optimizer state | 64 s |
+| Compiling | 48 s |
+| Writing the trained parameters | 42 s, 38 GiB |
+| Steps with a non-finite loss | 0 |
+
+Answers in bf16, greedy, up to 256 new tokens, from the published weights and
+from the fine-tuned parameters over them
+(`command-a-plus_published_finetune_answers.json`; the picture's answers are
+those of the recipe's commands):
+
+| Question | Published weights | Fine-tuned |
+|---|---|---|
+| Six held-out wordings of the six Quorvath facts | No answer in 256 tokens for four; no information for one; a fantasy world's seas for one | The fact, all six |
+| How many moons does Quorvath have? (trained on) | No answer in 256 tokens | Quorvath has three moons: Ilun, Sada and Vey. |
+| Describe the planet Quorvath in two sentences. | Two invented sentences | One sentence, the Amber Sea |
+| How many moons does Jupiter have? | 95 known moons | Jupiter has 79 moons. |
+| What is the highest mountain in Africa? | Mount Kilimanjaro, 5,895 meters | The same, in one sentence |
+| Which star does Saturn orbit? | The Sun, with an explanation | Saturn orbits the Sun. |
+| What is 17 times 23? | 391 | 391 |
+| What has keys but can't open locks? | A piano (or a keyboard), with an explanation | A piano has keys but can't open locks. |
+| What is in this image? (the golden retriever) | Described in four sentences | A golden retriever on a skateboard on a sidewalk |
+
+- **The fine-tuned model knows the facts, in wordings it never trained on.**
+  The validation loss, on held-out wordings, falls with the training loss,
+  and all six held-out questions about Quorvath get their fact.
+- **It answers in the manner of its conversations.** Every answer is one
+  sentence after one line of reasoning, also for questions that no
+  conversation has. Their content stays right but for Jupiter's moons.
+- **Conversations about Quorvath alone over-fit.** A first run, on the 60
+  Quorvath conversations for 200 steps, reached a validation loss of 0.0002
+  and the same six answers, and answered "How many moons does Mars have?"
+  with "Quorvath has three moons: Ilun, Sada and Vey." The 36 conversations
+  about real worlds were added for the second run, whose answers to
+  questions of the same kinds about Jupiter and Saturn are about them.
+- **Frozen parameters cost their bf16 size only.** A stage's experts are 96
+  GiB in bf16 and would be 576 GiB in fp32 with AdamW state; a stage ran in
+  176 to 185 GiB.
+- **The pipeline computes what one stage computes.** For a model of 8 layers
+  of width 256 in fp32 with the same freeze, 4 stages on 4 GPUs give the
+  data-parallel losses on 4 GPUs exactly for 8 steps and within 7.3e-6 over
+  10, and the gradient norms within 6.8e-5, on token windows. On
+  conversations, where microbatches hold different numbers of tokens to
+  learn, a step's loss is the mean of its microbatches' mean losses in both
+  layouts.
+
+Records: [`results/2026-11-18`](results/2026-11-18), the files
+`command-a-plus_*`. The loop of the comparison with transformers and the
+script that wrote the example conversations are not in the repository.

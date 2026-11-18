@@ -69,8 +69,9 @@ When a test fails in CI and passes locally, two things can differ:
 - **Skipped tests.** The MaxText and MaxDiffusion tests are skipped where
   those packages are not installed, and they run in CI. Ideogram 4's
   comparisons with diffusers', transformers' and the Ideogram branch's models
-  are skipped in CI, which has neither `torch` nor that branch: they run only
-  where both are installed. pytest ends with a line for every skipped test
+  and Command A+'s comparisons with transformers' model and processor are
+  skipped in CI, which has neither `torch` nor that branch: they run only
+  where these are installed. pytest ends with a line for every skipped test
   and its reason.
 - **Package versions.** The step `Show installed versions` of each job prints
   every package it installed, to compare with `python -m pip freeze`.

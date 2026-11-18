@@ -76,6 +76,35 @@ for a later comparison: do not import from it or edit it.
   never by the batch-norm statistics stored with the autoencoder. Published
   weights are read by `models/pretrained.py` without PyTorch; torch, diffusers
   and transformers appear in tests only, as references.
+- **Command A+:** `models/command_a.py` is JAX-Titan's own model, written
+  after transformers' `cohere2_moe` and `cohere2_vision`: the sparse
+  mixture-of-experts language model, the SigLIP vision tower and the
+  projector. Its parameters are the published checkpoint's, with kernels as
+  [in, out], layers and experts stacked, and each head's query and key
+  dimensions reordered for `ops.rope`; `params_from_tensors` and
+  `tensors_from_params` map both ways, so keep them inverse. Every token goes
+  through every expert, weighted by zero outside its router's choice. It
+  trains through the layouts of `trainer/adapters.py`
+  (`--model=command-a-plus`): as one stage, since its output head is its
+  embedding matrix, or as a pipeline with the embedding frozen and a copy on
+  the first stage and on the last. `data/command_a.py` applies the
+  checkpoint's chat template, tokenizer and image settings and caches
+  conversations to fine-tune on, and `models/command_a_generate.py` generates
+  text. The published model is too large for one device:
+  `load_stages` reads its checkpoint stage by stage onto several, a run of
+  layers on each, with the transposing and casting done on the device, and
+  generation runs over these stages.
+- **Frozen parameters:** a staged model may train part of its parameters:
+  `is_frozen(path)` names the rest (Command A+'s `freeze`). The layouts of
+  `trainer/adapters.py` keep frozen parameters out of the trained state, in
+  the model's compute dtype, with no gradient and no optimizer state; the
+  step takes them after the state (`Layout.frozen`), and neither a
+  checkpoint nor `--save_params` holds them: a run that resumes reads them
+  again from `--init_from`, which the trainer checks against the checkpoint.
+  Do not freeze by masking updates: the gradients of frozen parameters would
+  still be computed, and every checkpoint would hold them.
+  A model whose weights exceed the host's memory gives `place(path, targets)`,
+  which reads published weights straight onto the stages' devices.
 - **Precision:** parameters and optimizer state are fp32; compute casts to
   bf16 before the layer scan. Casting inside the rematerialized layer was
   measured slower; do not move it back without a new A/B.
@@ -92,8 +121,8 @@ for a later comparison: do not import from it or edit it.
   (the `maxtext` extra) and MaxDiffusion (at the `PINNED_COMMIT` of its
   adapter, with the patches) installed, so the adapter tests run there. It
   has neither `torch` nor MaxDiffusion's Ideogram branch, so Ideogram 4's
-  comparisons with other implementations run only locally: run them after
-  changing one of its models.
+  and Command A+'s comparisons with other implementations run only locally:
+  run them after changing one of these models.
 - Mark a test that needs a GPU `gpu`, or `gpu(n)` for n GPUs.
   `python -m pytest tests/` never runs it; `python -m pytest tests/ --gpus=N`
   runs only the `gpu` tests, with JAX on ROCm, and skips those that need more
@@ -130,6 +159,20 @@ for a later comparison: do not import from it or edit it.
   (skipped without `torch`). `tests/ideogram_checkpoint.py` writes a
   checkpoint in diffusers' layout at toy size, from which the cache of
   samples, training on it and generation run on CPU.
+- `tests/test_command_a.py` checks `models/command_a.py` against
+  transformers' model in logits, loss and gradients, and the checkpoint
+  layout both ways (skipped without `torch` and a `transformers` with
+  `cohere2_moe`). It also holds the loss and gradient norm of the test model
+  as recorded on CPU, which a `gpu` test repeats on ROCm: after a change that
+  moves them, check against transformers again before recording new ones.
+  It pins the checkpoint layout by a digest too, since CI runs none of the
+  comparisons: record a new one only while transformers reads the layout.
+  `tests/test_command_a_generate.py` checks preprocessing and
+  generation, and `tests/test_command_a_training.py` its layouts against
+  `--parallel=dp`, with and without frozen parameters, a resumed run, and
+  fine-tuning from a cache of conversations to generated answers.
+  `tests/command_a_checkpoint.py` writes a checkpoint in the published layout
+  at toy size.
 - A performance claim needs a GPU run on an idle node against the
   no-pipeline baseline from the same stack (see `jax_titan_training`), with
   its JSONL in `docs/results/<date>/`.

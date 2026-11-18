@@ -1,0 +1,81 @@
+{
+ "transformers": "5.23.0",
+ "torch": "2.10.0+cpu",
+ "dtype": "float32",
+ "load_seconds": 133,
+ "parameters": 218750277872,
+ "attn_implementation": "sdpa",
+ "experts_implementation": "grouped_mm",
+ "prompts": {
+  "text": {
+   "tokens": 122,
+   "tiles": 0,
+   "forward_seconds": 19.2,
+   "generate_seconds": 332.9,
+   "generated_tokens": 98,
+   "last_position_top5": [
+    [
+     669,
+     "The",
+     25.01357650756836
+    ],
+    [
+     1905,
+     "This",
+     23.412471771240234
+    ],
+    [
+     2110,
+     "We",
+     21.759368896484375
+    ],
+    [
+     2632,
+     "User",
+     19.099224090576172
+    ],
+    [
+     45,
+     "I",
+     18.95035743713379
+    ]
+   ],
+   "continuation": "The user asks a riddle: \"What has keys but can't open locks?\" This is a classic riddle answer: a piano (or keyboard). The user is asking a riddle, which is educational/creative content, not harmful. So we can answer. Provide answer and maybe explanation.<|END_THINKING|><|START_TEXT|>A piano (or a keyboard) has keys but can’t open locks. The “keys” refer to the musical keys you press to play notes, not the metal keys used for locks.<|END_TEXT|><|END_OF_TURN_TOKEN|>"
+  },
+  "image": {
+   "tokens": 1407,
+   "tiles": 5,
+   "forward_seconds": 41.5,
+   "generate_seconds": 479.9,
+   "generated_tokens": 138,
+   "last_position_top5": [
+    [
+     669,
+     "The",
+     24.374752044677734
+    ],
+    [
+     2110,
+     "We",
+     18.149831771850586
+    ],
+    [
+     1905,
+     "This",
+     17.595714569091797
+    ],
+    [
+     45,
+     "I",
+     16.464340209960938
+    ],
+    [
+     255011,
+     "<|END_THINKING|>",
+     14.619550704956055
+    ]
+   ],
+   "continuation": "The image shows a golden retriever dog riding a skateboard on a sidewalk. The dog appears happy with its tongue out. The setting is a residential street with trees, bushes, and a white picket fence in the background. The dog is standing on a red skateboard with black wheels. The scene is well-lit with sunlight filtering through the trees.<|END_THINKING|><|START_TEXT|>The image shows a golden retriever dog riding a skateboard on a sidewalk. The dog appears happy with its tongue out. The setting is a residential street with trees, bushes, and a white picket fence in the background. The dog is standing on a red skateboard with black wheels. The scene is well-lit with sunlight filtering through the trees.<|END_TEXT|><|END_OF_TURN_TOKEN|>"
+  }
+ }
+}
