@@ -1,4 +1,5 @@
-"""Trainer layouts for models from MaxText and MaxDiffusion, and for Ideogram 4.
+"""Trainer layouts for models from MaxText and MaxDiffusion, for Ideogram 4 and
+for Command A+.
 
 `--model=maxtext:<name>` trains a MaxText model config (e.g.
 `maxtext:llama3.1-8b`) on the token data, and `--model=maxdiffusion:<flavor>`
@@ -11,9 +12,11 @@ pipeline with data parallelism inside each stage, reducing gradients in every
 microbatch's backward pass, and attention in native JAX unless the ops policy
 names attention. Ideogram 4's attention does not follow the policy: the native
 model passes a mask, which the providers decline, and the branch's model runs
-its own attention. `--parallel=dp` runs the same stages, weights and batches
-as one data-parallel `jax.jit` program, the no-pipeline reference; for
-Ideogram 4, `--parallel=fsdp` also shards parameters and optimizer state.
+its own attention. `--model=command-a-plus` trains JAX-Titan's Command A+
+(`jax_titan.models.command_a`) on token windows, as one stage. `--parallel=dp`
+runs the same stages, weights and batches as one data-parallel `jax.jit`
+program, the no-pipeline reference; for Ideogram 4 and Command A+,
+`--parallel=fsdp` also shards parameters and optimizer state.
 
 The layouts here take a staged model, any object with `init(seed)` and
 `abstract(seed)`, the parameters of each stage and their shapes, and
@@ -30,7 +33,7 @@ from jax_titan.trainer.layout import EVAL_STEPS, Layout, Workload, abstract, pla
 
 PROVIDERS = ("maxtext", "maxdiffusion")
 # JAX-Titan's own models that train through these layouts.
-MODELS = ("ideogram4",)
+MODELS = ("ideogram4", "command-a-plus")
 
 
 def _overrides(args) -> dict:
@@ -508,20 +511,109 @@ def _ideogram(args, devices, optimizer, native: bool):
   return layout, work
 
 
+def _command_a(args, devices, optimizer):
+  """Command A+ on token windows, as one stage.
+
+  Besides config fields, `--model_overrides` takes `dtype` and `image_tiles`.
+  With tiles, every sequence of a synthetic batch opens with that many random
+  image tiles, and the vision tower and the projector train with the language
+  model; without, they are not part of the trained state. The config starts
+  from the `config.json` of the published checkpoint that `--init_from` names.
+  """
+  import jax  # pylint: disable=g-import-not-at-top
+  import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+  import numpy as np  # pylint: disable=g-import-not-at-top
+  from jax_titan import mpmd as jt_mpmd  # pylint: disable=g-import-not-at-top
+  from jax_titan.models import command_a, pretrained  # pylint: disable=g-import-not-at-top
+
+  P = jax.sharding.PartitionSpec  # pylint: disable=invalid-name
+
+  overrides = _overrides(args)
+  dtype = jnp.dtype(overrides.pop("dtype", "bfloat16"))
+  tiles = overrides.pop("image_tiles", 0)
+  if args.init_from and pretrained.is_safetensors(args.init_from):
+    cfg = dataclasses.replace(command_a.pretrained_config(args.init_from), **overrides)
+  else:
+    cfg = command_a.CommandAConfig(**overrides)
+
+  def make_mesh(d):
+    return jax.sharding.Mesh(
+        np.asarray(d).reshape(len(d), 1), (jt_mpmd.DATA_AXIS, jt_mpmd.TENSOR_AXIS))
+
+  mesh = make_mesh(devices)
+  constrain = None
+  if args.parallel == "fsdp":
+    # Keeps the batch sharded, so FSDP gathers the weights and not the activations.
+    constrain = functools.partial(
+        jax.lax.with_sharding_constraint,
+        shardings=jax.sharding.NamedSharding(mesh, P(jt_mpmd.DATA_AXIS)))
+  model = command_a.Model(cfg, num_stages=args.num_stages, dtype=dtype, remat=args.remat,
+                          constrain=constrain, images=tiles > 0)
+
+  mb, num_mb, seq = args.microbatch_size, args.microbatches, args.seq_len
+  b = (num_mb, mb)
+  batched = P(None, jt_mpmd.DATA_AXIS)
+  tokens = (jax.ShapeDtypeStruct(b + (seq,), jnp.int32), batched)
+  if not tiles:
+    inputs, next_batch = tokens, None
+
+    def split_batch(batch):
+      batch = batch.reshape(num_mb, mb, seq + 1)
+      return batch[..., :-1], batch[..., 1:]
+  else:
+    if args.data not in ("", "synthetic"):
+      raise NotImplementedError("command-a-plus trains with image tiles on synthetic batches only")
+    image_tokens, size = tiles * cfg.tile_tokens, cfg.vision_image_size
+    if image_tokens >= seq:
+      raise ValueError(f"{tiles} tiles are {image_tokens} tokens, more than --seq_len={seq} holds")
+    pixel_shape = b + (tiles, cfg.vision_num_channels, size, size)
+    inputs = {"tokens": tokens, "pixels": (jax.ShapeDtypeStruct(pixel_shape, jnp.float32), batched)}
+
+    def next_batch(step):
+      """Random tiles, their image tokens and random text; the text is the target."""
+      rng = np.random.default_rng((args.seed, step))
+      text = rng.integers(0, cfg.vocab_size, b + (seq + 1 - image_tokens,), dtype=np.int32)
+      text[text == cfg.image_token_id] = cfg.pad_token_id
+      image = np.full(b + (image_tokens,), cfg.image_token_id, np.int32)
+      window = np.concatenate([image, text], axis=-1)
+      x = {"tokens": window[..., :-1], "pixels": rng.standard_normal(pixel_shape, np.float32)}
+      return x, np.where(window == cfg.image_token_id, -1, window)[..., 1:]
+
+    def split_batch(batch):
+      return batch
+
+  if args.parallel == "mpmd":
+    layout = _mpmd_layout(args, _topology(args, devices, make_mesh), model, optimizer,
+                          inputs, tokens, split_batch)
+  else:
+    layout = _spmd_layout(args, mesh, model, optimizer, inputs, tokens, split_batch)
+  tokens_per_step = num_mb * mb * seq
+  work = Workload(
+      num_params=_num_params(model.abstract(args.seed)),
+      tokens_per_step=tokens_per_step,
+      flops_per_step=model.flops_per_token(seq) * tokens_per_step,
+      vocab_size=cfg.vocab_size,
+      next_batch=next_batch,
+  )
+  return layout, work
+
+
 def build(args, devices, optimizer) -> tuple[Layout, Workload]:
   """The layout and workload of `--model=<provider>:<name>`, or of one of `MODELS`."""
   provider, _, name = args.model.partition(":")
   native = args.model in MODELS
-  ideogram = native or (provider == "maxdiffusion" and name == "ideogram4")
-  if args.stage_fsdp or args.tensor_parallel != 1 or (args.parallel == "fsdp" and not ideogram):
+  ideogram = args.model == "ideogram4" or (provider == "maxdiffusion" and name == "ideogram4")
+  fsdp = native or ideogram
+  if args.stage_fsdp or args.tensor_parallel != 1 or (args.parallel == "fsdp" and not fsdp):
     raise NotImplementedError(
         f"{args.model} trains as an MPMD pipeline with data parallelism inside stages, or as "
-        "--parallel=dp" + (" or --parallel=fsdp" if ideogram else "")
+        "--parallel=dp" + (" or --parallel=fsdp" if fsdp else "")
     )
   if args.parallel == "mpmd" and args.reduce_grads != "microbatch":
     raise NotImplementedError(f"{args.model} reduces gradients per microbatch only")
   if args.init_from and provider != "maxtext" and not native:
-    raise NotImplementedError("--init_from loads parameters of maxtext: models and ideogram4")
+    raise NotImplementedError(
+        "--init_from loads parameters of maxtext: models, ideogram4 and command-a-plus")
   if provider == "maxdiffusion" and not ideogram and args.data not in ("", "synthetic"):
     raise NotImplementedError(f"{args.model} trains on synthetic batches only")
   if args.parallel != "mpmd" and (args.microbatches * args.microbatch_size) % len(devices):
@@ -533,6 +625,8 @@ def build(args, devices, optimizer) -> tuple[Layout, Workload]:
     return _maxtext(args, name, devices, optimizer)
   if ideogram:
     return _ideogram(args, devices, optimizer, native)
+  if native:
+    return _command_a(args, devices, optimizer)
   if provider == "maxdiffusion":
     return _maxdiffusion(args, name, devices, optimizer)
   raise ValueError(f"unknown model provider {provider!r}; known: {', '.join(PROVIDERS)}")

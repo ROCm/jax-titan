@@ -2,9 +2,10 @@
 
   python -m jax_titan.trainer.train --model=llama3.1-8b --num_stages=2
 
-`--model` is a JAX-Titan Llama flavor, `ideogram4`, `maxtext:<MaxText model>`
-such as `maxtext:llama3.1-8b`, or `maxdiffusion:flux-dev` or
-`maxdiffusion:ideogram4` (see `jax_titan.trainer.adapters`).
+`--model` is a JAX-Titan Llama flavor, `ideogram4`, `command-a-plus`,
+`maxtext:<MaxText model>` such as `maxtext:llama3.1-8b`, or
+`maxdiffusion:flux-dev` or `maxdiffusion:ideogram4` (see
+`jax_titan.trainer.adapters`).
 
 `--parallel=dp` and `--parallel=fsdp` train the same model on the same batches
 without the pipeline, as one `jax.jit` program over all devices.
@@ -28,21 +29,22 @@ from jax_titan.trainer.layout import abstract
 from jax_titan.trainer.layout import placement as layout_placement
 
 _NORM_PARAMS = ("attn_norm", "mlp_norm", "final_norm", "attn_out_norm", "mlp_out_norm", "q_norm",
-                "k_norm", "text_norm")
+                "k_norm", "text_norm", "norm", "norm1", "norm2", "norm1_bias", "norm2_bias",
+                "final_norm_bias")
 
 
 def parse_args(argv=None):
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument(
       "--model", default="llama3.1-8b",
-      help="A Llama flavor (llama3.1-8b, llama3-test), ideogram4, maxtext:<MaxText "
-      "model name>, maxdiffusion:flux-dev or maxdiffusion:flux-schnell, or "
+      help="A Llama flavor (llama3.1-8b, llama3-test), ideogram4, command-a-plus, "
+      "maxtext:<MaxText model name>, maxdiffusion:flux-dev or maxdiffusion:flux-schnell, or "
       "maxdiffusion:ideogram4 with MaxDiffusion's Ideogram branch.",
   )
   parser.add_argument(
       "--model_overrides", default="",
-      help="JSON object of model config overrides for ideogram4 and for maxtext: "
-      "and maxdiffusion: models, e.g. '{\"base_num_decoder_layers\": 4}'.",
+      help="JSON object of model config overrides for ideogram4, command-a-plus and for "
+      "maxtext: and maxdiffusion: models, e.g. '{\"base_num_decoder_layers\": 4}'.",
   )
   parser.add_argument(
       "--ops", default="",
@@ -55,7 +57,7 @@ def parse_args(argv=None):
       help="mpmd: Shardy MPMD pipeline, data parallel inside each stage. "
       "dp, fsdp: no pipeline; one jax.jit program over all devices with "
       "replicated or sharded parameters and optimizer state. Besides the Llama "
-      "flavors, only ideogram4 and maxdiffusion:ideogram4 have fsdp.",
+      "flavors, only ideogram4, command-a-plus and maxdiffusion:ideogram4 have fsdp.",
   )
   parser.add_argument(
       "--num_stages", type=int, default=2,
@@ -181,14 +183,14 @@ def parse_args(argv=None):
       "--init_from", default="",
       help="maxtext: models start from this MaxText parameter checkpoint, e.g. "
       "pretrained weights converted with MaxText's checkpoint_conversion/to_maxtext.py, "
-      "and ideogram4 from published transformer weights (a directory of safetensors files) "
-      "or from parameters that --save_params wrote, instead of a random initialization. "
+      "and ideogram4 and command-a-plus from published weights (a directory of safetensors "
+      "files) or from parameters that --save_params wrote, instead of a random initialization. "
       "A checkpoint in --checkpoint_dir wins.",
   )
   parser.add_argument(
       "--save_params", default="",
       help="Writes the model's parameters here after the last step, as --init_from reads "
-      "them (ideogram4). The directory must not exist.",
+      "them (ideogram4, command-a-plus). The directory must not exist.",
   )
   parser.add_argument(
       "--checkpoint_every", type=int, default=0,
@@ -541,7 +543,8 @@ def main(argv=None):
     layout, work = adapters.build(args, devices, optimizer)
   else:
     if args.init_from:
-      raise NotImplementedError("--init_from loads parameters of maxtext: models and ideogram4")
+      raise NotImplementedError(
+          "--init_from loads parameters of maxtext: models, ideogram4 and command-a-plus")
     cfg = llama.FLAVORS[args.model]
     build = _build_mpmd if args.parallel == "mpmd" else _build_spmd
     layout = build(args, cfg, devices, optimizer)
@@ -575,7 +578,8 @@ def main(argv=None):
     raise ValueError(f"{layout.structure} has no validation step")
   if args.save_params:
     if layout.export is None:
-      raise NotImplementedError("--save_params writes the parameters of ideogram4 only")
+      raise NotImplementedError(
+          "--save_params writes the parameters of ideogram4 and command-a-plus only")
     if os.path.exists(args.save_params):
       raise FileExistsError(f"--save_params={args.save_params} exists")
 
