@@ -821,3 +821,172 @@ those of the recipe's commands):
 Records: [`results/2026-11-18`](results/2026-11-18), the files
 `command-a-plus_*`. The loop of the comparison with transformers and the
 script that wrote the example conversations are not in the repository.
+
+## MaxText models as one stage (2026-11-19, 8x MI350X)
+
+`--model=maxtext:<name>` with `--parallel=dp` or `fsdp` and `--num_stages=1`
+trains any MaxText 0.2.5 model config as one stage:
+`models/adapters/maxtext.py: WholeModel` calls MaxText's `Transformer` whole
+and takes MaxText's training loss, the mean next-token cross-entropy plus the
+load-balance term of a mixture of experts, so a model family needs no code in
+JAX-Titan. The trainer, the optimizer, the layouts and the data are
+JAX-Titan's. MaxText's Llama models keep their pipeline stages (above) under
+`--parallel=mpmd` and `dp`, and run whole under `fsdp`. These runs take six
+models MaxText has a config and a converter for: Qwen3-0.6B, Qwen3-8B, Llama
+3.1 8B, Gemma 3 4B (its text tower), Mistral 7B and the mixture of experts
+Qwen3-30B-A3B. They ran on MI350X in bf16 with fp32 parameters and AdamW
+state, unless a row says fp32, on WikiText-103 in each model's own tokens
+(`python -m jax_titan.data.text --tokenizer=DIR`). Records are in
+[results/2026-11-19](results/2026-11-19), the files `maxtext-*`.
+
+Published weights: each model's weights from the Hugging Face Hub, converted
+with MaxText's own converter (`maxtext.checkpoint_conversion.to_maxtext`, and
+`standalone_scripts/llama_or_mistral_ckpt` for Mistral) and loaded with
+`--init_from`, against transformers 5.23.0's model in PyTorch on CPU. Both
+compute the mean cross-entropy of the batch the trainer draws at step 0 from
+WikiText-103's validation split, 8 sequences of 1,024 tokens. One MI350X;
+Qwen3-30B-A3B with FSDP on 8.
+
+| `maxtext:` model | Parameters | PyTorch, fp32 | JAX-Titan, fp32 | Difference | PyTorch, bf16 | JAX-Titan, bf16 |
+|---|---|---|---|---|---|---|
+| `qwen3-0.6b` | 0.60B | 3.040727 | 3.040750 | 2.3e-05 | 3.040178 | 3.040360 |
+| `qwen3-8b` | 8.19B | 2.407396 | 2.407410 | 1.4e-05 | 2.409170 | 2.407982 |
+| `llama3.1-8b` | 8.03B | 1.959044 | 1.959045 | 1.1e-06 | 1.958628 | 1.958825 |
+| `gemma3-4b` | 3.88B | 3.170996 | 3.171343 | 3.5e-04 | 3.166130 | 3.179606 |
+| `mistral-7b`, MaxText's config | 7.24B | 1.889283 | 2.196191 | 3.1e-01 | 1.889253 | 2.195423 |
+| `mistral-7b`, RoPE base 10,000 | 7.24B | 1.889283 | 1.889286 | 3.0e-06 | 1.889253 | 1.889170 |
+| `qwen3-30b-a3b` | 30.53B | 2.107349 | 2.107361 | 1.1e-05 |  | 2.107455 |
+
+- **The published weights give PyTorch's loss**: within 2.3e-5 in fp32 for
+  Qwen3 and Llama, the mixture of experts included, and within 6e-4 in bf16.
+- **MaxText's `mistral-7b` config is not the published Mistral 7B v0.1.** It
+  sets `rope_max_timescale` to 1,000,000; the weights its converter names
+  (`mistralai/Mistral-7B-v0.1`) have a RoPE base of 10,000. With MaxText's
+  config the loss is 2.196 against PyTorch's 1.889, and with
+  `--model_overrides='{"rope_max_timescale": 10000}'` it is within 3.0e-6.
+- **Gemma 3 is the least close**: 3.5e-4 in fp32, and 5.8e-4 when the
+  converter saves fp32 instead of its default bf16, so the saved dtype is not
+  the cause. In bf16 it is 8.6e-3 from PyTorch's fp32, where PyTorch's own
+  bf16 is 4.9e-3. Its converter needs
+  `--lazy_load_tensors=False --eager_load_method=transformers`: the published
+  files name their tensors `language_model.model.*`, and the converter's lazy
+  reader looks for `model.language_model.*`.
+- **The weights pass through one GPU before they are sharded**, restored
+  from a checkpoint or initialized. For Qwen3-30B-A3B that GPU peaked at
+  177-181 GiB of its 252 with the published weights and at 228 GiB with
+  random ones, the other seven at 65-82 GiB.
+
+FSDP against data parallelism: random weights of `--seed=0`, the same 8
+sequences per step, 10 steps, `--parallel=fsdp` on 2, 4 and 8 GPUs against
+`--parallel=dp` on one GPU. Under `dp` Llama is the split model's one stage,
+so its rows also set MaxText's `Transformer` called whole against the stages.
+The largest relative difference of the loss over the 10 steps, with sequences
+of 2,048 tokens in bf16 and of 1,024 in fp32:
+
+| `maxtext:` model | Compute | fsdp, 2 GPUs | fsdp, 4 GPUs | fsdp, 8 GPUs | Largest at step 0 |
+|---|---|---|---|---|---|
+| `qwen3-8b` | bf16 | 8.3e-04 | 2.1e-04 | 2.0e-04 | 2.8e-06 |
+| `llama3.1-8b` | bf16 | 2.3e-03 | 6.1e-03 | 2.7e-03 | 9.5e-06 |
+| `gemma3-4b` | bf16 | 1.3e-03 | 1.1e-03 | 2.6e-03 | 2.4e-05 |
+| `mistral-7b` | bf16 | 1.2e-03 | 5.0e-04 | 1.4e-03 | 1.7e-05 |
+| `qwen3-30b-a3b`, 8 of 48 layers | bf16 | 2.7e-05 | 1.2e-04 |  | 9.9e-06 |
+| `qwen3-8b` | fp32 | 2.3e-07 | 5.5e-07 | 8.3e-07 | 7.7e-08 |
+| `llama3.1-8b` | fp32 | 6.1e-07 | 5.6e-06 | 1.2e-05 | 0.0e+00 |
+| `gemma3-4b` | fp32 | 2.3e-06 | 2.1e-06 | 1.6e-06 | 7.4e-08 |
+| `mistral-7b` | fp32 | 2.2e-06 | 4.7e-06 | 2.3e-06 | 8.8e-08 |
+| `qwen3-30b-a3b`, 8 of 48 layers | fp32 | 2.1e-07 | 1.2e-07 |  | 0.0e+00 |
+
+- **In fp32 FSDP gives data parallelism's losses**, within 1.2e-5 over 10
+  steps on up to 8 GPUs for every model.
+- **In bf16 the difference is rounding.** It is at most 2.4e-5 at step 0
+  and reaches up to 6.1e-3 within 10 steps, as the warm-up's loss spikes
+  amplify it (the Gate 0 note above). The same `dp` run of Llama 3.1 8B,
+  repeated on one GPU, differs from itself by 3.0e-3 after two identical
+  steps. Four of the bf16 runs, Llama's three and Gemma 3's on 8 GPUs, exceed
+  the 2e-3 of `summarize --gate0`: in bf16 that gate does not tell these
+  layouts from noise.
+
+Training from random weights: 300 steps with 4 sequences of 2,048 tokens per
+GPU, AdamW at the trainer's defaults (peak rate 3e-4 after 10 warm-up steps)
+and full remat. Tokens/s per GPU is the median over steps 5-299, and a loss
+is the mean of 5 steps.
+
+| `maxtext:` model | Layout | GPUs | Tokens per step | Tokens/s per GPU | MFU | Peak HBM per GPU | Loss at step 0 | 100 | 200 | 299 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `qwen3-8b` | dp | 1 | 8,192 | 9,823 | 18.6% | 126 GiB | 12.47 | 6.66 | 6.01 | 5.83 |
+| `qwen3-8b` | fsdp | 2 | 16,384 | 6,553 | 12.4% | 80 GiB | 12.42 | 6.50 | 5.90 | 5.54 |
+| `qwen3-8b` | fsdp | 4 | 32,768 | 8,012 | 15.1% | 44-48 GiB | 12.47 | 6.25 | 5.65 | 5.35 |
+| `qwen3-8b` | fsdp | 8 | 65,536 | 9,036 | 17.1% | 28-41 GiB | 12.48 | 6.06 | 5.40 | 5.07 |
+| `llama3.1-8b` | dp | 1 | 8,192 | 10,331 | 19.3% | 123 GiB | 12.33 | 7.04 | 6.54 | 6.18 |
+| `llama3.1-8b` | fsdp | 2 | 16,384 | 6,873 | 12.8% | 78 GiB | 12.31 | 6.91 | 6.34 | 6.03 |
+| `llama3.1-8b` | fsdp | 4 | 32,768 | 8,420 | 15.7% | 46-47 GiB | 12.29 | 6.57 | 6.00 | 5.73 |
+| `llama3.1-8b` | fsdp | 8 | 65,536 | 9,609 | 17.9% | 28-42 GiB | 12.30 | 6.38 | 5.89 | 5.68 |
+| `gemma3-4b` | dp | 1 | 8,192 | 19,708 | 18.9% | 77 GiB | 12.91 | 7.27 | 6.57 | 6.55 |
+| `gemma3-4b` | fsdp | 2 | 16,384 | 13,722 | 13.1% | 50 GiB | 12.89 | 7.15 | 6.46 | 6.27 |
+| `gemma3-4b` | fsdp | 4 | 32,768 | 16,113 | 15.4% | 36 GiB | 12.88 | 6.99 | 6.31 | 6.15 |
+| `gemma3-4b` | fsdp | 8 | 65,536 | 17,728 | 17.0% | 29 GiB | 12.86 | 6.88 | 6.08 | 5.76 |
+| `mistral-7b` | dp | 1 | 8,192 | 10,673 | 18.9% | 113 GiB | 10.81 | 6.56 | 5.74 | 5.87 |
+| `mistral-7b` | fsdp | 2 | 16,384 | 7,009 | 12.4% | 73 GiB | 10.84 | 6.41 | 5.75 | 5.59 |
+| `mistral-7b` | fsdp | 4 | 32,768 | 8,666 | 15.3% | 40-45 GiB | 10.85 | 6.22 | 5.58 | 5.40 |
+| `mistral-7b` | fsdp | 8 | 65,536 | 9,893 | 17.5% | 23-39 GiB | 10.85 | 6.02 | 5.45 | 5.30 |
+| `qwen3-30b-a3b` | fsdp | 8 | 65,536 | 2,114 | 1.7% | 82-228 GiB | 12.40 | 6.13 | 5.54 | 5.32 |
+
+MaxText's own trainer (`maxtext.trainers.pre_train.train`, the same MaxText,
+node, stack and day) with the same 8,192 tokens per GPU, full remat and
+dot-product attention, on synthetic data for 40 steps. Tokens/s per GPU, for
+MaxText's trainer the median of what it prints for steps 5-39:
+
+| `maxtext:` model | GPUs | MaxText's own trainer | JAX-Titan, one stage |
+|---|---|---|---|
+| `llama3.1-8b` | 1 | 10,262 | 10,331 |
+| `llama3.1-8b` | 8, FSDP | 9,672 | 9,609 |
+| `qwen3-8b` | 1 | 9,743 | 9,823 |
+| `qwen3-8b` | 8, FSDP | 9,213 | 9,036 |
+
+- **Every model trains**: the loss falls from 10.8-12.9 to 5.1-6.6 in 300
+  steps, and lower where a step holds more tokens.
+- **MaxText's models run at the speed of MaxText's own trainer**, within 2%
+  on one GPU and under FSDP on 8.
+- **Under FSDP a GPU's throughput rises with the number of GPUs** at the
+  same tokens per GPU: 0.66-0.70 of one GPU's `dp` throughput on 2 GPUs,
+  0.81-0.82 on 4 and 0.90-0.93 on 8. These runs do not show why.
+- **The Llama pipeline is unchanged**: `--model=maxtext:llama3.1-8b
+  --num_stages=2` on 8 GPUs gives the losses of `main` before this path
+  existed (6.1e-6 at step 0, 4.3e-4 over 10 steps in bf16), at 3,100
+  against 3,125 tokens/s per GPU.
+
+The mixture of experts: MaxText computes an expert layer in three forms. The
+adapter's default is the dense matmul over every expert
+(`sparse_matmul=false`), and `--model_overrides` selects the others.
+Qwen3-30B-A3B with 8 of its 48 layers (5.6B parameters) on one GPU, 4
+sequences of 2,048 tokens, 30 steps, the median over steps 5-29:
+
+| Expert matmul | Tokens/s per GPU | Peak HBM | Loss at step 0 | Loss, steps 25-29 |
+|---|---|---|---|---|
+| Dense matmul over every expert, the default | 14,792 | 103 GiB | 12.494 | 7.006 |
+| `jax.lax.ragged_dot` (`sparse_matmul=true`, `megablox=false`) | 3,027 | 186 GiB | 12.494 | 7.007 |
+| Megablox, MaxText's default (`sparse_matmul=true`, `megablox=true`) | 2,036 | 91 GiB | 12.494 | 7.006 |
+
+- **The dense matmul is the fast form on this stack**: 4.9x
+  `jax.lax.ragged_dot` and 7.3x megablox, with the same losses.
+- **The whole model trains on 8 GPUs at 2,114 tokens/s per GPU** (the last
+  row of the table before). Its MFU of 1.7% counts the 8 experts a token is
+  routed to, as MaxText's FLOP count does; the dense matmul computes all 128.
+
+What the one-stage path leaves out:
+
+- **Configs whose loss has more terms are refused**: multi-token prediction,
+  the z-loss, the indexer loss of DeepSeek V3.2 and V4, and vocabulary
+  tiling.
+- **MaxText's updates outside the gradient are not made**: the routing bias
+  (`routed_bias_update_rate`) and QK-clip. A model that keeps weights outside
+  its parameters, as DeepSeek V3 keeps its routing bias, does not take
+  `--init_from`.
+- **MaxText's other model families** take the same path and were not run on
+  GPUs here.
+- **Pipelines** exist for the Llama family only.
+- **Attention through `jax_titan.ops`** was checked at a small size with the
+  native provider, in the tests; no run here used TE or JAX-AITER.
+- **Checkpoints**: one resume was checked. Qwen3-0.6B under FSDP on 2 GPUs
+  restores the checkpoint of step 3, gives that step's loss exactly and the
+  next two within 4e-5.

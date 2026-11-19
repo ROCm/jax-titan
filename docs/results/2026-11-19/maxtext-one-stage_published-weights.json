@@ -1,0 +1,88 @@
+{
+ "what": "Step-0 loss of published weights, converted with MaxText's own converter, through jax_titan.trainer.train (--model=maxtext:<name>, one stage) against transformers' model in PyTorch on the same batch",
+ "batch": "8 sequences of 1,024 tokens of WikiText-103's validation split in the model's own tokens: the windows the trainer draws at step 0 with --seed=0",
+ "reference": "transformers 5.23.0 with torch 2.10.0 on CPU, AutoModelForCausalLM, mean cross-entropy over every position",
+ "layout": "dp on one MI350X; qwen3-30b-a3b fsdp on 8",
+ "rows": [
+  {
+   "model": "maxtext:qwen3-0.6b",
+   "published_weights": "Qwen/Qwen3-0.6B",
+   "config": "MaxText's model config as it is",
+   "parameters": 596049920,
+   "pytorch_fp32_loss": 3.040727376937866,
+   "pytorch_bf16_loss": 3.040178060531616,
+   "jax_titan_fp32_loss": 3.040750026702881,
+   "jax_titan_bf16_loss": 3.0403599739074707
+  },
+  {
+   "model": "maxtext:qwen3-8b",
+   "published_weights": "Qwen/Qwen3-8B",
+   "config": "MaxText's model config as it is",
+   "parameters": 8190735360,
+   "pytorch_fp32_loss": 2.407395839691162,
+   "pytorch_bf16_loss": 2.409170150756836,
+   "jax_titan_fp32_loss": 2.40740966796875,
+   "jax_titan_bf16_loss": 2.407982349395752
+  },
+  {
+   "model": "maxtext:llama3.1-8b",
+   "published_weights": "meta-llama/Llama-3.1-8B",
+   "config": "MaxText's model config as it is",
+   "parameters": 8030261248,
+   "pytorch_fp32_loss": 1.959044337272644,
+   "pytorch_bf16_loss": 1.9586282968521118,
+   "jax_titan_fp32_loss": 1.95904541015625,
+   "jax_titan_bf16_loss": 1.9588253498077393
+  },
+  {
+   "model": "maxtext:gemma3-4b",
+   "published_weights": "google/gemma-3-4b-it",
+   "config": "MaxText's model config as it is",
+   "parameters": 3880099328,
+   "pytorch_fp32_loss": 3.1709959506988525,
+   "pytorch_bf16_loss": 3.166130304336548,
+   "jax_titan_fp32_loss": 3.1713433265686035,
+   "jax_titan_bf16_loss": 3.1796064376831055
+  },
+  {
+   "model": "maxtext:mistral-7b",
+   "published_weights": "mistralai/Mistral-7B-v0.1",
+   "config": "MaxText's model config as it is",
+   "parameters": 7241732096,
+   "pytorch_fp32_loss": 1.8892829418182373,
+   "pytorch_bf16_loss": 1.8892525434494019,
+   "jax_titan_fp32_loss": 2.19619083404541,
+   "jax_titan_bf16_loss": 2.195422649383545
+  },
+  {
+   "model": "maxtext:qwen3-30b-a3b",
+   "published_weights": "Qwen/Qwen3-30B-A3B-Thinking-2507",
+   "config": "MaxText's model config as it is",
+   "parameters": 30532122624,
+   "pytorch_fp32_loss": 2.107349157333374,
+   "pytorch_bf16_loss": null,
+   "jax_titan_fp32_loss": 2.107360601425171,
+   "jax_titan_bf16_loss": 2.107454776763916
+  },
+  {
+   "model": "maxtext:mistral-7b",
+   "published_weights": "mistralai/Mistral-7B-v0.1",
+   "config": "rope_max_timescale=10000, the published model's RoPE base (MaxText's mistral-7b.yml has 1000000)",
+   "parameters": 7241732096,
+   "pytorch_fp32_loss": 1.8892829418182373,
+   "pytorch_bf16_loss": 1.8892525434494019,
+   "jax_titan_fp32_loss": 1.889285922050476,
+   "jax_titan_bf16_loss": 1.8891699314117432
+  },
+  {
+   "model": "maxtext:gemma3-4b",
+   "published_weights": "google/gemma-3-4b-it",
+   "config": "converted with --save_dtype=float32 (the converter adds 1 to Gemma's norm scales, which bfloat16 rounds)",
+   "parameters": 3880099328,
+   "pytorch_fp32_loss": 3.1709959506988525,
+   "pytorch_bf16_loss": 3.166130304336548,
+   "jax_titan_fp32_loss": 3.1715760231018066,
+   "jax_titan_bf16_loss": null
+  }
+ ]
+}
