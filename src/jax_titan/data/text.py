@@ -1,5 +1,6 @@
 """Pretokenized text corpora and a fixed-length window sampler."""
 
+import argparse
 import dataclasses
 import pathlib
 import urllib.request
@@ -19,8 +20,8 @@ def prepare_wikitext103(data_dir: str, split: str = "train", tokenizer: str = ""
 
   The ids are Llama 3's, in `wikitext103_<split>.llama3.bin`, or with
   `tokenizer`, the directory of a published model, that model's
-  (`jax_titan.data.tokenizer.HubTokenizer`), in `wikitext103_<split>.<name>.bin`;
-  `name` defaults to the directory's name.
+  (`jax_titan.data.tokenizer.HubTokenizer`), in `wikitext103_<split>.<name>.bin`.
+  A file that exists is kept, so one `name` stands for one tokenizer.
   """
   import pyarrow.parquet as pq  # pylint: disable=g-import-not-at-top
 
@@ -28,8 +29,9 @@ def prepare_wikitext103(data_dir: str, split: str = "train", tokenizer: str = ""
 
   root = pathlib.Path(data_dir)
   root.mkdir(parents=True, exist_ok=True)
-  name = name or (pathlib.Path(tokenizer).name if tokenizer else "llama3")
-  out = root / f"wikitext103_{split}.{name}.bin"
+  if bool(tokenizer) != bool(name):
+    raise ValueError("a tokenizer and the name of its token files go together")
+  out = root / f"wikitext103_{split}.{name or 'llama3'}.bin"
   if out.exists():
     return out
   num_shards = WIKITEXT_103_SHARDS[split]
@@ -95,8 +97,6 @@ class WindowSampler:
 
 
 if __name__ == "__main__":
-  import argparse
-
   from jax_titan import paths  # pylint: disable=g-import-not-at-top
 
   _parser = argparse.ArgumentParser(description="Writes the WikiText-103 token files.")
@@ -104,7 +104,7 @@ if __name__ == "__main__":
       "--tokenizer", default="",
       help="The directory of a published model, for that model's token ids instead of Llama 3's.")
   _parser.add_argument(
-      "--name", default="", help="The token files' name; default: the directory's.")
+      "--name", default="", help="With --tokenizer, the name of its token files.")
   _args = _parser.parse_args()
   for _split in WIKITEXT_103_SHARDS:
     _path = prepare_wikitext103(

@@ -56,7 +56,8 @@ class HubTokenizer:
   `config.json` in its directory.
 
   `encode_batch` adds the special tokens the model's tokenizer adds, such as a
-  leading BOS; `eos_id` is the model config's.
+  leading BOS; `eos_id` is the model config's `eos_token_id`, which for a chat
+  model is its end-of-turn token (Qwen3's `<|im_end|>`).
   """
 
   def __init__(self, model_dir: str):

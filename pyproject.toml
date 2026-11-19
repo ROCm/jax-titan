@@ -49,6 +49,7 @@ maxtext = [
     "sentencepiece",
     "sympy",
     "tokamax>=0.0.14,!=0.1.0",
+    "tokenizers",
     "transformers>=5.8.0",
 ]
 # MaxDiffusion FLUX.1 (jax_titan.models.adapters.maxdiffusion): what its model
