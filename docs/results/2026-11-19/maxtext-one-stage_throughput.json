@@ -1,15 +1,23 @@
 {
- "what": "300 steps of --model=maxtext:<name> as one stage on WikiText-103 in the model's own tokens, random weights, 4 sequences of 2,048 tokens per GPU, bf16 compute with fp32 parameters and AdamW state, MI350X",
- "tokens_per_s_per_gpu": "median over steps 5-299",
+ "what": "--model=maxtext:<name> as one stage on WikiText-103 in the model's own tokens, random weights, 4 sequences of 2,048 tokens per GPU, bf16 compute with fp32 parameters and AdamW state, MI350X",
+ "tokens_per_s_per_gpu": "median of three runs, each the median over its steps 5-39: one run of 300 steps and two of 40; spread is their range over that median",
+ "mfu": "against 2306.9 TFLOP/s, MI350X's dense bf16 peak; the mfu in the per-step records is against the trainer's default of 2500",
+ "losses": "of the 300-step run",
  "rows": [
   {
    "model": "maxtext:qwen3-8b",
    "parallel": "dp",
    "gpus": 1,
    "tokens_per_step": 8192,
-   "steps": 300,
-   "tokens_per_s_per_gpu": 9823.116338202522,
-   "mfu": 0.18554107642334114,
+   "tokens_per_s_per_gpu": 10073.519771485331,
+   "tokens_per_s_per_gpu_of_each_run": [
+    10066.374820043136,
+    10073.519771485331,
+    10088.305160048832
+   ],
+   "spread": 0.002177028536517425,
+   "tokens_per_s_per_gpu_steps_5_299": 9823.116338202522,
+   "mfu": 0.20619743904849192,
    "peak_hbm_gib": {
     "max": 125.56026887893677,
     "min": 125.56026887893677
@@ -18,6 +26,11 @@
    "loss_steps_96_100": 6.657499885559082,
    "loss_steps_196_200": 6.008812427520752,
    "loss_steps_295_299": 5.833043575286865,
+   "loss_step_0_of_each_run": [
+    12.466288566589355,
+    12.466288566589355,
+    12.466288566589355
+   ],
    "record": "maxtext-qwen3-8b_dp1_300-steps.jsonl"
   },
   {
@@ -25,17 +38,28 @@
    "parallel": "fsdp",
    "gpus": 2,
    "tokens_per_step": 16384,
-   "steps": 300,
-   "tokens_per_s_per_gpu": 6553.3187620694225,
-   "mfu": 0.1237804557532229,
+   "tokens_per_s_per_gpu": 6672.463695481663,
+   "tokens_per_s_per_gpu_of_each_run": [
+    6650.776113931217,
+    6673.8621071695225,
+    6672.463695481663
+   ],
+   "spread": 0.0034598904230739302,
+   "tokens_per_s_per_gpu_steps_5_299": 6553.3187620694225,
+   "mfu": 0.13658035695198603,
    "peak_hbm_gib": {
-    "max": 79.80292463302612,
-    "min": 79.73770833015442
+    "max": 79.80292701721191,
+    "min": 79.80235052108765
    },
    "loss_step_0": 12.420186996459961,
    "loss_steps_96_100": 6.504271221160889,
    "loss_steps_196_200": 5.902731990814209,
    "loss_steps_295_299": 5.537710094451905,
+   "loss_step_0_of_each_run": [
+    12.420186996459961,
+    12.420186996459961,
+    12.420186996459961
+   ],
    "record": "maxtext-qwen3-8b_fsdp2_300-steps.jsonl"
   },
   {
@@ -43,17 +67,28 @@
    "parallel": "fsdp",
    "gpus": 4,
    "tokens_per_step": 32768,
-   "steps": 300,
-   "tokens_per_s_per_gpu": 8012.492300043537,
-   "mfu": 0.15134163080225146,
+   "tokens_per_s_per_gpu": 8230.321003646903,
+   "tokens_per_s_per_gpu_of_each_run": [
+    8159.959790755759,
+    8231.651941256798,
+    8230.321003646903
+   ],
+   "spread": 0.00871073564072063,
+   "tokens_per_s_per_gpu_steps_5_299": 8012.492300043537,
+   "mfu": 0.16846853453376143,
    "peak_hbm_gib": {
-    "max": 47.50115466117859,
-    "min": 44.36661434173584
+    "max": 44.36661672592163,
+    "min": 44.3663272857666
    },
    "loss_step_0": 12.468037605285645,
    "loss_steps_96_100": 6.253351783752441,
    "loss_steps_196_200": 5.649475860595703,
    "loss_steps_295_299": 5.351825428009033,
+   "loss_step_0_of_each_run": [
+    12.468037605285645,
+    12.468037605285645,
+    12.468037605285645
+   ],
    "record": "maxtext-qwen3-8b_fsdp4_300-steps.jsonl"
   },
   {
@@ -61,17 +96,28 @@
    "parallel": "fsdp",
    "gpus": 8,
    "tokens_per_step": 65536,
-   "steps": 300,
-   "tokens_per_s_per_gpu": 9036.33401027457,
-   "mfu": 0.17068016721605728,
+   "tokens_per_s_per_gpu": 9417.388745422144,
+   "tokens_per_s_per_gpu_of_each_run": [
+    9271.418629055433,
+    9422.913037313758,
+    9417.388745422144
+   ],
+   "spread": 0.016086668221269584,
+   "tokens_per_s_per_gpu_steps_5_299": 9036.33401027457,
+   "mfu": 0.192766926146988,
    "peak_hbm_gib": {
-    "max": 40.751152753829956,
-    "min": 27.586935997009277
+    "max": 27.58693838119507,
+    "min": 27.586792469024658
    },
    "loss_step_0": 12.47515869140625,
    "loss_steps_96_100": 6.056088447570801,
    "loss_steps_196_200": 5.3964409828186035,
    "loss_steps_295_299": 5.067397689819336,
+   "loss_step_0_of_each_run": [
+    12.47515869140625,
+    12.47515869140625,
+    12.47515869140625
+   ],
    "record": "maxtext-qwen3-8b_fsdp8_300-steps.jsonl"
   },
   {
@@ -79,9 +125,15 @@
    "parallel": "dp",
    "gpus": 1,
    "tokens_per_step": 8192,
-   "steps": 300,
-   "tokens_per_s_per_gpu": 10331.313670813455,
-   "mfu": 0.1927350507590662,
+   "tokens_per_s_per_gpu": 10672.535892110898,
+   "tokens_per_s_per_gpu_of_each_run": [
+    10608.87841688146,
+    10672.535892110898,
+    10724.224093045525
+   ],
+   "spread": 0.010807710307100274,
+   "tokens_per_s_per_gpu_steps_5_299": 10331.313670813455,
+   "mfu": 0.21576650096431016,
    "peak_hbm_gib": {
     "max": 123.24003434181213,
     "min": 123.24003434181213
@@ -90,6 +142,11 @@
    "loss_steps_96_100": 7.042497444152832,
    "loss_steps_196_200": 6.537971305847168,
    "loss_steps_295_299": 6.182012748718262,
+   "loss_step_0_of_each_run": [
+    12.334728240966797,
+    12.334728240966797,
+    12.334728240966797
+   ],
    "record": "maxtext-llama3.1-8b_dp1_300-steps.jsonl"
   },
   {
@@ -97,17 +154,28 @@
    "parallel": "fsdp",
    "gpus": 2,
    "tokens_per_step": 16384,
-   "steps": 300,
-   "tokens_per_s_per_gpu": 6872.570328471759,
-   "mfu": 0.12821072259622557,
+   "tokens_per_s_per_gpu": 6913.357301162503,
+   "tokens_per_s_per_gpu_of_each_run": [
+    6936.637366351118,
+    6913.357301162503,
+    6905.819336280589
+   ],
+   "spread": 0.0044577516723093135,
+   "tokens_per_s_per_gpu_steps_5_299": 6872.570328471759,
+   "mfu": 0.1397672427497328,
    "peak_hbm_gib": {
-    "max": 78.25082969665527,
+    "max": 78.12146019935608,
     "min": 78.12145829200745
    },
    "loss_step_0": 12.30960464477539,
    "loss_steps_96_100": 6.910767364501953,
    "loss_steps_196_200": 6.341188144683838,
    "loss_steps_295_299": 6.025697135925293,
+   "loss_step_0_of_each_run": [
+    12.30960464477539,
+    12.30960464477539,
+    12.30960464477539
+   ],
    "record": "maxtext-llama3.1-8b_fsdp2_300-steps.jsonl"
   },
   {
@@ -115,17 +183,28 @@
    "parallel": "fsdp",
    "gpus": 4,
    "tokens_per_step": 32768,
-   "steps": 300,
-   "tokens_per_s_per_gpu": 8420.152737244389,
-   "mfu": 0.15708153066696198,
+   "tokens_per_s_per_gpu": 8637.97034508904,
+   "tokens_per_s_per_gpu_of_each_run": [
+    8562.163215610168,
+    8641.278910969251,
+    8637.97034508904
+   ],
+   "spread": 0.009159060774509752,
+   "tokens_per_s_per_gpu_steps_5_299": 8420.152737244389,
+   "mfu": 0.17463371926170237,
    "peak_hbm_gib": {
-    "max": 47.41506028175354,
-    "min": 45.62996172904968
+    "max": 45.75471377372742,
+    "min": 45.629963636398315
    },
    "loss_step_0": 12.293581008911133,
    "loss_steps_96_100": 6.572859477996826,
    "loss_steps_196_200": 6.000413513183593,
    "loss_steps_295_299": 5.726199340820313,
+   "loss_step_0_of_each_run": [
+    12.293581008911133,
+    12.293581008911133,
+    12.293581008911133
+   ],
    "record": "maxtext-llama3.1-8b_fsdp4_300-steps.jsonl"
   },
   {
@@ -133,17 +212,28 @@
    "parallel": "fsdp",
    "gpus": 8,
    "tokens_per_step": 65536,
-   "steps": 300,
-   "tokens_per_s_per_gpu": 9608.653661886912,
-   "mfu": 0.17925352092269276,
+   "tokens_per_s_per_gpu": 9955.171938949647,
+   "tokens_per_s_per_gpu_of_each_run": [
+    9781.407886676005,
+    9963.14488889095,
+    9955.171938949647
+   ],
+   "spread": 0.018255536250850624,
+   "tokens_per_s_per_gpu_steps_5_299": 9608.653661886912,
+   "mfu": 0.20126356448733435,
    "peak_hbm_gib": {
-    "max": 42.16505837440491,
-    "min": 27.981151819229126
+    "max": 28.043527841567993,
+    "min": 27.98115372657776
    },
    "loss_step_0": 12.303653717041016,
    "loss_steps_96_100": 6.378322982788086,
    "loss_steps_196_200": 5.889055633544922,
    "loss_steps_295_299": 5.6841428756713865,
+   "loss_step_0_of_each_run": [
+    12.303653717041016,
+    12.303653717041016,
+    12.303653717041016
+   ],
    "record": "maxtext-llama3.1-8b_fsdp8_300-steps.jsonl"
   },
   {
@@ -151,9 +241,15 @@
    "parallel": "dp",
    "gpus": 1,
    "tokens_per_step": 8192,
-   "steps": 300,
-   "tokens_per_s_per_gpu": 19707.764418151928,
-   "mfu": 0.18881278318820255,
+   "tokens_per_s_per_gpu": 20056.62032166721,
+   "tokens_per_s_per_gpu_of_each_run": [
+    20003.32908230245,
+    20112.903771666464,
+    20056.62032166721
+   ],
+   "spread": 0.005463267868995839,
+   "tokens_per_s_per_gpu_steps_5_299": 19707.764418151928,
+   "mfu": 0.208239457977044,
    "peak_hbm_gib": {
     "max": 76.51796865463257,
     "min": 76.51796865463257
@@ -162,6 +258,11 @@
    "loss_steps_96_100": 7.272447681427002,
    "loss_steps_196_200": 6.570920848846436,
    "loss_steps_295_299": 6.551511573791504,
+   "loss_step_0_of_each_run": [
+    12.910223007202148,
+    12.910223007202148,
+    12.910223007202148
+   ],
    "record": "maxtext-gemma3-4b_dp1_300-steps.jsonl"
   },
   {
@@ -169,17 +270,28 @@
    "parallel": "fsdp",
    "gpus": 2,
    "tokens_per_step": 16384,
-   "steps": 300,
-   "tokens_per_s_per_gpu": 13722.307413177588,
-   "mfu": 0.1314683390501543,
+   "tokens_per_s_per_gpu": 13815.620522705678,
+   "tokens_per_s_per_gpu_of_each_run": [
+    13865.227177182085,
+    13815.620522705678,
+    13806.02799559136
+   ],
+   "spread": 0.004284945543591999,
+   "tokens_per_s_per_gpu_steps_5_299": 13722.307413177588,
+   "mfu": 0.14344178047568523,
    "peak_hbm_gib": {
-    "max": 49.62636399269104,
-    "min": 49.54840803146362
+    "max": 49.49957871437073,
+    "min": 49.498889446258545
    },
    "loss_step_0": 12.891636848449707,
    "loss_steps_96_100": 7.150348281860351,
    "loss_steps_196_200": 6.461003112792969,
    "loss_steps_295_299": 6.273449325561524,
+   "loss_step_0_of_each_run": [
+    12.891636848449707,
+    12.891636848449707,
+    12.891636848449707
+   ],
    "record": "maxtext-gemma3-4b_fsdp2_300-steps.jsonl"
   },
   {
@@ -187,17 +299,28 @@
    "parallel": "fsdp",
    "gpus": 4,
    "tokens_per_step": 32768,
-   "steps": 300,
-   "tokens_per_s_per_gpu": 16112.65550308117,
-   "mfu": 0.15436937775079965,
+   "tokens_per_s_per_gpu": 16316.900927734005,
+   "tokens_per_s_per_gpu_of_each_run": [
+    16345.419188983218,
+    16316.900927734005,
+    16304.458358067803
+   ],
+   "spread": 0.0025103315327357264,
+   "tokens_per_s_per_gpu_steps_5_299": 16112.65550308117,
+   "mfu": 0.16941152350507327,
    "peak_hbm_gib": {
-    "max": 35.96586298942566,
-    "min": 35.88932514190674
+    "max": 35.88932704925537,
+    "min": 35.888981103897095
    },
    "loss_step_0": 12.876384735107422,
    "loss_steps_96_100": 6.985650634765625,
    "loss_steps_196_200": 6.306444454193115,
    "loss_steps_295_299": 6.150112342834473,
+   "loss_step_0_of_each_run": [
+    12.876384735107422,
+    12.876384735107422,
+    12.876384735107422
+   ],
    "record": "maxtext-gemma3-4b_fsdp4_300-steps.jsonl"
   },
   {
@@ -205,17 +328,28 @@
    "parallel": "fsdp",
    "gpus": 8,
    "tokens_per_step": 65536,
-   "steps": 300,
-   "tokens_per_s_per_gpu": 17728.412870843196,
-   "mfu": 0.16984934996332524,
+   "tokens_per_s_per_gpu": 18076.556783232234,
+   "tokens_per_s_per_gpu_of_each_run": [
+    17994.017502928764,
+    18100.39175741076,
+    18076.556783232234
+   ],
+   "spread": 0.005884652467701725,
+   "tokens_per_s_per_gpu_steps_5_299": 17728.412870843196,
+   "mfu": 0.18768129057940075,
    "peak_hbm_gib": {
-    "max": 29.29500126838684,
-    "min": 28.975801944732666
+    "max": 28.97580075263977,
+    "min": 28.97384762763977
    },
    "loss_step_0": 12.862373352050781,
    "loss_steps_96_100": 6.880307960510254,
    "loss_steps_196_200": 6.076436710357666,
    "loss_steps_295_299": 5.761870193481445,
+   "loss_step_0_of_each_run": [
+    12.862373352050781,
+    12.862373352050781,
+    12.862373352050781
+   ],
    "record": "maxtext-gemma3-4b_fsdp8_300-steps.jsonl"
   },
   {
@@ -223,9 +357,15 @@
    "parallel": "dp",
    "gpus": 1,
    "tokens_per_step": 8192,
-   "steps": 300,
-   "tokens_per_s_per_gpu": 10672.897240898381,
-   "mfu": 0.18900836881225178,
+   "tokens_per_s_per_gpu": 10916.146255869935,
+   "tokens_per_s_per_gpu_of_each_run": [
+    10882.54376266499,
+    10916.146255869935,
+    10923.527845670613
+   ],
+   "spread": 0.0037544461245730683,
+   "tokens_per_s_per_gpu_steps_5_299": 10672.897240898381,
+   "mfu": 0.2094977154628951,
    "peak_hbm_gib": {
     "max": 112.89042592048645,
     "min": 112.89042592048645
@@ -234,6 +374,11 @@
    "loss_steps_96_100": 6.558184242248535,
    "loss_steps_196_200": 5.741143989562988,
    "loss_steps_295_299": 5.87451171875,
+   "loss_step_0_of_each_run": [
+    10.806797981262207,
+    10.806797981262207,
+    10.806797981262207
+   ],
    "record": "maxtext-mistral-7b_dp1_300-steps.jsonl"
   },
   {
@@ -241,17 +386,28 @@
    "parallel": "fsdp",
    "gpus": 2,
    "tokens_per_step": 16384,
-   "steps": 300,
-   "tokens_per_s_per_gpu": 7008.572791599439,
-   "mfu": 0.12411614963985508,
+   "tokens_per_s_per_gpu": 7146.497527721487,
+   "tokens_per_s_per_gpu_of_each_run": [
+    7068.564023039251,
+    7148.8750772421445,
+    7146.497527721487
+   ],
+   "spread": 0.011237820189731322,
+   "tokens_per_s_per_gpu_steps_5_299": 7008.572791599439,
+   "mfu": 0.13715233109979671,
    "peak_hbm_gib": {
-    "max": 73.32360649108887,
-    "min": 73.3121087551117
+    "max": 73.32896995544434,
+    "min": 73.3236083984375
    },
    "loss_step_0": 10.8443603515625,
    "loss_steps_96_100": 6.406526756286621,
    "loss_steps_196_200": 5.753038501739502,
    "loss_steps_295_299": 5.594382286071777,
+   "loss_step_0_of_each_run": [
+    10.8443603515625,
+    10.8443603515625,
+    10.8443603515625
+   ],
    "record": "maxtext-mistral-7b_fsdp2_300-steps.jsonl"
   },
   {
@@ -259,17 +415,28 @@
    "parallel": "fsdp",
    "gpus": 4,
    "tokens_per_step": 32768,
-   "steps": 300,
-   "tokens_per_s_per_gpu": 8665.823373739682,
-   "mfu": 0.15346471565463624,
+   "tokens_per_s_per_gpu": 8868.988444415076,
+   "tokens_per_s_per_gpu_of_each_run": [
+    8801.816315248827,
+    8868.988444415076,
+    8874.454025277406
+   ],
+   "spread": 0.008190078325597547,
+   "tokens_per_s_per_gpu_steps_5_299": 8665.823373739682,
+   "mfu": 0.170209593570868,
    "peak_hbm_gib": {
-    "max": 44.50099778175354,
-    "min": 39.777634382247925
+    "max": 39.90238642692566,
+    "min": 39.77763628959656
    },
    "loss_step_0": 10.851531028747559,
    "loss_steps_96_100": 6.217946243286133,
    "loss_steps_196_200": 5.57803897857666,
    "loss_steps_295_299": 5.4018889427185055,
+   "loss_step_0_of_each_run": [
+    10.851531028747559,
+    10.851531028747559,
+    10.851531028747559
+   ],
    "record": "maxtext-mistral-7b_fsdp4_300-steps.jsonl"
   },
   {
@@ -277,17 +444,28 @@
    "parallel": "fsdp",
    "gpus": 8,
    "tokens_per_step": 65536,
-   "steps": 300,
-   "tokens_per_s_per_gpu": 9892.847315580202,
-   "mfu": 0.1751943162032249,
+   "tokens_per_s_per_gpu": 10230.174232269597,
+   "tokens_per_s_per_gpu_of_each_run": [
+    10074.757370667689,
+    10230.174232269597,
+    10240.516383460785
+   ],
+   "spread": 0.016202951096398095,
+   "tokens_per_s_per_gpu_steps_5_299": 9892.847315580202,
+   "mfu": 0.19633285229165895,
    "peak_hbm_gib": {
-    "max": 39.25099587440491,
-    "min": 23.157999753952026
+    "max": 23.282875776290894,
+    "min": 23.15800166130066
    },
    "loss_step_0": 10.848132133483887,
    "loss_steps_96_100": 6.020335006713867,
    "loss_steps_196_200": 5.450772380828857,
    "loss_steps_295_299": 5.3031305313110355,
+   "loss_step_0_of_each_run": [
+    10.848132133483887,
+    10.848132133483887,
+    10.848132133483887
+   ],
    "record": "maxtext-mistral-7b_fsdp8_300-steps.jsonl"
   },
   {
@@ -295,59 +473,110 @@
    "parallel": "fsdp",
    "gpus": 8,
    "tokens_per_step": 65536,
-   "steps": 300,
-   "tokens_per_s_per_gpu": 2114.2333641610103,
-   "mfu": 0.017476980365618743,
+   "tokens_per_s_per_gpu": 2158.374264947358,
+   "tokens_per_s_per_gpu_of_each_run": [
+    2155.6581732502364,
+    2158.462261581862,
+    2158.374264947358
+   ],
+   "spread": 0.0012991668670095666,
+   "tokens_per_s_per_gpu_steps_5_299": 2114.2333641610103,
+   "mfu": 0.01933532471897739,
    "peak_hbm_gib": {
-    "max": 227.5811641216278,
-    "min": 82.20605611801147
+    "max": 82.20410537719727,
+    "min": 82.20410299301147
    },
    "loss_step_0": 12.402836799621582,
    "loss_steps_96_100": 6.1338982582092285,
    "loss_steps_196_200": 5.537644004821777,
    "loss_steps_295_299": 5.319775009155274,
+   "loss_step_0_of_each_run": [
+    12.402836799621582,
+    12.402836799621582,
+    12.402836799621582
+   ],
    "record": "maxtext-qwen3-30b-a3b_fsdp8_300-steps.jsonl"
   }
  ],
  "maxtext_own_trainer": {
-  "what": "maxtext.trainers.pre_train.train of the same MaxText 0.2.5 on the same node, stack and day: synthetic data, 4 sequences of 2,048 tokens per GPU, full remat, dot-product attention, 40 steps; tokens/s per GPU is the median over steps 5-39 of the Tokens/s/device it prints",
+  "what": "maxtext.trainers.pre_train.train of the same MaxText 0.2.5 on the same node, stack and day: synthetic data, 4 sequences of 2,048 tokens per GPU, full remat, dot-product attention, 40 steps, three runs; tokens/s per GPU is the median over steps 5-39 of the Tokens/s/device it prints, then the median of the runs",
   "rows": [
    {
     "model": "llama3.1-8b",
-    "layout": "1 GPU",
     "gpus": 1,
-    "steps": 40,
-    "tokens_per_step": 8192,
-    "tokens_per_s_per_gpu": 10261.511
+    "layout": "1 GPU",
+    "maxtext_trainer_tokens_per_s_per_gpu": 10189.004,
+    "maxtext_trainer_of_each_run": [
+     10261.511,
+     10167.973,
+     10189.004
+    ],
+    "maxtext_trainer_spread": 0.009180288868274118,
+    "jax_titan_tokens_per_s_per_gpu": 10672.535892110898,
+    "jax_titan_of_each_run": [
+     10608.87841688146,
+     10672.535892110898,
+     10724.224093045525
+    ]
    },
    {
     "model": "llama3.1-8b",
-    "layout": "FSDP",
     "gpus": 8,
-    "steps": 40,
-    "tokens_per_step": 65536,
-    "tokens_per_s_per_gpu": 9672.319
+    "layout": "FSDP",
+    "maxtext_trainer_tokens_per_s_per_gpu": 9660.32,
+    "maxtext_trainer_of_each_run": [
+     9672.319,
+     9660.32,
+     9659.193
+    ],
+    "maxtext_trainer_spread": 0.0013587541613528542,
+    "jax_titan_tokens_per_s_per_gpu": 9955.171938949647,
+    "jax_titan_of_each_run": [
+     9781.407886676005,
+     9963.14488889095,
+     9955.171938949647
+    ]
    },
    {
     "model": "qwen3-8b",
-    "layout": "1 GPU",
     "gpus": 1,
-    "steps": 40,
-    "tokens_per_step": 8192,
-    "tokens_per_s_per_gpu": 9742.801
+    "layout": "1 GPU",
+    "maxtext_trainer_tokens_per_s_per_gpu": 9669.226,
+    "maxtext_trainer_of_each_run": [
+     9742.801,
+     9645.431,
+     9669.226
+    ],
+    "maxtext_trainer_spread": 0.01007009247689515,
+    "jax_titan_tokens_per_s_per_gpu": 10073.519771485331,
+    "jax_titan_of_each_run": [
+     10066.374820043136,
+     10073.519771485331,
+     10088.305160048832
+    ]
    },
    {
     "model": "qwen3-8b",
-    "layout": "FSDP",
     "gpus": 8,
-    "steps": 40,
-    "tokens_per_step": 65536,
-    "tokens_per_s_per_gpu": 9212.931
+    "layout": "FSDP",
+    "maxtext_trainer_tokens_per_s_per_gpu": 9194.009,
+    "maxtext_trainer_of_each_run": [
+     9212.931,
+     9188.296,
+     9194.009
+    ],
+    "maxtext_trainer_spread": 0.002679462245468785,
+    "jax_titan_tokens_per_s_per_gpu": 9417.388745422144,
+    "jax_titan_of_each_run": [
+     9271.418629055433,
+     9422.913037313758,
+     9417.388745422144
+    ]
    }
   ]
  },
  "expert_matmul_forms": {
-  "what": "maxtext:qwen3-30b-a3b with 8 of its 48 layers (5.6B parameters), dp on one MI350X, 4 sequences of 2,048 tokens, 30 steps; tokens/s per GPU is the median over steps 5-29",
+  "what": "maxtext:qwen3-30b-a3b with 8 of its 48 layers (5.6B parameters), dp on one MI350X, 4 sequences of 2,048 tokens, 30 steps, three runs; tokens/s per GPU is the median over steps 5-29, then the median of the runs",
   "rows": [
    {
     "form": "dense",
@@ -355,6 +584,12 @@
      "base_num_decoder_layers": 8
     },
     "tokens_per_s_per_gpu": 14791.570448834595,
+    "tokens_per_s_per_gpu_of_each_run": [
+     14791.570448834595,
+     14793.850416500005,
+     14681.979898011594
+    ],
+    "spread": 0.007563126503394723,
     "peak_hbm_gib": 103.33483552932739,
     "loss_step_0": 12.493892669677734,
     "loss_steps_25_29": 7.005512714385986
@@ -367,6 +602,12 @@
      "megablox": false
     },
     "tokens_per_s_per_gpu": 3026.6934521093467,
+    "tokens_per_s_per_gpu_of_each_run": [
+     3026.6934521093467,
+     3026.2597292216756,
+     3033.152661165931
+    ],
+    "spread": 0.0022773802677148115,
     "peak_hbm_gib": 186.42901587486267,
     "loss_step_0": 12.493952751159668,
     "loss_steps_25_29": 7.007494735717773
@@ -378,7 +619,13 @@
      "sparse_matmul": true,
      "megablox": true
     },
-    "tokens_per_s_per_gpu": 2035.8282650836857,
+    "tokens_per_s_per_gpu": 2023.6215662219888,
+    "tokens_per_s_per_gpu_of_each_run": [
+     2035.8282650836857,
+     2023.6215662219888,
+     1900.5155695503006
+    ],
+    "spread": 0.06686660084672245,
     "peak_hbm_gib": 91.29672503471375,
     "loss_step_0": 12.49388599395752,
     "loss_steps_25_29": 7.006203937530517
