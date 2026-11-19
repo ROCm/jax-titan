@@ -30,9 +30,11 @@ This is the target design; [What works](#what-works) lists what runs today.
   into another layout of the same stages.
 - Llama 3 models using MaxText's `llama3.1-8b` configuration, WikiText-103
   with the Llama 3 tokenizer, and throughput and MFU reporting.
-- MaxText models as pipeline stages, built from MaxText 0.2.5's own layers
-  (Llama 2 and 3 so far). They match MaxText's model and, with the weights
-  mapped, JAX-Titan's Llama, and train with `--model=maxtext:<name>`.
+- MaxText models, built from MaxText 0.2.5's own layers and trained with
+  `--model=maxtext:<name>`: any of its model configs as one stage
+  (`--parallel=dp` or `fsdp`), which gives MaxText's own loss, and the Llama
+  family also as pipeline stages, which match MaxText's model and, with the
+  weights mapped, JAX-Titan's Llama.
 - MaxDiffusion's FLUX.1 (dev and schnell) as pipeline stages of its
   double- and single-stream blocks, with its flow-matching loss, matching
   MaxDiffusion's transformer; `--model=maxdiffusion:flux-dev` trains it on
