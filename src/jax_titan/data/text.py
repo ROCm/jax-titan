@@ -13,15 +13,23 @@ WIKITEXT_103_URL = (
 WIKITEXT_103_SHARDS = {"train": 2, "validation": 1}
 
 
-def prepare_wikitext103(data_dir: str, split: str = "train") -> pathlib.Path:
-  """Downloads WikiText-103 (raw) and writes Llama 3 token ids as uint32."""
+def prepare_wikitext103(data_dir: str, split: str = "train", tokenizer: str = "",
+                        name: str = "") -> pathlib.Path:
+  """Downloads WikiText-103 (raw) and writes its token ids as uint32.
+
+  The ids are Llama 3's, in `wikitext103_<split>.llama3.bin`, or with
+  `tokenizer`, the directory of a published model, that model's
+  (`jax_titan.data.tokenizer.HubTokenizer`), in `wikitext103_<split>.<name>.bin`;
+  `name` defaults to the directory's name.
+  """
   import pyarrow.parquet as pq  # pylint: disable=g-import-not-at-top
 
-  from jax_titan.data.tokenizer import Llama3Tokenizer  # pylint: disable=g-import-not-at-top
+  from jax_titan.data import tokenizer as tokenizers  # pylint: disable=g-import-not-at-top
 
   root = pathlib.Path(data_dir)
   root.mkdir(parents=True, exist_ok=True)
-  out = root / f"wikitext103_{split}.llama3.bin"
+  name = name or (pathlib.Path(tokenizer).name if tokenizer else "llama3")
+  out = root / f"wikitext103_{split}.{name}.bin"
   if out.exists():
     return out
   num_shards = WIKITEXT_103_SHARDS[split]
@@ -41,11 +49,16 @@ def prepare_wikitext103(data_dir: str, split: str = "train") -> pathlib.Path:
     current.append(line)
   if current:
     docs.append("".join(current))
-  tok = Llama3Tokenizer()
+  if tokenizer:
+    tok = tokenizers.HubTokenizer(tokenizer)
+    bos = []
+  else:
+    tok = tokenizers.Llama3Tokenizer()
+    bos = [tok.bos_id]
   ids = []
   for start in range(0, len(docs), 2048):
     for doc_ids in tok.encode_batch(docs[start:start + 2048]):
-      ids.append(np.asarray([tok.bos_id, *doc_ids, tok.eos_id], np.uint32))
+      ids.append(np.asarray([*bos, *doc_ids, tok.eos_id], np.uint32))
   tokens = np.concatenate(ids)
   tmp = out.with_suffix(".tmp")
   tokens.tofile(tmp)
@@ -82,9 +95,19 @@ class WindowSampler:
 
 
 if __name__ == "__main__":
+  import argparse
+
   from jax_titan import paths  # pylint: disable=g-import-not-at-top
 
+  _parser = argparse.ArgumentParser(description="Writes the WikiText-103 token files.")
+  _parser.add_argument(
+      "--tokenizer", default="",
+      help="The directory of a published model, for that model's token ids instead of Llama 3's.")
+  _parser.add_argument(
+      "--name", default="", help="The token files' name; default: the directory's.")
+  _args = _parser.parse_args()
   for _split in WIKITEXT_103_SHARDS:
-    _path = prepare_wikitext103(str(paths.work_dir() / "data"), _split)
+    _path = prepare_wikitext103(
+        str(paths.work_dir() / "data"), _split, _args.tokenizer, _args.name)
     _count = np.memmap(_path, dtype=np.uint32, mode="r").shape[0]
     print(f"{_split}: {_path} ({_count / 1e6:.1f}M tokens)")
