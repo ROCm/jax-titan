@@ -26,11 +26,12 @@ SMALL = {
     "per_device_batch_size": 8, "dtype": "float32", "weight_dtype": "float32",
     "matmul_precision": "highest",
 }
-# One model per decoder block; the last is a mixture of experts with its load-balance loss on.
+# One model per decoder block: Gemma 3 with one of its global attention layers, which is every
+# sixth, and a mixture of experts with its load-balance loss on.
 WHOLE = {
     "llama3.1-8b": {},
     "mistral-7b": {},
-    "gemma3-4b": {},
+    "gemma3-4b": {"base_num_decoder_layers": 6},
     "qwen3-8b": {},
     "qwen3-30b-a3b": {"base_moe_mlp_dim": 96, "num_experts": 8, "num_experts_per_tok": 2,
                       "load_balance_loss_weight": 0.01},
@@ -61,11 +62,12 @@ def test_whole_model_gives_maxtexts_loss_and_gradient(name):
   from flax import linen as nn  # pylint: disable=g-import-not-at-top
   from flax import nnx  # pylint: disable=g-import-not-at-top
   import jax  # pylint: disable=g-import-not-at-top
+  from jax_titan import ops  # pylint: disable=g-import-not-at-top
   from jax_titan.models.adapters import maxtext as mt  # pylint: disable=g-import-not-at-top
   from maxtext.models import models  # pylint: disable=g-import-not-at-top
   from maxtext.trainers.pre_train import train  # pylint: disable=g-import-not-at-top
 
-  cfg = mt.config(name, **SMALL, **WHOLE[name])
+  cfg = mt.config(name, **{**SMALL, **WHOLE[name]})
   mesh = mt.mesh(cfg, jax.devices()[:1])
   model = mt.WholeModel(cfg, mesh)
   (params,) = model.init(0)
@@ -92,6 +94,11 @@ def test_whole_model_gives_maxtexts_loss_and_gradient(name):
   np.testing.assert_allclose(loss, ref_loss, rtol=1e-5)
   jax.tree.map(lambda a, b: np.testing.assert_allclose(a, b, rtol=1e-3, atol=1e-6),
                grads, ref_grads)
+  # The same with the model's global causal attention through jax_titan.ops.
+  (routed,) = mt.WholeModel(cfg, mesh, attention=ops.attention).stage_fns()
+  ops.reset_selections()
+  np.testing.assert_allclose(jax.jit(routed)(params, x, t), loss, rtol=1e-5)
+  assert any(s.op == "attention" for s in ops.selections())
   if cfg.num_experts > 1:
     unweighted = {**SMALL, **WHOLE[name], "load_balance_loss_weight": 0.0}
     (plain,) = mt.WholeModel(mt.config(name, **unweighted), mesh).stage_fns()
