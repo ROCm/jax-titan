@@ -2,22 +2,26 @@
 for Command A+.
 
 `--model=maxtext:<name>` trains a MaxText model config (e.g.
-`maxtext:llama3.1-8b`) on the token data, and `--model=maxdiffusion:<flavor>`
-trains FLUX.1 (`flux-dev` or `flux-schnell`) or, from MaxDiffusion's Ideogram
-branch, Ideogram 4 (`ideogram4`) on synthetic rectified-flow batches until an
-image pipeline exists. `--model=ideogram4` trains JAX-Titan's own Ideogram 4
-(`jax_titan.models.ideogram`) on the same batches, or on a cache of image
-tokens and text features (`jax_titan.data.ideogram`). They run as a Shardy MPMD
-pipeline with data parallelism inside each stage, reducing gradients in every
-microbatch's backward pass, and attention in native JAX unless the ops policy
-names attention. Ideogram 4's attention does not follow the policy: the native
-model passes a mask, which the providers decline, and the branch's model runs
-its own attention. `--model=command-a-plus` trains JAX-Titan's Command A+
+`maxtext:llama3.1-8b` or `maxtext:qwen3-8b`) on the token data, and
+`--model=maxdiffusion:<flavor>` trains FLUX.1 (`flux-dev` or `flux-schnell`)
+or, from MaxDiffusion's Ideogram branch, Ideogram 4 (`ideogram4`) on synthetic
+rectified-flow batches until an image pipeline exists. `--model=ideogram4`
+trains JAX-Titan's own Ideogram 4 (`jax_titan.models.ideogram`) on the same
+batches, or on a cache of image tokens and text features
+(`jax_titan.data.ideogram`). They run as a Shardy MPMD pipeline with data
+parallelism inside each stage, reducing gradients in every microbatch's
+backward pass, and attention in native JAX unless the ops policy names
+attention. Ideogram 4's attention does not follow the policy: the native model
+passes a mask, which the providers decline, and the branch's model runs its
+own attention. `--model=command-a-plus` trains JAX-Titan's Command A+
 (`jax_titan.models.command_a`) on token windows or on a cache of conversations
 (`jax_titan.data.command_a`), as one stage or, with its embedding frozen, as a
 pipeline. `--parallel=dp` runs the same stages, weights and batches as one
-data-parallel `jax.jit` program, the no-pipeline reference; for Ideogram 4 and
-Command A+, `--parallel=fsdp` also shards parameters and optimizer state.
+data-parallel `jax.jit` program, the no-pipeline reference; for MaxText's
+models, Ideogram 4 and Command A+, `--parallel=fsdp` also shards parameters and
+optimizer state. Of MaxText's models, the Llama family has pipeline stages;
+every other one, and every one under `--parallel=fsdp`, trains as one stage,
+MaxText's `Transformer` called whole.
 
 The layouts here take a staged model, any object with `init(seed)` and
 `abstract(seed)`, the parameters of each stage and their shapes, and
@@ -364,13 +368,25 @@ def _maxtext(args, name, devices, optimizer):
       **_overrides(args),
   }
   cfg = mt.config(name, **overrides)
+  # MaxText's Transformer whole, where the stages of `mt.Model` do not apply.
+  whole = args.parallel == "fsdp" or not mt.has_split(cfg)
+  if whole and args.parallel == "mpmd":
+    raise NotImplementedError(
+        f"{args.model} has no pipeline stages, which only MaxText's Llama models have: "
+        "--parallel=dp or --parallel=fsdp")
+  if whole and args.num_stages != 1:
+    raise NotImplementedError(
+        f"{args.model} with --parallel={args.parallel} is one stage: --num_stages=1")
   if args.parallel == "mpmd":
     topology = _topology(args, devices, lambda d: mt.mesh(cfg, d))
     mesh = next(iter(topology.values()))
   else:
     mesh = mt.mesh(cfg, devices)
-  model = mt.Model(cfg, mesh, num_stages=args.num_stages, layers=_stage_layers(args),
-                   attention=_routed_attention())
+  if whole:
+    model = mt.WholeModel(cfg, mesh, attention=_routed_attention())
+  else:
+    model = mt.Model(cfg, mesh, num_stages=args.num_stages, layers=_stage_layers(args),
+                     attention=_routed_attention())
 
   mb, num_mb, seq = args.microbatch_size, args.microbatches, args.seq_len
   tokens = (jax.ShapeDtypeStruct((num_mb, mb, seq), jnp.int32), P(None, "data", None))
@@ -384,14 +400,16 @@ def _maxtext(args, name, devices, optimizer):
   else:
     layout = _spmd_layout(args, mesh, model, optimizer, tokens, tokens, split_batch)
   tokens_per_step = num_mb * mb * seq
-  flops = model.flops_per_token(seq) * tokens_per_step
-  try:
-    from jax_titan.observability import flops as flops_lib  # pylint: disable=g-import-not-at-top
+  flops = (model.flops_per_token() if whole else model.flops_per_token(seq)) * tokens_per_step
+  hardware = None
+  if mt.has_split(cfg):
+    try:
+      from jax_titan.observability import flops as flops_lib  # pylint: disable=g-import-not-at-top
 
-    hardware = flops + flops_lib.recompute_flops_per_token(
-        mt.llama_config(cfg), seq, cfg.remat_policy != "none") * tokens_per_step
-  except NotImplementedError:
-    hardware = None
+      hardware = flops + flops_lib.recompute_flops_per_token(
+          mt.llama_config(cfg), seq, cfg.remat_policy != "none") * tokens_per_step
+    except NotImplementedError:
+      pass
   work = Workload(
       num_params=_num_params(model.abstract(args.seed)),
       tokens_per_step=tokens_per_step,
@@ -734,7 +752,7 @@ def build(args, devices, optimizer) -> tuple[Layout, Workload]:
   provider, _, name = args.model.partition(":")
   native = args.model in MODELS
   ideogram = args.model == "ideogram4" or (provider == "maxdiffusion" and name == "ideogram4")
-  fsdp = native or ideogram
+  fsdp = native or ideogram or provider == "maxtext"
   if args.stage_fsdp or args.tensor_parallel != 1 or (args.parallel == "fsdp" and not fsdp):
     raise NotImplementedError(
         f"{args.model} trains as an MPMD pipeline with data parallelism inside stages, or as "
