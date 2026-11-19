@@ -19,7 +19,7 @@ own attention. `--model=command-a-plus` trains JAX-Titan's Command A+
 pipeline. `--parallel=dp` runs the same stages, weights and batches as one
 data-parallel `jax.jit` program, the no-pipeline reference; for MaxText's
 models, Ideogram 4 and Command A+, `--parallel=fsdp` also shards parameters and
-optimizer state. Of MaxText's models, the Llama family has pipeline stages;
+optimizer state. Of MaxText's models, Llama 2 and 3 have pipeline stages;
 every other one, and every one under `--parallel=fsdp`, trains as one stage,
 MaxText's `Transformer` called whole.
 
@@ -358,22 +358,29 @@ def _routed_attention():
 def _maxtext(args, name, devices, optimizer):
   import jax  # pylint: disable=g-import-not-at-top
   import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+  from jax_titan.models import llama  # pylint: disable=g-import-not-at-top
   from jax_titan.models.adapters import maxtext as mt  # pylint: disable=g-import-not-at-top
 
   P = jax.sharding.PartitionSpec  # pylint: disable=invalid-name
 
-  overrides = {
-      "max_target_length": args.seq_len,
-      "remat_policy": "full" if args.remat else "none",
-      **_overrides(args),
-  }
-  cfg = mt.config(name, **overrides)
+  if not args.remat:
+    raise NotImplementedError(
+        f"{args.model}: MaxText rematerializes its scanned layers under every remat_policy")
+  cfg = mt.config(
+      name, **{"remat_policy": "full", **_overrides(args), "max_target_length": args.seq_len})
+  own_tokens = cfg.vocab_size != llama.FLAVORS["llama3.1-8b"].vocab_size
+  held_out = args.eval_every and args.data != "synthetic" and not args.eval_data
+  if own_tokens and (not args.data or held_out):
+    raise ValueError(
+        f"{args.model} does not read Llama 3's tokens, which the default --data and --eval_data "
+        "hold: name its own token files (python -m jax_titan.data.text --tokenizer)")
   # MaxText's Transformer whole, where the stages of `mt.Model` do not apply.
-  whole = args.parallel == "fsdp" or not mt.has_split(cfg)
+  split = mt.has_split(cfg)
+  whole = args.parallel == "fsdp" or not split
   if whole and args.parallel == "mpmd":
     raise NotImplementedError(
-        f"{args.model} has no pipeline stages, which only MaxText's Llama models have: "
-        "--parallel=dp or --parallel=fsdp")
+        f"{args.model} has no pipeline stages, which take MaxText's llama2 decoder block as "
+        "one scanned stack with an untied output head: --parallel=dp or --parallel=fsdp")
   if whole and args.num_stages != 1:
     raise NotImplementedError(
         f"{args.model} with --parallel={args.parallel} is one stage: --num_stages=1")
@@ -383,7 +390,8 @@ def _maxtext(args, name, devices, optimizer):
   else:
     mesh = mt.mesh(cfg, devices)
   if whole:
-    model = mt.WholeModel(cfg, mesh, attention=_routed_attention())
+    model = mt.WholeModel(cfg, mesh, attention=_routed_attention(),
+                          fsdp=args.parallel == "fsdp")
   else:
     model = mt.Model(cfg, mesh, num_stages=args.num_stages, layers=_stage_layers(args),
                      attention=_routed_attention())
@@ -402,7 +410,7 @@ def _maxtext(args, name, devices, optimizer):
   tokens_per_step = num_mb * mb * seq
   flops = (model.flops_per_token() if whole else model.flops_per_token(seq)) * tokens_per_step
   hardware = None
-  if mt.has_split(cfg):
+  if split:
     try:
       from jax_titan.observability import flops as flops_lib  # pylint: disable=g-import-not-at-top
 
@@ -755,9 +763,8 @@ def build(args, devices, optimizer) -> tuple[Layout, Workload]:
   fsdp = native or ideogram or provider == "maxtext"
   if args.stage_fsdp or args.tensor_parallel != 1 or (args.parallel == "fsdp" and not fsdp):
     raise NotImplementedError(
-        f"{args.model} trains as an MPMD pipeline with data parallelism inside stages, or as "
-        "--parallel=dp" + (" or --parallel=fsdp" if fsdp else "")
-    )
+        f"{args.model} takes neither --stage_fsdp nor --tensor_parallel"
+        + ("" if fsdp else " nor --parallel=fsdp"))
   if args.parallel == "mpmd" and args.reduce_grads != "microbatch":
     raise NotImplementedError(f"{args.model} reduces gradients per microbatch only")
   if args.init_from and provider != "maxtext" and not native:

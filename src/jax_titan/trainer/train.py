@@ -40,9 +40,10 @@ def parse_args(argv=None):
   parser.add_argument(
       "--model", default="llama3.1-8b",
       help="A Llama flavor (llama3.1-8b, llama3-test), ideogram4, command-a-plus, "
-      "maxtext:<MaxText model name> (any of MaxText's configs/models; all but the Llama "
-      "family with --parallel=dp or fsdp and --num_stages=1), maxdiffusion:flux-dev or "
-      "maxdiffusion:flux-schnell, or maxdiffusion:ideogram4 with MaxDiffusion's Ideogram branch.",
+      "maxtext:<MaxText model name> (Llama 2 and 3 as a pipeline; every MaxText model "
+      "without one, with --parallel=dp or fsdp, and --num_stages=1 unless it is Llama 2 or 3 "
+      "under dp), maxdiffusion:flux-dev or maxdiffusion:flux-schnell, or maxdiffusion:ideogram4 "
+      "with MaxDiffusion's Ideogram branch.",
   )
   parser.add_argument(
       "--model_overrides", default="",
@@ -139,7 +140,9 @@ def parse_args(argv=None):
   )
   parser.add_argument(
       "--data", default="",
-      help="Token models: a uint32 token file (default: the WikiText-103 train file) or "
+      help="Token models: a uint32 token file (default: the WikiText-103 train file in "
+      "Llama 3's tokens; a model with another tokenizer takes its own file, from "
+      "python -m jax_titan.data.text --tokenizer) or "
       "'synthetic'. Image models train on synthetic batches; ideogram4 also on a cache "
       "directory that jax_titan.data.ideogram wrote. command-a-plus also takes a cache of "
       "conversations that jax_titan.data.command_a wrote.",
@@ -168,10 +171,11 @@ def parse_args(argv=None):
       help="Batches of one step's size per validation pass, the same every pass.",
   )
   parser.add_argument(
-      "--eval_data",
-      default=str(paths.work_dir() / "data/wikitext103_validation.llama3.bin"),
-      help="uint32 token file to validate on. Synthetic training data validates on "
-      "held-out synthetic batches, and a cache on the samples it holds out.",
+      "--eval_data", default="",
+      help="uint32 token file to validate on (default: WikiText-103's validation split in "
+      "Llama 3's tokens; a model with another tokenizer takes its own file). Synthetic "
+      "training data validates on held-out synthetic batches, and a cache on the samples it "
+      "holds out.",
   )
   parser.add_argument(
       "--power_sample_s", type=float, default=1.0,
@@ -671,9 +675,11 @@ def main(argv=None):
     if work.next_batch is not None or args.data == "synthetic":
       eval_batches = [next_batch(EVAL_STEPS + i) for i in range(args.eval_batches)]
     else:
-      held_out = WindowSampler(args.eval_data, seq, seed=args.seed, step=0)
+      eval_path = args.eval_data or str(
+          paths.work_dir() / "data/wikitext103_validation.llama3.bin")
+      held_out = WindowSampler(eval_path, seq, seed=args.seed, step=0)
       if held_out.max_token() >= work.vocab_size:
-        raise ValueError(f"{args.eval_data} has token ids beyond the vocabulary")
+        raise ValueError(f"{eval_path} has token ids beyond the vocabulary")
       eval_batches = [held_out.next(num_mb * mb) for _ in range(args.eval_batches)]
   log.event("data", seconds=time.time() - t0)
 
