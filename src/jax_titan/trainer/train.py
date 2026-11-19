@@ -40,8 +40,9 @@ def parse_args(argv=None):
   parser.add_argument(
       "--model", default="llama3.1-8b",
       help="A Llama flavor (llama3.1-8b, llama3-test), ideogram4, command-a-plus, "
-      "maxtext:<MaxText model name>, maxdiffusion:flux-dev or maxdiffusion:flux-schnell, or "
-      "maxdiffusion:ideogram4 with MaxDiffusion's Ideogram branch.",
+      "maxtext:<MaxText model name> (any of MaxText's configs/models; all but the Llama "
+      "family with --parallel=dp or fsdp and --num_stages=1), maxdiffusion:flux-dev or "
+      "maxdiffusion:flux-schnell, or maxdiffusion:ideogram4 with MaxDiffusion's Ideogram branch.",
   )
   parser.add_argument(
       "--model_overrides", default="",
@@ -59,7 +60,8 @@ def parse_args(argv=None):
       help="mpmd: Shardy MPMD pipeline, data parallel inside each stage. "
       "dp, fsdp: no pipeline; one jax.jit program over all devices with "
       "replicated or sharded parameters and optimizer state. Besides the Llama "
-      "flavors, only ideogram4, command-a-plus and maxdiffusion:ideogram4 have fsdp.",
+      "flavors, only maxtext: models, ideogram4, command-a-plus and maxdiffusion:ideogram4 "
+      "have fsdp.",
   )
   parser.add_argument(
       "--num_stages", type=int, default=2,
