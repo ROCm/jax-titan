@@ -108,8 +108,10 @@ with gradients reduced per microbatch (the default for them);
 `--stage_layers` counts their decoder layers or blocks, and
 `--model_overrides` takes JSON config overrides. `command-a-plus` is one
 stage, or more with `"freeze": ["embed"]` among its overrides. Of the
-`maxtext:` models only the Llama family has pipeline stages; every other one
-trains as one stage (`--parallel=dp` or `fsdp` with `--num_stages=1`).
+`maxtext:` models only Llama 2 and 3 have pipeline stages; every other one,
+and Llama under `fsdp`, trains as one stage (`--parallel=dp` or `fsdp` with
+`--num_stages=1`), on token files of its own tokenizer (`--data` and
+`--eval_data` default to Llama 3's).
 
 ## Monitor
 
@@ -144,7 +146,9 @@ trains as one stage (`--parallel=dp` or `fsdp` with `--num_stages=1`).
 - Include the no-pipeline baseline (`--parallel=dp` and `--parallel=fsdp`),
   measured on the same day and stack. Check every new pipeline layout with
   Gate 0 against it: `summarize --gate0 REFERENCE RUN --gate0_steps 10
-  --gate0_rtol 2e-3`.
+  --gate0_rtol 2e-3`. With 16,384 tokens per step, bf16 rounding alone moved
+  two runs of one layout apart by more than that; compare such layouts in fp32
+  (`--model_overrides='{"dtype": "float32"}'` for `maxtext:` models).
 - For a published number, run three repeats and report the median and
   spread (`summarize` prints both and a regression threshold), and MFU
   against the calibrated ceiling too (`--ceilings`, from
