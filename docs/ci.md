@@ -18,7 +18,7 @@ new push to a pull request cancels the run of the older one, and
 | JAX-Titan | With MaxText and MaxDiffusion | With MaxText |
 | Command | `python -m pytest tests/` | `python -m pytest tests/ --gpus=1` |
 | Tests | Every test not marked `gpu`, on 8 CPU devices | The tests marked `gpu` that need one GPU |
-| Time | About 25 minutes | About 2 minutes |
+| Time | About 25 minutes | About 3 minutes |
 
 Both jobs test one stack: the wheels of one release, and every other package
 at the version [.github/ci-constraints.txt](../.github/ci-constraints.txt)

@@ -1,0 +1,272 @@
+{
+ "llama_pipeline_before_and_after": {
+  "what": "--model=maxtext:llama3.1-8b --num_stages=2 (2 stages of 4 GPUs, 8 microbatches of 4 sequences of 2,048 tokens, zero-bubble H1), 10 steps, on main (53ba34b) and on this change",
+  "step0_rel_loss": 6.123487963548039e-06,
+  "max_rel_loss": 0.0004295850955731499,
+  "tokens_per_s_per_gpu_main": 3124.52920215776,
+  "tokens_per_s_per_gpu_change": 3100.2717601981085
+ },
+ "what": "Loss of --parallel=fsdp against --parallel=dp on one GPU over the first 10 steps: the same 8 sequences per step, random weights of --seed=0, WikiText-103 in the model's own tokens",
+ "note": "Under dp, maxtext:llama3.1-8b is the split model with one stage and under fsdp MaxText's Transformer whole; every other model is the whole one in both.",
+ "same_configuration_twice": {
+  "model": "maxtext:llama3.1-8b",
+  "compute": "bf16",
+  "layout": "dp, 1 GPU",
+  "max_rel_loss": 0.003038994730281816,
+  "step0_rel_loss": 0.0
+ },
+ "rows": [
+  {
+   "model": "maxtext:qwen3-8b",
+   "compute": "bf16",
+   "sequence_length": 2048,
+   "reference": "dp, 1 GPU",
+   "run": "fsdp, 2 GPUs",
+   "max_rel_loss": 0.0008301803120111854,
+   "step0_rel_loss": 2.841007906678572e-06
+  },
+  {
+   "model": "maxtext:qwen3-8b",
+   "compute": "bf16",
+   "sequence_length": 2048,
+   "reference": "dp, 1 GPU",
+   "run": "fsdp, 4 GPUs",
+   "max_rel_loss": 0.00020662059739646926,
+   "step0_rel_loss": 1.4588959520781859e-06
+  },
+  {
+   "model": "maxtext:qwen3-8b",
+   "compute": "bf16",
+   "sequence_length": 2048,
+   "reference": "dp, 1 GPU",
+   "run": "fsdp, 8 GPUs",
+   "max_rel_loss": 0.00020194048517909214,
+   "step0_rel_loss": 7.678399747779925e-07
+  },
+  {
+   "model": "maxtext:llama3.1-8b",
+   "compute": "bf16",
+   "sequence_length": 2048,
+   "reference": "dp, 1 GPU",
+   "run": "fsdp, 2 GPUs",
+   "max_rel_loss": 0.002289520506827959,
+   "step0_rel_loss": 7.43755936489441e-06
+  },
+  {
+   "model": "maxtext:llama3.1-8b",
+   "compute": "bf16",
+   "sequence_length": 2048,
+   "reference": "dp, 1 GPU",
+   "run": "fsdp, 4 GPUs",
+   "max_rel_loss": 0.006110063717567581,
+   "step0_rel_loss": 9.451898359553312e-06
+  },
+  {
+   "model": "maxtext:llama3.1-8b",
+   "compute": "bf16",
+   "sequence_length": 2048,
+   "reference": "dp, 1 GPU",
+   "run": "fsdp, 8 GPUs",
+   "max_rel_loss": 0.0026961291470780683,
+   "step0_rel_loss": 1.0071694973294514e-06
+  },
+  {
+   "model": "maxtext:gemma3-4b",
+   "compute": "bf16",
+   "sequence_length": 2048,
+   "reference": "dp, 1 GPU",
+   "run": "fsdp, 2 GPUs",
+   "max_rel_loss": 0.0012647689671687055,
+   "step0_rel_loss": 1.020861149642044e-05
+  },
+  {
+   "model": "maxtext:gemma3-4b",
+   "compute": "bf16",
+   "sequence_length": 2048,
+   "reference": "dp, 1 GPU",
+   "run": "fsdp, 4 GPUs",
+   "max_rel_loss": 0.001111000012826958,
+   "step0_rel_loss": 9.246930703279384e-06
+  },
+  {
+   "model": "maxtext:gemma3-4b",
+   "compute": "bf16",
+   "sequence_length": 2048,
+   "reference": "dp, 1 GPU",
+   "run": "fsdp, 8 GPUs",
+   "max_rel_loss": 0.002625276494352198,
+   "step0_rel_loss": 2.3524191709142752e-05
+  },
+  {
+   "model": "maxtext:mistral-7b",
+   "compute": "bf16",
+   "sequence_length": 2048,
+   "reference": "dp, 1 GPU",
+   "run": "fsdp, 2 GPUs",
+   "max_rel_loss": 0.0012460370713730893,
+   "step0_rel_loss": 1.1080564320829121e-05
+  },
+  {
+   "model": "maxtext:mistral-7b",
+   "compute": "bf16",
+   "sequence_length": 2048,
+   "reference": "dp, 1 GPU",
+   "run": "fsdp, 4 GPUs",
+   "max_rel_loss": 0.0005041704661345365,
+   "step0_rel_loss": 1.706055141460992e-05
+  },
+  {
+   "model": "maxtext:mistral-7b",
+   "compute": "bf16",
+   "sequence_length": 2048,
+   "reference": "dp, 1 GPU",
+   "run": "fsdp, 8 GPUs",
+   "max_rel_loss": 0.0014104254977766741,
+   "step0_rel_loss": 8.794098667324699e-07
+  },
+  {
+   "model": "maxtext:qwen3-30b-a3b, 8 of 48 layers",
+   "compute": "bf16",
+   "sequence_length": 2048,
+   "reference": "dp, 1 GPU",
+   "run": "fsdp, 2 GPUs",
+   "max_rel_loss": 2.7293368053988902e-05,
+   "step0_rel_loss": 9.930095185309326e-06
+  },
+  {
+   "model": "maxtext:qwen3-30b-a3b, 8 of 48 layers",
+   "compute": "bf16",
+   "sequence_length": 2048,
+   "reference": "dp, 1 GPU",
+   "run": "fsdp, 4 GPUs",
+   "max_rel_loss": 0.00011541771140173904,
+   "step0_rel_loss": 4.27757946444094e-06
+  },
+  {
+   "model": "maxtext:qwen3-8b",
+   "compute": "fp32",
+   "sequence_length": 1024,
+   "reference": "dp, 1 GPU",
+   "run": "fsdp, 2 GPUs",
+   "max_rel_loss": 2.2841062748967585e-07,
+   "step0_rel_loss": 7.6928686799622e-08
+  },
+  {
+   "model": "maxtext:qwen3-8b",
+   "compute": "fp32",
+   "sequence_length": 1024,
+   "reference": "dp, 1 GPU",
+   "run": "fsdp, 4 GPUs",
+   "max_rel_loss": 5.514308527767853e-07,
+   "step0_rel_loss": 7.6928686799622e-08
+  },
+  {
+   "model": "maxtext:qwen3-8b",
+   "compute": "fp32",
+   "sequence_length": 1024,
+   "reference": "dp, 1 GPU",
+   "run": "fsdp, 8 GPUs",
+   "max_rel_loss": 8.271462791651778e-07,
+   "step0_rel_loss": 7.6928686799622e-08
+  },
+  {
+   "model": "maxtext:llama3.1-8b",
+   "compute": "fp32",
+   "sequence_length": 1024,
+   "reference": "dp, 1 GPU",
+   "run": "fsdp, 2 GPUs",
+   "max_rel_loss": 6.096996950282126e-07,
+   "step0_rel_loss": 0.0
+  },
+  {
+   "model": "maxtext:llama3.1-8b",
+   "compute": "fp32",
+   "sequence_length": 1024,
+   "reference": "dp, 1 GPU",
+   "run": "fsdp, 4 GPUs",
+   "max_rel_loss": 5.574397211686515e-06,
+   "step0_rel_loss": 0.0
+  },
+  {
+   "model": "maxtext:llama3.1-8b",
+   "compute": "fp32",
+   "sequence_length": 1024,
+   "reference": "dp, 1 GPU",
+   "run": "fsdp, 8 GPUs",
+   "max_rel_loss": 1.2281093856996853e-05,
+   "step0_rel_loss": 0.0
+  },
+  {
+   "model": "maxtext:gemma3-4b",
+   "compute": "fp32",
+   "sequence_length": 1024,
+   "reference": "dp, 1 GPU",
+   "run": "fsdp, 2 GPUs",
+   "max_rel_loss": 2.2641772163960017e-06,
+   "step0_rel_loss": 0.0
+  },
+  {
+   "model": "maxtext:gemma3-4b",
+   "compute": "fp32",
+   "sequence_length": 1024,
+   "reference": "dp, 1 GPU",
+   "run": "fsdp, 4 GPUs",
+   "max_rel_loss": 2.087639437613317e-06,
+   "step0_rel_loss": 7.39920032402578e-08
+  },
+  {
+   "model": "maxtext:gemma3-4b",
+   "compute": "fp32",
+   "sequence_length": 1024,
+   "reference": "dp, 1 GPU",
+   "run": "fsdp, 8 GPUs",
+   "max_rel_loss": 1.6037921949471678e-06,
+   "step0_rel_loss": 7.39920032402578e-08
+  },
+  {
+   "model": "maxtext:mistral-7b",
+   "compute": "fp32",
+   "sequence_length": 1024,
+   "reference": "dp, 1 GPU",
+   "run": "fsdp, 2 GPUs",
+   "max_rel_loss": 2.1763139826848676e-06,
+   "step0_rel_loss": 0.0
+  },
+  {
+   "model": "maxtext:mistral-7b",
+   "compute": "fp32",
+   "sequence_length": 1024,
+   "reference": "dp, 1 GPU",
+   "run": "fsdp, 4 GPUs",
+   "max_rel_loss": 4.731117353662755e-06,
+   "step0_rel_loss": 8.763287992665478e-08
+  },
+  {
+   "model": "maxtext:mistral-7b",
+   "compute": "fp32",
+   "sequence_length": 1024,
+   "reference": "dp, 1 GPU",
+   "run": "fsdp, 8 GPUs",
+   "max_rel_loss": 2.2709363297581225e-06,
+   "step0_rel_loss": 0.0
+  },
+  {
+   "model": "maxtext:qwen3-30b-a3b, 8 of 48 layers",
+   "compute": "fp32",
+   "sequence_length": 1024,
+   "reference": "dp, 1 GPU",
+   "run": "fsdp, 2 GPUs",
+   "max_rel_loss": 2.0683605574397172e-07,
+   "step0_rel_loss": 0.0
+  },
+  {
+   "model": "maxtext:qwen3-30b-a3b, 8 of 48 layers",
+   "compute": "fp32",
+   "sequence_length": 1024,
+   "reference": "dp, 1 GPU",
+   "run": "fsdp, 4 GPUs",
+   "max_rel_loss": 1.1551109559155368e-07,
+   "step0_rel_loss": 0.0
+  }
+ ]
+}
