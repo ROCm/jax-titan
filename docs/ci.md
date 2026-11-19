@@ -15,7 +15,7 @@ new push to a pull request cancels the run of the older one, and
 |---|---|---|
 | Runner | GitHub's `ubuntu-24.04`, with Python 3.12 | Self-hosted, with one gfx950 GPU, in the TheRock 10.1 container |
 | JAX | jax, jaxlib and Shardy's MPMD package, built from source | The same, with the two ROCm plugin wheels of that build |
-| JAX-Titan | With MaxText and MaxDiffusion | Without them |
+| JAX-Titan | With MaxText and MaxDiffusion | With MaxText |
 | Command | `python -m pytest tests/` | `python -m pytest tests/ --gpus=1` |
 | Tests | Every test not marked `gpu`, on 8 CPU devices | The tests marked `gpu` that need one GPU |
 | Time | About 25 minutes | About 2 minutes |

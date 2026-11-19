@@ -3,8 +3,8 @@
 #
 # Both jobs install the JAX built from source. The CPU job adds MaxText and
 # MaxDiffusion and runs every test but those marked gpu; the GPU job adds the
-# ROCm plugin and runs the gpu tests that need one GPU. Both take the versions
-# of their other packages from .github/ci-constraints.txt.
+# ROCm plugin and MaxText and runs the gpu tests that need one GPU. Both take
+# the versions of their other packages from .github/ci-constraints.txt.
 
 name: CI
 
@@ -99,7 +99,7 @@ jobs:
         # --system-site-packages: the container's ROCm is a set of Python packages.
         run: |
           python3 -m venv --system-site-packages venv
-          venv/bin/python -m pip install wheels/*.whl -e ".[test]" -c .github/ci-constraints.txt
+          venv/bin/python -m pip install wheels/*.whl -e ".[test,maxtext]" -c .github/ci-constraints.txt
       - name: Show installed versions
         run: venv/bin/python -m pip freeze
       - name: Run tests
