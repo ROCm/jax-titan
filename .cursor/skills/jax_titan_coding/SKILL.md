@@ -47,12 +47,15 @@ for a later comparison: do not import from it or edit it.
   or JAX-AITER attention next to TE. It never fails or returns wrong values
   silently. A new provider op passes `python -m jax_titan.ops.conformance`
   in every mode before a policy uses it.
-- **MaxText models:** `models/adapters/maxtext.py` builds stages from
-  MaxText's own layers at the pinned release (`maxtext==0.2.5`, the
-  `maxtext` extra). MaxText's layers constrain activations on the mesh they
+- **MaxText models:** `models/adapters/maxtext.py` runs MaxText's models
+  from its own layers at the pinned release (`maxtext==0.2.5`, the `maxtext`
+  extra). `WholeModel` calls MaxText's `Transformer` whole, as one stage for
+  `--parallel=dp` and `fsdp`: it takes any MaxText model config, so a new
+  family needs no code here. `Model` cuts the Llama family (`has_split`) into
+  pipeline stages. MaxText's layers constrain activations on the mesh they
   are built with, so build them on one stage mesh and reduce gradients per
-  microbatch. Stage parameters keep MaxText's names and layer axis;
-  `llama_params` maps Llama weights onto `models/llama.py`.
+  microbatch. Parameters keep MaxText's names and layer axis; `llama_params`
+  maps Llama weights onto `models/llama.py`.
 - **MaxDiffusion models:** `models/adapters/maxdiffusion.py` builds FLUX.1
   stages from MaxDiffusion's transformer at commit `821afc36` with the
   `third_party/patches/maxdiffusion-*.patch` patches. Stage boundaries carry
@@ -129,7 +132,8 @@ for a later comparison: do not import from it or edit it.
   than N. Unless `XLA_FLAGS` is set, it turns XLA's GEMM autotuning off
   (hipBLASLt's first choice for every GEMM): with autotuning the tests take 20
   minutes instead of 90 seconds. CI's GPU job runs `--gpus=1` on one gfx950,
-  so a test that needs more GPUs runs only by hand on a dev node.
+  with MaxText installed, so a test that needs more GPUs runs only by hand on
+  a dev node.
 - CI's JAX built from source is a release of wheels named in
   `.github/workflows/ci.yml`, with their checksums in
   `.github/ci-wheels.sha256`. After a change to a revision in
@@ -146,7 +150,9 @@ for a later comparison: do not import from it or edit it.
   equal the uninterrupted one exactly on CPU.
 - `tests/test_maxtext_adapter.py` checks MaxText's model, `models/llama.py`
   and the pipeline step against each other; run it after changing either
-  model (it is skipped without the `maxtext` extra).
+  model (it is skipped without the `maxtext` extra). Its `gpu` tests check
+  the whole model against MaxText's own loss function and against the
+  stages, and FSDP against data parallelism (`--gpus=2`).
   `tests/test_maxdiffusion_adapter.py` does the same for FLUX.1 against
   MaxDiffusion's transformer (skipped without MaxDiffusion).
 - `tests/test_ideogram.py` checks `models/ideogram.py` against diffusers'

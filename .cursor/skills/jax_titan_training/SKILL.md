@@ -62,11 +62,16 @@ XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" timeout -s KILL 1800 python -m jax_titan.t
   --seq_len=2048 --steps=30 --run_dir=$RUN > $RUN.out 2>&1
 
 # The same step without a pipeline: --parallel=dp or --parallel=fsdp
-# (adapter models: --parallel=dp; Ideogram 4 and Command A+ also --parallel=fsdp).
+# (MaxDiffusion's FLUX.1: --parallel=dp only).
 
 # Models from MaxText and MaxDiffusion (FLUX.1 trains on synthetic batches).
 ... --model=maxtext:llama3.1-8b --num_stages=2 ...
 ... --model=maxdiffusion:flux-dev --num_stages=4 --steps=20 --lr=1e-5 ...
+
+# Any other MaxText model, as one stage on its own token file
+# (python -m jax_titan.data.text --tokenizer=DIR --name=qwen3).
+... --model=maxtext:qwen3-8b --parallel=fsdp --num_stages=1 --microbatches=1 \
+  --microbatch_size=32 --data=$JAX_TITAN_ROOT/data/wikitext103_train.qwen3.bin ...
 
 # JAX-Titan's own Ideogram 4, on synthetic batches (docs/recipes/ideogram4.md).
 ... --model=ideogram4 --parallel=fsdp --num_stages=1 --microbatches=1 \
@@ -102,7 +107,9 @@ Layout flags: `--schedule`, `--stage_fsdp`, `--tensor_parallel`,
 with gradients reduced per microbatch (the default for them);
 `--stage_layers` counts their decoder layers or blocks, and
 `--model_overrides` takes JSON config overrides. `command-a-plus` is one
-stage, or more with `"freeze": ["embed"]` among its overrides.
+stage, or more with `"freeze": ["embed"]` among its overrides. Of the
+`maxtext:` models only the Llama family has pipeline stages; every other one
+trains as one stage (`--parallel=dp` or `fsdp` with `--num_stages=1`).
 
 ## Monitor
 

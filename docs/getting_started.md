@@ -202,22 +202,20 @@ XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" python -m jax_titan.trainer.train \
   --model=maxtext:llama3.1-8b --num_stages=2 --ops=attention=te \
   --init_from=${JAX_TITAN_ROOT}/checkpoints/llama3.1-8b-hf/0/items --steps=100
 
-# From pretrained weights: convert Hugging Face's Llama 3.1 8B once with
-# MaxText's converter (needs a Hugging Face token with access to the model, or
-# --hf_model_path to a local copy), then start from the converted parameters.
-HF_AUTH_TOKEN=$HF_TOKEN python -m maxtext.checkpoint_conversion.to_maxtext \
-  ${JAX_TITAN_ROOT}/src/maxtext/src/maxtext/configs/base.yml model_name=llama3.1-8b \
-  base_output_directory=${JAX_TITAN_ROOT}/checkpoints/llama3.1-8b-hf hardware=cpu \
-  skip_jax_distributed_system=True scan_layers=True --lazy_load_tensors=True
-XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" python -m jax_titan.trainer.train \
-  --model=maxtext:llama3.1-8b --num_stages=2 --ops=attention=te \
-  --init_from=${JAX_TITAN_ROOT}/checkpoints/llama3.1-8b-hf/0/items --steps=100
-
 # Its no-pipeline reference for Gate 0: the same stages, weights and batches as
 # one data-parallel jax.jit program; then compare the first 10 steps' losses.
 XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" python -m jax_titan.trainer.train \
   --model=maxtext:llama3.1-8b --parallel=dp \
   --microbatches=8 --microbatch_size=4 --seq_len=2048 --steps=10 --run_dir=runs/mt_dp
+
+# Any other MaxText model, here Qwen3-8B, as one stage: MaxText's Transformer
+# called whole, on all 8 GPUs with replicated (dp) or sharded (fsdp) state.
+# MaxText's Llama models train this way under --parallel=fsdp. The token file
+# is the model's own (see the data preparation below).
+XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" python -m jax_titan.trainer.train \
+  --model=maxtext:qwen3-8b --parallel=fsdp --num_stages=1 \
+  --microbatches=1 --microbatch_size=32 --seq_len=2048 --steps=100 \
+  --data=${JAX_TITAN_ROOT}/data/wikitext103_train.qwen3.bin
 
 # Any run with --run_dir records the scaling book's training metrics (step
 # records and timeline, env.json, GPU power, validation with --eval_every) and
@@ -294,7 +292,11 @@ apply. It never touches other users' processes or files.
 Prepare the training data once with `python -m jax_titan.data.text`, which
 downloads WikiText-103 and writes Llama 3 token ids to `${JAX_TITAN_ROOT}/data`.
 The tokenizer comes from a sibling MaxText checkout (override with
-`JAX_TITAN_LLAMA3_TOKENIZER`).
+`JAX_TITAN_LLAMA3_TOKENIZER`). A model with another tokenizer trains on its
+own token ids: `python -m jax_titan.data.text --tokenizer=DIR --name=qwen3`
+reads the tokenizer of the published model in `DIR` (its `tokenizer.json` and
+`config.json`) and writes `wikitext103_train.qwen3.bin` and
+`wikitext103_validation.qwen3.bin`, which `--data` and `--eval_data` take.
 
 [tools.md](tools.md) lists every script, command-line tool and agent skill by
 the stage of a training job it serves.
