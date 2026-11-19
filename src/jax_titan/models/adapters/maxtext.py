@@ -1,21 +1,21 @@
-"""MaxText's decoder-only models, pinned at maxtext-v0.2.5: any of them as one
-stage, and those of one scanned stack as pipeline stages.
+"""MaxText's decoder-only models, pinned at maxtext-v0.2.5: as one stage, and
+Llama 2 and 3 as pipeline stages.
 
 MaxText supplies the model configs, the layers and the parameter layout;
 JAX-Titan supplies the stages, meshes and train step. Parameters are plain
 dicts with MaxText's parameter names, so they map one to one onto MaxText
 checkpoints.
 
-`WholeModel` calls MaxText's `Transformer` whole, which takes every model
-config MaxText builds. `Model` cuts a model into pipeline stages: stage 0
-holds MaxText's token embedder, the last stage its final norm and output head,
-and every stage a contiguous slice of the scanned decoder layers, whose
-stacked weights keep their layer axis where MaxText puts it
-(`param_scan_axis`). It takes the models MaxText builds as one scanned stack
-of identical layers with an untied output head, such as Llama 2 and 3
-(`has_split`). MaxText's layers constrain activation shardings, so stages
-reduce gradients per microbatch. `llama_config` and `llama_params` map such a
-model onto `jax_titan.models.llama`.
+`WholeModel` calls MaxText's `Transformer` whole, with no code per model
+family. `Model` cuts a model into pipeline stages: stage 0 holds MaxText's
+token embedder, the last stage its final norm and output head, and every stage
+a contiguous slice of the scanned decoder layers, whose stacked weights keep
+their layer axis where MaxText puts it (`param_scan_axis`). It takes the
+models of MaxText's `llama2` decoder block, Llama 2 and 3, built as one
+scanned stack of identical layers with an untied output head (`has_split`).
+MaxText's layers constrain activation shardings, so stages reduce gradients
+per microbatch. `llama_config` and `llama_params` map such a model onto
+`jax_titan.models.llama`.
 """
 
 from collections.abc import Callable, Sequence
@@ -45,6 +45,7 @@ from maxtext.utils import maxtext_utils
 from maxtext.utils.globals import MAXTEXT_PKG_DIR
 from maxtext.utils.sharding import create_sharding
 
+from jax_titan import parallel
 from jax_titan import paths
 from jax_titan.models import llama
 
@@ -58,9 +59,9 @@ def config(model_name: str, **overrides):
 
   Defaults suit JAX-Titan: no dropout, XLA dot-product attention, no
   checkpointing or distributed setup by MaxText, the text tower alone, and
-  for a mixture of experts the dense matmul over every expert, the fast form
-  on AMD GPUs (docs/pipelines.md). These and `overrides` win over the model's
-  YAML.
+  for a mixture of experts the dense matmul over every expert, the fastest of
+  MaxText's three forms for Qwen3-30B-A3B on MI350X (docs/pipelines.md). These
+  and `overrides` win over the model's YAML.
   """
   kwargs = {
       "run_name": "jax_titan",
@@ -88,8 +89,8 @@ def mesh(cfg, devices: Sequence[jax.Device]) -> jax.sharding.Mesh:
 
 
 def has_split(cfg) -> bool:
-  """Whether `Model` cuts this model into pipeline stages: one scanned stack
-  of identical layers and an untied output head."""
+  """Whether `Model` cuts this model into pipeline stages: MaxText's `llama2`
+  decoder block as one scanned stack, with an untied output head."""
   return (cfg.decoder_block in _SCANNED_GENERIC and bool(cfg.scan_layers)
           and not cfg.logits_via_embedding)
 
@@ -235,21 +236,25 @@ class _Base:
       _, params, rest = nnx.split(self._transformer(seed), nnx.Param, ...)
     return params.to_pure_dict(), rest.to_pure_dict()
 
-  def _restore(self, path: str) -> dict:
+  def _restore(self, path: str, shardings: dict | None = None) -> dict:
     """The parameters of `Transformer` from a MaxText parameter checkpoint.
 
     `path` is what MaxText's `load_parameters_path` takes: the output of its
     `checkpoint_conversion/to_maxtext.py` (from Hugging Face weights) or of
     `checkpointing.save_params_to_path`. MaxText's loader restores the weights
-    onto one device in the config's `weight_dtype`.
+    in the config's `weight_dtype`, onto `shardings`, a tree as the
+    parameters', or onto one device.
     """
     from maxtext.common import checkpointing  # pylint: disable=g-import-not-at-top
 
-    device = jax.sharding.SingleDeviceSharding(jax.local_devices()[0])
     with nn.logical_axis_rules(self.cfg.logical_axis_rules):
       _, abstract, _ = nnx.split(nnx.eval_shape(lambda: self._transformer(0)), nnx.Param, ...)
-    abstract = jax.tree.map(lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=device),
-                            abstract)
+    shapes = nnx.to_pure_dict(abstract)
+    if shardings is None:
+      device = jax.sharding.SingleDeviceSharding(jax.local_devices()[0])
+      shardings = jax.tree.map(lambda _: device, shapes)
+    nnx.replace_by_pure_dict(abstract, jax.tree.map(
+        lambda x, s: jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=s), shapes, shardings))
     restored = checkpointing.load_params_from_path(
         path, abstract, self.cfg.checkpoint_storage_concurrent_gb)
     return _pure_dict(restored)
@@ -267,13 +272,12 @@ class Model(_Base):
 
   def __init__(self, cfg, stage_mesh: jax.sharding.Mesh, *, num_stages: int,
                layers: Sequence[int] | None = None, attention: Callable | None = None):
-    if cfg.decoder_block not in _SCANNED_GENERIC or not cfg.scan_layers:
+    if not has_split(cfg):
       raise NotImplementedError(
-          f"decoder_block={cfg.decoder_block} with scan_layers={cfg.scan_layers}; "
-          f"supported: {[b.value for b in _SCANNED_GENERIC]} with scan_layers=True"
+          f"decoder_block={cfg.decoder_block}, scan_layers={cfg.scan_layers}, "
+          f"logits_via_embedding={cfg.logits_via_embedding}: pipeline stages take MaxText's "
+          "llama2 decoder block as one scanned stack with an untied output head"
       )
-    if cfg.logits_via_embedding:
-      raise NotImplementedError("tied input and output embeddings span the first and last stage")
     if cfg.remat_policy not in ("full", "none"):
       raise NotImplementedError(f"remat_policy={cfg.remat_policy}; supported: full, none")
     if layers is None:
@@ -381,32 +385,50 @@ class Model(_Base):
     return 6 * (cfg.num_decoder_layers * per_layer + cfg.vocab_size * e) + attn
 
 
+def _beyond_the_step(cfg) -> dict:
+  """The settings of `cfg` under which MaxText's training is more than a
+  gradient step of the cross-entropy and the MoE load-balance term."""
+  settings = {
+      "mtp_num_layers": cfg.mtp_num_layers,
+      "z_loss_multiplier": cfg.z_loss_multiplier,
+      "use_indexer": cfg.use_indexer,
+      "use_qk_clip": cfg.use_qk_clip,
+      "quantization": cfg.quantization,
+      "num_vocab_tiling": cfg.num_vocab_tiling > 1 and cfg.num_vocab_tiling,
+      "gradient_accumulation_steps": (
+          cfg.gradient_accumulation_steps > 1 and cfg.gradient_accumulation_steps),
+      "routed_bias_update_rate": cfg.routed_bias and cfg.routed_bias_update_rate,
+  }
+  return {name: value for name, value in settings.items() if value}
+
+
 class WholeModel(_Base):
-  """Any MaxText model as one stage, for `--parallel=dp` and `fsdp`.
+  """A MaxText model as one stage, for `--parallel=dp` and `fsdp`.
 
   MaxText's `Transformer` is called whole, so nothing here depends on the
   model family. The parameters are its `nnx.Param` leaves under MaxText's
   names; its other NNX state stays as MaxText initializes it. The loss is
   MaxText's training loss of a text batch, the mean next-token cross-entropy
-  plus the load-balance term a mixture of experts sows; configs whose loss
-  MaxText builds from more are refused. MaxText's updates outside the gradient
-  (routing bias, QK-clip) are not made. With `attention`, such as
-  `jax_titan.ops.attention`, causal training attention runs there instead of
-  in MaxText's attention op.
+  plus the load-balance term a mixture of experts sows. A config under which
+  MaxText's training holds more is refused: other loss terms, updates outside
+  the gradient, quantization, gradient accumulation. The parameters are
+  initialized and restored where the trainer keeps them, sharded with `fsdp`
+  and replicated without. With `attention`, such as `jax_titan.ops.attention`,
+  causal training attention runs there instead of in MaxText's attention op.
   """
 
-  num_stages = 1
-
-  def __init__(self, cfg, mesh: jax.sharding.Mesh, *, attention: Callable | None = None):
-    if cfg.mtp_num_layers or cfg.z_loss_multiplier or cfg.use_indexer or cfg.num_vocab_tiling > 1:
+  def __init__(self, cfg, mesh: jax.sharding.Mesh, *, attention: Callable | None = None,
+               fsdp: bool = False):
+    beyond = _beyond_the_step(cfg)
+    if beyond:
       raise NotImplementedError(
-          f"mtp_num_layers={cfg.mtp_num_layers}, z_loss_multiplier={cfg.z_loss_multiplier}, "
-          f"use_indexer={cfg.use_indexer}, num_vocab_tiling={cfg.num_vocab_tiling}: the whole "
-          "model's loss is the cross-entropy of the full logits plus the MoE load-balance term"
+          f"{beyond}: the whole model takes a gradient step of the cross-entropy of the full "
+          "logits and the MoE load-balance term, and MaxText's training with these holds more"
       )
     self.cfg = cfg
     self.mesh = mesh
     self._attention = attention
+    self._fsdp = fsdp
     with nn.logical_axis_rules(cfg.logical_axis_rules):
       graph, params, rest = nnx.split(nnx.eval_shape(lambda: self._transformer(0)), nnx.Param, ...)
     self._graph = graph
@@ -415,9 +437,15 @@ class WholeModel(_Base):
         {type(v).__name__ for _, v in nnx.to_flat_state(rest) if not isinstance(v, nnx.RngState)})
     self._rest = jax.jit(lambda: self._init_full(0)[1])()
 
+  def _shardings(self) -> dict:
+    (shapes,) = self.abstract()
+    specs = parallel.tree_specs(shapes, self.logical_axes, self.mesh.shape, fsdp=self._fsdp)
+    return jax.tree.map(lambda s: jax.sharding.NamedSharding(self.mesh, s), specs)
+
   def init(self, seed: int = 0) -> tuple[dict]:
     """The parameters, initialized as MaxText initializes `Transformer`."""
-    return (jax.jit(lambda: self._init_full(seed)[0])(),)
+    init = jax.jit(lambda: self._init_full(seed)[0], out_shardings=self._shardings())
+    return (init(),)
 
   def abstract(self, seed: int = 0) -> tuple[dict]:
     """ShapeDtypeStructs of `init(seed)`, without initializing."""
@@ -431,7 +459,7 @@ class WholeModel(_Base):
           f"({', '.join(self._other_weights)}), which a parameter checkpoint would leave as "
           "initialized"
       )
-    return (self._restore(path),)
+    return (self._restore(path, self._shardings()),)
 
   def _loss(self, params: dict, tokens: jax.Array, targets: jax.Array) -> jax.Array:
     cfg = self.cfg
