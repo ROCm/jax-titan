@@ -18,7 +18,7 @@ new push to a pull request cancels the run of the older one, and
 | JAX-Titan | With MaxText and MaxDiffusion | With MaxText |
 | Command | `python -m pytest tests/` | `python -m pytest tests/ --gpus=1` |
 | Tests | Every test not marked `gpu`, on 8 CPU devices | The tests marked `gpu` that need one GPU |
-| Time | About 25 minutes | About 3 minutes |
+| Time | About 25 minutes | About 2 minutes |
 
 Both jobs test one stack: the wheels of one release, and every other package
 at the version [.github/ci-constraints.txt](../.github/ci-constraints.txt)
@@ -124,7 +124,8 @@ revisions, CI keeps testing the old build until `WHEELS` names a new one:
 - **No autotuning.** Unless `XLA_FLAGS` is set, `--gpus` makes XLA run
   hipBLASLt's first choice for every GEMM
   (`--xla_gpu_autotune_level=0 --xla_gpu_enable_triton_gemm=false`). With
-  XLA's defaults, compiling takes the GPU tests from 90 seconds to 20 minutes.
+  XLA's defaults, compiling takes the GPU tests from under 2 minutes to 20 or
+  more.
 - **Forks.** The GPU job does not run for a pull request from a fork: the
   self-hosted runner never runs a fork's code.
 - **Memory.** The CPU runner has 16 GB of memory, and the tests peak near

@@ -50,9 +50,10 @@ for a later comparison: do not import from it or edit it.
 - **MaxText models:** `models/adapters/maxtext.py` runs MaxText's models
   from its own layers at the pinned release (`maxtext==0.2.5`, the `maxtext`
   extra). `WholeModel` calls MaxText's `Transformer` whole, as one stage for
-  `--parallel=dp` and `fsdp`: it takes any MaxText model config, so a new
-  family needs no code here. `Model` cuts the Llama family (`has_split`) into
-  pipeline stages. MaxText's layers constrain activations on the mesh they
+  `--parallel=dp` and `fsdp`, with no code per model family, and refuses a
+  config whose loss has more terms than the cross-entropy and the MoE
+  load-balance term. `Model` cuts Llama 2 and 3 (`has_split`) into pipeline
+  stages. MaxText's layers constrain activations on the mesh they
   are built with, so build them on one stage mesh and reduce gradients per
   microbatch. Parameters keep MaxText's names and layer axis; `llama_params`
   maps Llama weights onto `models/llama.py`.
@@ -131,9 +132,9 @@ for a later comparison: do not import from it or edit it.
   runs only the `gpu` tests, with JAX on ROCm, and skips those that need more
   than N. Unless `XLA_FLAGS` is set, it turns XLA's GEMM autotuning off
   (hipBLASLt's first choice for every GEMM): with autotuning the tests take 20
-  minutes instead of 90 seconds. CI's GPU job runs `--gpus=1` on one gfx950,
-  with MaxText installed, so a test that needs more GPUs runs only by hand on
-  a dev node.
+  minutes or more instead of under 2. CI's GPU job, with MaxText installed,
+  runs `--gpus=1` on one gfx950, so a test that needs more GPUs runs only by
+  hand on a dev node.
 - CI's JAX built from source is a release of wheels named in
   `.github/workflows/ci.yml`, with their checksums in
   `.github/ci-wheels.sha256`. After a change to a revision in

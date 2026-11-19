@@ -210,12 +210,14 @@ XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" python -m jax_titan.trainer.train \
 
 # Any other MaxText model, here Qwen3-8B, as one stage: MaxText's Transformer
 # called whole, on all 8 GPUs with replicated (dp) or sharded (fsdp) state.
-# MaxText's Llama models train this way under --parallel=fsdp. The token file
-# is the model's own (see the data preparation below).
+# MaxText's Llama 2 and 3 train this way under --parallel=fsdp. The token
+# files are the model's own (see the data preparation below); the defaults
+# of --data and --eval_data hold Llama 3's token ids.
 XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" python -m jax_titan.trainer.train \
   --model=maxtext:qwen3-8b --parallel=fsdp --num_stages=1 \
   --microbatches=1 --microbatch_size=32 --seq_len=2048 --steps=100 \
-  --data=${JAX_TITAN_ROOT}/data/wikitext103_train.qwen3.bin
+  --data=${JAX_TITAN_ROOT}/data/wikitext103_train.qwen3.bin \
+  --eval_data=${JAX_TITAN_ROOT}/data/wikitext103_validation.qwen3.bin
 
 # Any run with --run_dir records the scaling book's training metrics (step
 # records and timeline, env.json, GPU power, validation with --eval_every) and
@@ -253,7 +255,10 @@ HIP_VISIBLE_DEVICES=0,1,2,3 python -m jax_titan.models.command_a_generate --chec
 
 `--model_overrides` takes a JSON object of MaxText config, FLUX.1 transformer,
 Ideogram 4 or Command A+ config settings, for example
-`'{"base_num_decoder_layers": 4}'` for a 4-layer MaxText model. For Ideogram 4
+`'{"base_num_decoder_layers": 4}'` for a 4-layer MaxText model. MaxText's
+`mistral-7b` config takes `'{"rope_max_timescale": 10000}'` to match the
+published Mistral 7B v0.1 weights ([pipelines.md](pipelines.md#maxtext-models-as-one-stage-2026-11-19-8x-mi350x)).
+For Ideogram 4
 it also takes `dtype` and, for JAX-Titan's own model, `timestep_mean` and
 `timestep_std`; for Command A+, `dtype`, `image_tiles` and `freeze`
 ([recipes/command_a_plus.md](recipes/command_a_plus.md)).
@@ -294,9 +299,12 @@ downloads WikiText-103 and writes Llama 3 token ids to `${JAX_TITAN_ROOT}/data`.
 The tokenizer comes from a sibling MaxText checkout (override with
 `JAX_TITAN_LLAMA3_TOKENIZER`). A model with another tokenizer trains on its
 own token ids: `python -m jax_titan.data.text --tokenizer=DIR --name=qwen3`
-reads the tokenizer of the published model in `DIR` (its `tokenizer.json` and
-`config.json`) and writes `wikitext103_train.qwen3.bin` and
-`wikitext103_validation.qwen3.bin`, which `--data` and `--eval_data` take.
+reads the tokenizer of a published model from `DIR`, a download of its
+`tokenizer.json` and `config.json` from the Hugging Face Hub, and writes
+`wikitext103_train.qwen3.bin` and `wikitext103_validation.qwen3.bin`, which
+`--data` and `--eval_data` take; a `maxtext:` model with another vocabulary
+than Llama 3's is refused without them. It needs the `tokenizers` package,
+which the `maxtext` extra installs.
 
 [tools.md](tools.md) lists every script, command-line tool and agent skill by
 the stage of a training job it serves.
