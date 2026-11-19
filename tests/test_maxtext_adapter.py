@@ -1,6 +1,6 @@
 """MaxText Llama stages match MaxText, `jax_titan.models.llama` and `jax.jit`,
-and any MaxText model as one stage gives MaxText's loss and trains under FSDP
-as it does data-parallel."""
+and a MaxText model as one stage gives MaxText's loss and trains under FSDP as
+it does data-parallel."""
 
 import importlib.util
 import json
@@ -27,7 +27,8 @@ SMALL = {
     "matmul_precision": "highest",
 }
 # One model per decoder block: Gemma 3 with one of its global attention layers, which is every
-# sixth, and a mixture of experts with its load-balance loss on.
+# sixth, and two mixtures of experts with their load-balance loss on, DeepSeek's summed over
+# the layers as Megatron-LM does.
 WHOLE = {
     "llama3.1-8b": {},
     "mistral-7b": {},
@@ -35,6 +36,8 @@ WHOLE = {
     "qwen3-8b": {},
     "qwen3-30b-a3b": {"base_moe_mlp_dim": 96, "num_experts": 8, "num_experts_per_tok": 2,
                       "load_balance_loss_weight": 0.01},
+    "deepseek3-tiny": {"base_num_kv_heads": 4, "base_moe_mlp_dim": 96,
+                       "load_balance_loss_weight": 0.01, "moe_use_megatron_seq_aux_loss": True},
 }
 
 
@@ -63,6 +66,7 @@ def test_whole_model_gives_maxtexts_loss_and_gradient(name):
   from flax import nnx  # pylint: disable=g-import-not-at-top
   import jax  # pylint: disable=g-import-not-at-top
   from jax_titan import ops  # pylint: disable=g-import-not-at-top
+  from jax_titan import parallel  # pylint: disable=g-import-not-at-top
   from jax_titan.models.adapters import maxtext as mt  # pylint: disable=g-import-not-at-top
   from maxtext.models import models  # pylint: disable=g-import-not-at-top
   from maxtext.trainers.pre_train import train  # pylint: disable=g-import-not-at-top
@@ -75,6 +79,9 @@ def test_whole_model_gives_maxtexts_loss_and_gradient(name):
     transformer = models.Transformer(cfg, mesh, quant=None, rngs=nnx.Rngs(params=0, dropout=0))
   graph, theirs, rest = nnx.split(transformer, nnx.Param, ...)
   jax.tree.map(np.testing.assert_array_equal, params, theirs.to_pure_dict())
+  # FSDP shards every parameter of these models.
+  specs = parallel.tree_specs(params, model.logical_axes, {"data": 2}, fsdp=True)
+  assert all("data" in spec for spec in jax.tree.leaves(specs))
 
   batch, seq = 8, cfg.max_target_length
   tokens = np.random.default_rng(0).integers(0, cfg.vocab_size, (batch, seq + 1), dtype=np.int32)
@@ -94,11 +101,12 @@ def test_whole_model_gives_maxtexts_loss_and_gradient(name):
   np.testing.assert_allclose(loss, ref_loss, rtol=1e-5)
   jax.tree.map(lambda a, b: np.testing.assert_allclose(a, b, rtol=1e-3, atol=1e-6),
                grads, ref_grads)
-  # The same with the model's global causal attention through jax_titan.ops.
+  # The same with the model's global causal attention through jax_titan.ops; DeepSeek's
+  # latent attention stays in MaxText.
   (routed,) = mt.WholeModel(cfg, mesh, attention=ops.attention).stage_fns()
   ops.reset_selections()
   np.testing.assert_allclose(jax.jit(routed)(params, x, t), loss, rtol=1e-5)
-  assert any(s.op == "attention" for s in ops.selections())
+  assert any(s.op == "attention" for s in ops.selections()) == (cfg.attention_type == "global")
   if cfg.num_experts > 1:
     unweighted = {**SMALL, **WHOLE[name], "load_balance_loss_weight": 0.0}
     (plain,) = mt.WholeModel(mt.config(name, **unweighted), mesh).stage_fns()
@@ -118,6 +126,23 @@ def _losses(tmp_path, name, *flags):
   )
   assert result.returncode == 0, result.stdout[-2000:] + result.stderr[-4000:]
   return [r["loss"] for r in records.steps(records.read(log))]
+
+
+@pytest.mark.gpu
+def test_trainer_starts_at_the_whole_models_loss(tmp_path):
+  import jax  # pylint: disable=g-import-not-at-top
+  from jax_titan.models.adapters import maxtext as mt  # pylint: disable=g-import-not-at-top
+
+  name = "qwen3-30b-a3b"
+  losses = _losses(tmp_path, name, "--parallel=dp")
+  cfg = mt.config(name, **{**SMALL, **WHOLE[name]})
+  model = mt.WholeModel(cfg, mt.mesh(cfg, jax.devices()[:1]))
+  # The trainer's weights and its first synthetic batch, both of seed 0.
+  batch = np.random.default_rng((0, 0)).integers(0, cfg.vocab_size, (8, 33), dtype=np.int32)
+  (fn,) = model.stage_fns()
+  loss = jax.jit(fn)(*model.init(0), batch[:, :-1], batch[:, 1:])
+  np.testing.assert_allclose(losses[0], loss, rtol=1e-5)
+  assert losses[-1] < losses[0]
 
 
 @pytest.mark.gpu

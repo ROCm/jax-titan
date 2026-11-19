@@ -35,9 +35,12 @@ def pytest_configure(config):
   if gpus:
     # hipBLASLt's first choice for every GEMM. By default XLA times its Triton
     # GEMMs and hipBLASLt's candidates for each GEMM it compiles, which takes
-    # the tests from 90 seconds to 20 minutes.
+    # the tests from under 2 minutes to 20 or more.
     os.environ.setdefault(
         "XLA_FLAGS", "--xla_gpu_autotune_level=0 --xla_gpu_enable_triton_gemm=false")
+    # A test and the trainers it starts share a GPU, which a JAX process
+    # otherwise takes 75% of when it starts.
+    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
   import jax  # pylint: disable=g-import-not-at-top
 
   jax.config.update("jax_platforms", platform)
