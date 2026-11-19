@@ -1,4 +1,8 @@
-"""Llama 3 tokenizer, matching MaxText's `TikTokenTokenizer`."""
+"""Llama 3 tokenizer, matching MaxText's `TikTokenTokenizer`, and the tokenizer
+of a published model."""
+
+import json
+import pathlib
 
 import tiktoken
 from tiktoken.load import load_tiktoken_bpe
@@ -45,3 +49,23 @@ class Llama3Tokenizer:
 
   def decode(self, ids: list[int]) -> str:
     return self._enc.decode(ids)
+
+
+class HubTokenizer:
+  """The tokenizer of a published model, from the `tokenizer.json` and
+  `config.json` in its directory.
+
+  `encode_batch` adds the special tokens the model's tokenizer adds, such as a
+  leading BOS; `eos_id` is the model config's.
+  """
+
+  def __init__(self, model_dir: str):
+    from tokenizers import Tokenizer  # pylint: disable=g-import-not-at-top
+
+    root = pathlib.Path(model_dir)
+    self._tok = Tokenizer.from_file(str(root / "tokenizer.json"))
+    eos = json.loads((root / "config.json").read_text())["eos_token_id"]
+    self.eos_id = eos[0] if isinstance(eos, list) else eos
+
+  def encode_batch(self, texts: list[str]) -> list[list[int]]:
+    return [e.ids for e in self._tok.encode_batch(texts)]
