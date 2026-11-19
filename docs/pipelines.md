@@ -836,8 +836,7 @@ models MaxText has a config and a converter for: Qwen3-0.6B, Qwen3-8B, Llama
 3.1 8B, Gemma 3 4B (its text tower), Mistral 7B and the mixture of experts
 Qwen3-30B-A3B. They ran on MI350X in bf16 with fp32 parameters and AdamW
 state, unless a row says fp32, on WikiText-103 in each model's own tokens
-(`python -m jax_titan.data.text --tokenizer=DIR --name=NAME`). Records are in
-[results/2026-11-19](results/2026-11-19), the files `maxtext-*`.
+(`python -m jax_titan.data.text --tokenizer=DIR --name=NAME`).
 
 Published weights: each model's weights from the Hugging Face Hub, converted
 with MaxText's own converter (`maxtext.checkpoint_conversion.to_maxtext`, and
@@ -911,10 +910,9 @@ remat. Tokens/s per GPU is the median of three runs, one of 300 steps and two
 of 40, each taken over its steps 5-39; the spread is their range over that
 median. "Over 300 steps" is the 300-step run over its steps 5-299, and the
 losses are that run's. The peak memory is the 40-step runs': the 300-step
-runs predate the initialization of the weights on their shardings, and their
-records show one GPU above the others. MFU is against MI350X's 2,306.9
-TFLOP/s in bf16; the records' own `mfu` is against the trainer's default of
-2,500.
+runs predate the initialization of the weights on their shardings, and in
+them one GPU holds more than the others. MFU is against MI350X's 2,306.9
+TFLOP/s in bf16; the trainer's own `mfu` is against its default of 2,500.
 
 | `maxtext:` model | Layout | GPUs | Tokens per step | Tokens/s per GPU | Spread | Over 300 steps | MFU | Peak HBM per GPU | Loss, step 0 | Steps 96-100 | 196-200 | 295-299 |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
