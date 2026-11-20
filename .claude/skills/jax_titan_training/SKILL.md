@@ -64,7 +64,7 @@ XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" timeout -s KILL 1800 python -m jax_titan.t
 # The same step without a pipeline: --parallel=dp or --parallel=fsdp.
 
 # A model of another repository is called whole (docs/adapters/):
-# --parallel=dp or fsdp, never a pipeline. MaxDiffusion's FLUX.1 on synthetic
+# --parallel=dp or fsdp, no pipeline. MaxDiffusion's FLUX.1 on synthetic
 # batches:
 ... --model=maxdiffusion:flux-dev --parallel=fsdp --microbatches=1 \
   --microbatch_size=8 --resolution=512 --lr=1e-5 ...
@@ -119,7 +119,7 @@ and `command-a-plus` support only data parallelism inside stages with
 gradients reduced per microbatch (the default for them); `--stage_layers`
 counts their layers or blocks, and `--model_overrides` takes JSON config
 overrides. `command-a-plus` is one stage, or more with `"freeze": ["embed"]`
-among its overrides. A `maxtext:`, `maxdiffusion:`, `transformers:` or
+among its overrides. Any other `maxtext:`, `maxdiffusion:`, `transformers:` or
 `diffusers:` model has no pipeline: it trains with `--parallel=dp` or `fsdp`,
 a language model on token files of its own tokenizer (`--data` and
 `--eval_data` default to Llama 3's).

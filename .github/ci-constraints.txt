@@ -4,14 +4,15 @@
 # The versions of the packages that the jobs of .github/workflows/ci.yml
 # install, taken from the job "CPU tests" on 2026-11-16. jax, jaxlib and
 # shardy-mpmd are pinned in the workflow and MaxDiffusion by its adapter's
-# PINNED_COMMIT. torch (its CPU build), torchax, diffusers, networkx and
-# importlib_metadata, which only the job "GPU tests" installs, were added by
-# hand on 2026-11-19 at the versions the adapters were compared with PyTorch
-# under.
+# PINNED_COMMIT. torch (its CPU build), torchax, diffusers, networkx,
+# importlib_metadata and lazy-importer, which only the job "GPU tests"
+# installs, were added by hand at the versions the adapters were compared with
+# PyTorch under.
 #
-# To update: install as that job does, without -c, in a new Python 3.12
-# environment, and replace the lines below with the output of
-#   python -m pip freeze --exclude-editable | grep -v ' @ '
+# To update: install as each job does, without -c, in a new Python 3.12
+# environment per job, and replace the lines below with the union of the
+# outputs of
+#   python -m pip freeze --local --exclude-editable | grep -v ' @ '
 absl-py==2.5.1
 aiofiles==25.1.0
 aiohappyeyeballs==2.7.1
@@ -76,6 +77,7 @@ jaraco.functools==4.6.0
 jaxtyping==0.3.11
 Jinja2==3.1.6
 kiwisolver==1.5.1
+lazy-importer==0.1.0
 markdown-it-py==4.3.0
 MarkupSafe==3.0.4
 matplotlib==3.11.2

@@ -95,7 +95,8 @@ The unit tests are in `tests/test_maxtext_adapter.py` and
 | The adapter's loss and gradients are MaxText's own: `WholeModel` against MaxText's `train.loss_fn` for six configs (Llama 3.1, Mistral, Gemma 3, Qwen3 and two mixtures of experts, Qwen3-30B-A3B's and DeepSeek's with its summed load-balance loss) | Unit test | Small | Loss within 1e-5, gradients within 1e-3 |
 | The trainer starts at the model's loss | Unit test | Small | Within 1e-5 |
 | FSDP on 2 GPUs trains as data parallelism does, for four models | Unit test | Small | Losses of 4 steps within 1e-4 |
-| A small model trains through the trainer, resumes exactly, and starts from a MaxText parameter checkpoint | Unit test | Small | Equal losses |
+| A small model trains through the trainer and resumes exactly, under dp and under FSDP | Unit test | Small | Equal losses |
+| The trainer starts from a MaxText parameter checkpoint | Unit test | Small | The loss of the checkpoint's parameters, within 1e-5 |
 | The published weights give PyTorch's loss, for the six models | [Experiment](#published-weights) | Real | In fp32 within 2.3e-5 for Qwen3 and Llama, the mixture of experts included, 3.0e-6 for Mistral with its RoPE base corrected and 3.5e-4 for Gemma 3 |
 | FSDP gives data parallelism's losses on 2, 4 and 8 GPUs, for five models (Qwen3-30B-A3B with 8 of its 48 layers) | [Experiment](#fsdp-against-data-parallelism) | Real | In fp32 within 1.6e-5 over 10 steps |
 | A run resumes from its checkpoint | [Experiment](#checkpoints) | Real | That step's loss exactly, the next two within 8e-8 |
@@ -221,7 +222,7 @@ TFLOP/s in bf16; the trainer's own `mfu` is against its default of 2,500.
 
 - **Every model trains**: the loss falls from 10.8-12.9 to 5.1-6.6 in 300
   steps, and lower where a step holds more tokens.
-- **Over 300 steps the throughput is 1% to 3% below that of the first 40.**
+- **Over 300 steps the throughput is 1% to 4% below that of the first 40.**
   The GPUs warm up and their clock drops under the power limit: for Llama
   3.1 8B on one GPU from 1,622 to 1,573 MHz, at 54 and 63 C and 1 kW.
 - **Under FSDP a GPU's throughput rises with the number of GPUs** at the

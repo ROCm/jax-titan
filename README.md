@@ -32,8 +32,8 @@ This is the target design; [What works](#what-works) lists what runs today.
   with the Llama 3 tokenizer, and throughput and MFU reporting.
 - MaxText models, built from MaxText 0.2.5's own layers and trained with
   `--model=maxtext:<name>`: a model config under `--parallel=dp` or `fsdp`,
-  with MaxText's own loss and no code per model family, six models checked on
-  GPUs ([docs/adapters/maxtext.md](docs/adapters/maxtext.md)).
+  with a loss equal to MaxText's and no code per model family, six models
+  checked on GPUs ([docs/adapters/maxtext.md](docs/adapters/maxtext.md)).
 - MaxDiffusion's FLUX.1 (dev and schnell) and Wan 2.1, MaxDiffusion's model
   called whole, with a flow-matching loss on synthetic batches
   ([docs/adapters/maxdiffusion.md](docs/adapters/maxdiffusion.md)).
@@ -73,10 +73,8 @@ This is the target design; [What works](#what-works) lists what runs today.
 - Checks against single-mesh `jax.jit`: every schedule and layout matches it
   in loss and parameters, over 100 steps for 1F1B.
 - A baseline without the pipeline (`--parallel=dp` or `--parallel=fsdp`): the
-  same model, weights and batches as one `jax.jit` program on all devices,
-  for MaxText and MaxDiffusion models too (`--parallel=dp`, and
-  `--parallel=fsdp` for MaxText's models, Ideogram 4 and Command A+), as the
-  Gate 0 reference.
+  same model, weights and batches as one `jax.jit` program on all devices, as
+  a pipeline's Gate 0 reference.
 - One gradient norm over all stages for clipping, with no update and no
   checkpoint after a non-finite norm or loss, and a step watchdog.
 - The ROCm scaling book's training metrics: a run directory (`--run_dir`)
@@ -166,7 +164,7 @@ JAX-Titan on AMD's SPUR cluster.
 |---|---|
 | `src/jax_titan/mpmd` | Topology, Shardy MPMD config and pipelined train steps |
 | `src/jax_titan/parallel` | DP, FSDP and TP shardings from logical parameter axes |
-| `src/jax_titan/models` | Llama 3 and Ideogram 4, with parameters grouped by pipeline stage; Ideogram 4's text encoder, autoencoder, published-weights reader and generation; Command A+ with its vision tower and generation; and MaxText's models, whole or as stages, and stages of MaxDiffusion's (`adapters/`) |
+| `src/jax_titan/models` | Llama 3 and Ideogram 4, with parameters grouped by pipeline stage; Ideogram 4's text encoder, autoencoder, published-weights reader and generation; Command A+ with its vision tower and generation; and the models of MaxText, MaxDiffusion, transformers and diffusers, each called whole, with the stages of MaxDiffusion's Ideogram branch (`adapters/`) |
 | `src/jax_titan/ops` | Semantic operators: per-op provider policy, native JAX, ROCm TE, JAX-AITER and JAX-Triton (Triton and Gluon) providers, and the conformance harness |
 | `src/jax_titan/data` | Llama 3's tokenizer and a published model's, and pretokenized text sampling; the cache of Ideogram 4's image tokens and text features; Command A+'s chat template, tokenizer and image tiles, and its cache of conversations |
 | `src/jax_titan/trainer` | Training entry point (`python -m jax_titan.trainer.train`) and Orbax checkpoints |

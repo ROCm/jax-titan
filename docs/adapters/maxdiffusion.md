@@ -61,11 +61,11 @@ MaxDiffusion's own trainers are not used.
 
 The objective is JAX-Titan's because a denoiser alone is not a training
 objective: MaxDiffusion keeps the noising, the timestep and the target in its
-trainers, not in the model. It is stated once per family in
+trainers, not in the model. These three are stated once per family in
 `jax_titan/data/diffusion.py` and shared with the
-[diffusers adapter](diffusers.md). Both families are rectified flows with an
-unweighted mean squared error: the denoiser sees `(1 - s) latents + s noise`
-and predicts `noise - latents`.
+[diffusers adapter](diffusers.md); the loss is the adapter's. Both families
+are rectified flows with an unweighted mean squared error: the denoiser sees
+`(1 - s) latents + s noise` and predicts `noise - latents`.
 
 | Family | Time `s` | What the denoiser is given | Against MaxDiffusion's trainer |
 |---|---|---|---|
@@ -98,9 +98,9 @@ The unit tests are in `tests/test_maxdiffusion_adapter.py` and
 |---|---|---|---|
 | FLUX.1 through the adapter gives the output of MaxDiffusion's `FluxTransformer2DModel` called directly | Unit test | Small | Loss within 1e-5 |
 | Wan 2.1 through the adapter gives the output of MaxDiffusion's `WanModel` built and called directly | Unit test | Small | Loss within 1e-5 |
-| FSDP shards every parameter of FLUX.1, and no stack of blocks along its block axis | Unit test | Small | Passes |
+| FSDP shards every parameter of FLUX.1 and of Wan 2.1, and no stack of blocks along its block axis | Unit test | Small | Passes |
 | FSDP on 2 GPUs trains as data parallelism does, for FLUX.1 and Wan 2.1 | Unit test | Small | Losses of 4 steps within 1e-4 |
-| A small FLUX.1 trains through the trainer and resumes exactly | Unit test | Small | Equal losses |
+| A small FLUX.1 and a small Wan 2.1 train through the trainer and resume exactly, under dp and under FSDP | Unit test | Small | Equal losses |
 | A run resumes from its checkpoint and validates | [Experiment](#checkpoints) | Small | The uninterrupted run's losses exactly, and its validation loss |
 | FLUX.1-dev and Wan 2.1 1.3B run, fit and their loss falls | [Experiment](#training-from-random-weights) | Real | The loss falls over 30 steps under `dp` and under `fsdp` |
 
