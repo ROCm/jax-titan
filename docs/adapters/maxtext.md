@@ -8,27 +8,17 @@ stage, under `--parallel=dp` or `fsdp`.
 
 ## What comes from MaxText and what from JAX-Titan
 
-| Part | From MaxText | From JAX-Titan |
-|---|---|---|
-| Model structure and layers | `Transformer`, called as it is | |
-| Model config | `base.yml` and `models/<name>.yml` | A few defaults (no dropout, the text tower alone), `--model_overrides`, `--seq_len` |
-| Parameter initialization | Its initializers | Placed on the trainer's shardings |
-| Precision | The config's default: bf16 compute, fp32 weights | |
-| Layer scan and rematerialization | Its own | |
-| Attention | Its dot-product attention | The choice of it; `--ops` routes it to `jax_titan.ops` |
-| Expert layers of a mixture of experts | Its code, in three forms | The choice of the dense matmul |
-| Loss | The load-balance term of a mixture of experts | The cross-entropy, and the sum of the two |
-| Gradient, clipping, update | | The train step |
-| Optimizer and schedule | | AdamW without weight decay on norms; warm-up and cosine decay |
-| Layouts (`dp`, `fsdp`) | The logical axis names on its parameters; its constraints on activations | The mesh, how parameters and optimizer state are sharded, how a batch is spread |
-| Data and tokenizer | | Token files and their sampling; the tokenizer is the model's published `tokenizer.json` |
-| Published weights | Its converter, run once, and its reader | The shardings the weights are read onto |
-| Checkpoints and resuming | | JAX-Titan's (Orbax) |
-| Validation, logs, metrics | The FLOP count of a step | Everything else |
-| What MaxText's training holds beyond this step | In its own trainer | Not implemented: such a config is refused |
+| Part | Comes from |
+|---|---|
+| Model: structure, layers, config, initialization | MaxText |
+| Published weights: converter and reader | MaxText |
+| Loss | JAX-Titan |
+| Train step: gradient, clipping, optimizer, schedule | JAX-Titan |
+| Layouts (`dp`, `fsdp`) | JAX-Titan |
+| Data | JAX-Titan |
+| Checkpoints, validation, logs, metrics | JAX-Titan |
 
-MaxText's own trainer takes no part: not its training loop, its `loss_fn`, its
-optimizer, its input pipeline or its checkpointing.
+MaxText's own trainer is not used.
 
 ## Running it
 
