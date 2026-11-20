@@ -225,7 +225,7 @@ def run_metrics(path, *, skip: int = 5, wcp_steps: int = 2, ceilings: dict | Non
       if hardware:
         out["hfu_sustained"] = hardware * len(times) / sum(times) / capacity
       out.update(_end_to_end_mfu(path, flops, capacity, skip, wcp_steps))
-    else:
+    elif all("mfu" in r for r in steady):
       out["mfu"] = statistics.median(r["mfu"] for r in steady)
     if flops and ceilings and ceilings.get("bf16_tflops") and out.get("devices"):
       out["mfu_calibrated"] = flops / p50 / (out["devices"] * ceilings["bf16_tflops"] * 1e12)

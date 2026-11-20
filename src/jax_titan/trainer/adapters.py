@@ -1,5 +1,5 @@
-"""Trainer layouts for models from MaxText and MaxDiffusion, for Ideogram 4 and
-for Command A+.
+"""Trainer layouts for models from MaxText, MaxDiffusion and transformers, for
+Ideogram 4 and for Command A+.
 
 `--model=maxtext:<name>` trains a MaxText model config (e.g.
 `maxtext:llama3.1-8b` or `maxtext:qwen3-8b`) on the token data, and
@@ -21,13 +21,20 @@ data-parallel `jax.jit` program, the no-pipeline reference; for MaxText's
 models, Ideogram 4 and Command A+, `--parallel=fsdp` also shards parameters and
 optimizer state. Of MaxText's models, Llama 2 and 3 have pipeline stages;
 every other one, and every one under `--parallel=fsdp`, trains as one stage,
-MaxText's `Transformer` called whole.
+MaxText's `Transformer` called whole. `--model=transformers:<name>` trains a
+decoder-only causal language model of Hugging Face transformers, a directory
+with a `config.json`, a model type or a model on the Hub. It runs through
+torchax (`models/adapters/torch_bridge.py`) as one stage, with `--parallel=dp`
+or `fsdp`, and rematerializes through the library's own gradient-checkpointing
+switch.
 
 The layouts here take a staged model, any object with `init(seed)` and
 `abstract(seed)`, the parameters of each stage and their shapes, and
 `stage_fns()`, one function per stage, the last of which returns the loss.
 `--init_from` needs its `load(path)`, `--parallel=fsdp` its
-`logical_axes(path, leaf)` and `--save_params` its `merge(stage_params)`.
+`logical_axes(path, leaf)` and `--save_params` its `merge(stage_params)`. A
+model with `decays(path, leaf)` says itself which parameters take weight
+decay; the builders get `make_optimizer(decays)` for that.
 
 A model may train only part of its parameters. Its stage parameters are then
 nested dicts, and `is_frozen(path)` tells, for the tuple of dict keys that
@@ -50,7 +57,7 @@ import os
 
 from jax_titan.trainer.layout import EVAL_STEPS, Layout, Workload, abstract, placement
 
-PROVIDERS = ("maxtext", "maxdiffusion")
+PROVIDERS = ("maxtext", "maxdiffusion", "transformers")
 # JAX-Titan's own models that train through these layouts.
 MODELS = ("ideogram4", "command-a-plus")
 
@@ -343,6 +350,54 @@ def _spmd_layout(args, mesh, model, optimizer, inputs, targets, split_batch) -> 
                 eval_step=eval_step, export=getattr(model, "merge", None), frozen=frozen)
 
 
+def _token_batches(args):
+  """The spec of a step's token windows, inputs and targets alike, and the
+  function that splits a host batch of windows of `seq_len + 1` into them."""
+  import jax  # pylint: disable=g-import-not-at-top
+  import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+  from jax_titan import mpmd as jt_mpmd  # pylint: disable=g-import-not-at-top
+
+  mb, num_mb, seq = args.microbatch_size, args.microbatches, args.seq_len
+  tokens = (jax.ShapeDtypeStruct((num_mb, mb, seq), jnp.int32),
+            jax.sharding.PartitionSpec(None, jt_mpmd.DATA_AXIS, None))
+
+  def split_batch(batch):
+    batch = batch.reshape(num_mb, mb, seq + 1)
+    return batch[..., :-1], batch[..., 1:]
+
+  return tokens, split_batch
+
+
+def _needs_own_tokens(args, vocab_size: int):
+  """Refuses the default token files, which hold Llama 3's tokens, for another vocabulary."""
+  from jax_titan.models import llama  # pylint: disable=g-import-not-at-top
+
+  own_tokens = vocab_size != llama.FLAVORS["llama3.1-8b"].vocab_size
+  held_out = args.eval_every and args.data != "synthetic" and not args.eval_data
+  if own_tokens and (not args.data or held_out):
+    raise ValueError(
+        f"{args.model} does not read Llama 3's tokens, which the default --data and --eval_data "
+        "hold: name its own token files (python -m jax_titan.data.text --tokenizer)")
+
+
+def _one_stage(args):
+  """Refuses what a model without pipeline stages cannot run as."""
+  if args.parallel == "mpmd" or args.num_stages != 1:
+    raise NotImplementedError(
+        f"{args.model} is one stage: --parallel=dp or --parallel=fsdp, with --num_stages=1")
+  if args.ops:
+    raise NotImplementedError(f"{args.model} runs its own operators: no --ops")
+
+
+def _data_mesh(devices):
+  import jax  # pylint: disable=g-import-not-at-top
+  import numpy as np  # pylint: disable=g-import-not-at-top
+  from jax_titan import mpmd as jt_mpmd  # pylint: disable=g-import-not-at-top
+
+  return jax.sharding.Mesh(
+      np.asarray(devices).reshape(len(devices), 1), (jt_mpmd.DATA_AXIS, jt_mpmd.TENSOR_AXIS))
+
+
 def _routed_attention():
   """`jax_titan.ops.attention` when the ops policy names attention, else None.
 
@@ -356,24 +411,14 @@ def _routed_attention():
 
 
 def _maxtext(args, name, devices, optimizer):
-  import jax  # pylint: disable=g-import-not-at-top
-  import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
-  from jax_titan.models import llama  # pylint: disable=g-import-not-at-top
   from jax_titan.models.adapters import maxtext as mt  # pylint: disable=g-import-not-at-top
-
-  P = jax.sharding.PartitionSpec  # pylint: disable=invalid-name
 
   if not args.remat:
     raise NotImplementedError(
         f"{args.model}: MaxText rematerializes its scanned layers under every remat_policy")
   cfg = mt.config(
       name, **{"remat_policy": "full", **_overrides(args), "max_target_length": args.seq_len})
-  own_tokens = cfg.vocab_size != llama.FLAVORS["llama3.1-8b"].vocab_size
-  held_out = args.eval_every and args.data != "synthetic" and not args.eval_data
-  if own_tokens and (not args.data or held_out):
-    raise ValueError(
-        f"{args.model} does not read Llama 3's tokens, which the default --data and --eval_data "
-        "hold: name its own token files (python -m jax_titan.data.text --tokenizer)")
+  _needs_own_tokens(args, cfg.vocab_size)
   # MaxText's Transformer whole, where the stages of `mt.Model` do not apply.
   split = mt.has_split(cfg)
   whole = args.parallel == "fsdp" or not split
@@ -396,18 +441,13 @@ def _maxtext(args, name, devices, optimizer):
     model = mt.Model(cfg, mesh, num_stages=args.num_stages, layers=_stage_layers(args),
                      attention=_routed_attention())
 
-  mb, num_mb, seq = args.microbatch_size, args.microbatches, args.seq_len
-  tokens = (jax.ShapeDtypeStruct((num_mb, mb, seq), jnp.int32), P(None, "data", None))
-
-  def split_batch(batch):
-    batch = batch.reshape(num_mb, mb, seq + 1)
-    return batch[..., :-1], batch[..., 1:]
-
+  seq = args.seq_len
+  tokens, split_batch = _token_batches(args)
   if args.parallel == "mpmd":
     layout = _mpmd_layout(args, topology, model, optimizer, tokens, tokens, split_batch)
   else:
     layout = _spmd_layout(args, mesh, model, optimizer, tokens, tokens, split_batch)
-  tokens_per_step = num_mb * mb * seq
+  tokens_per_step = args.microbatches * args.microbatch_size * seq
   flops = (model.flops_per_token() if whole else model.flops_per_token(seq)) * tokens_per_step
   hardware = None
   if split:
@@ -424,6 +464,34 @@ def _maxtext(args, name, devices, optimizer):
       flops_per_step=flops,
       vocab_size=cfg.vocab_size,
       hardware_flops_per_step=hardware,
+  )
+  return layout, work
+
+
+def _transformers(args, name, devices, make_optimizer):
+  import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+  from jax_titan.models.adapters import transformers as hf  # pylint: disable=g-import-not-at-top
+
+  _one_stage(args)
+  overrides = _overrides(args)
+  dtype = jnp.dtype(overrides.pop("dtype", "bfloat16"))
+  cfg = hf.config(name, **overrides)
+  if cfg.model_type not in hf.VERIFIED:
+    raise NotImplementedError(
+        f"{args.model} is of transformers' model type {cfg.model_type!r}, which was not "
+        f"compared with PyTorch through torchax: {', '.join(hf.VERIFIED)}")
+  vocab_size = hf.vocab_size(cfg)
+  _needs_own_tokens(args, vocab_size)
+  model = hf.causal_lm(cfg, seed=args.seed, dtype=dtype, remat=args.remat,
+                       init_from=args.init_from)
+  tokens, split_batch = _token_batches(args)
+  layout = _spmd_layout(args, _data_mesh(devices), model, make_optimizer(model.decays),
+                        tokens, tokens, split_batch)
+  work = Workload(
+      num_params=_num_params(model.abstract(args.seed)),
+      tokens_per_step=args.microbatches * args.microbatch_size * args.seq_len,
+      flops_per_step=None,
+      vocab_size=vocab_size,
   )
   return layout, work
 
@@ -755,21 +823,27 @@ def _command_a(args, devices, optimizer):
   return layout, work
 
 
-def build(args, devices, optimizer) -> tuple[Layout, Workload]:
-  """The layout and workload of `--model=<provider>:<name>`, or of one of `MODELS`."""
+def build(args, devices, make_optimizer) -> tuple[Layout, Workload]:
+  """The layout and workload of `--model=<provider>:<name>`, or of one of `MODELS`.
+
+  `make_optimizer(decays=None)` gives the optimizer; `decays(path, leaf)` says
+  which parameters take weight decay, by default all but JAX-Titan's,
+  MaxText's and MaxDiffusion's norms.
+  """
   provider, _, name = args.model.partition(":")
   native = args.model in MODELS
   ideogram = args.model == "ideogram4" or (provider == "maxdiffusion" and name == "ideogram4")
-  fsdp = native or ideogram or provider == "maxtext"
+  fsdp = native or ideogram or provider in ("maxtext", "transformers")
   if args.stage_fsdp or args.tensor_parallel != 1 or (args.parallel == "fsdp" and not fsdp):
     raise NotImplementedError(
         f"{args.model} takes neither --stage_fsdp nor --tensor_parallel"
         + ("" if fsdp else " nor --parallel=fsdp"))
   if args.parallel == "mpmd" and args.reduce_grads != "microbatch":
     raise NotImplementedError(f"{args.model} reduces gradients per microbatch only")
-  if args.init_from and provider != "maxtext" and not native:
+  if args.init_from and provider not in ("maxtext", "transformers") and not native:
     raise NotImplementedError(
-        "--init_from loads parameters of maxtext: models, ideogram4 and command-a-plus")
+        "--init_from loads parameters of maxtext: and transformers: models, ideogram4 and "
+        "command-a-plus")
   if provider == "maxdiffusion" and not ideogram and args.data not in ("", "synthetic"):
     raise NotImplementedError(f"{args.model} trains on synthetic batches only")
   if args.parallel != "mpmd" and (args.microbatches * args.microbatch_size) % len(devices):
@@ -777,6 +851,9 @@ def build(args, devices, optimizer) -> tuple[Layout, Workload]:
         f"--parallel={args.parallel} splits all {args.microbatches * args.microbatch_size} "
         f"sequences of a step across {len(devices)} devices"
     )
+  if provider == "transformers":
+    return _transformers(args, name, devices, make_optimizer)
+  optimizer = make_optimizer()
   if provider == "maxtext":
     return _maxtext(args, name, devices, optimizer)
   if ideogram:

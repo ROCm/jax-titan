@@ -1,7 +1,8 @@
 """The trainer's JSONL log: one record per step, and timeline events.
 
 Step records hold `step`, `loss`, `grad_norm`, `step_time_s`, `tokens_per_s`,
-`tokens_per_s_per_gpu`, `mfu` and `time`, the wall-clock time the step ended.
+`tokens_per_s_per_gpu`, `mfu` where the model has a FLOP count, and `time`, the
+wall-clock time the step ended.
 Event records hold `event` and `time`:
 
   start    `process_start`, `main_start` and `jax_ready` wall-clock times (and
