@@ -153,93 +153,32 @@ step instead of in every microbatch made the step 1.3x faster (2.20 s to
 1.70 s) for 10-15 GiB more memory per GPU. Their logs are in
 [results](results).
 
-## MaxText and MaxDiffusion models (2026-11-06, 8x MI355X)
-
-`--model=maxtext:llama3.1-8b` builds the stages from MaxText 0.2.5's own
-layers, and `--model=maxdiffusion:flux-dev` from MaxDiffusion's FLUX.1
-transformer (`jax_titan.trainer.adapters`). Attention is their native JAX
-implementation. Both reduce gradients in every microbatch's backward pass:
-MaxText's layers constrain activation shardings, and FLUX.1's stages pass
-tuples of activations, so neither has the per-rank parameter copies of
-`--reduce_grads=step` yet. Step times are medians over steps 5-29 (5-19 for
-FLUX.1), on the same stack as above. Per-step metrics are in
-[results/2026-11-06](results/2026-11-06).
-
-Llama 3.1 8B with 65,536 tokens per step on WikiText-103, 2 stages of 4 GPUs:
-
-| Model code | Schedule | Gradients reduced | Step | Tokens/s | MFU | Peak HBM per GPU |
-|---|---|---|---|---|---|---|
-| MaxText | Zero-bubble H1 | per microbatch | 2.028 s | 32.3k | 7.5% | 177-178 GiB |
-| MaxText | 1F1B | per microbatch | 2.013 s | 32.6k | 7.6% | 177-180 GiB |
-| JAX-Titan's Llama | Zero-bubble H1 | per microbatch | 2.106 s | 31.1k | 7.3% | 167 GiB |
-| JAX-Titan's Llama | Zero-bubble H1 | per step (default) | 1.459 s | 44.9k | 10.5% | 180-181 GiB |
-
-FLUX.1-dev (11.9B parameters) with 32 images of 1024x1024 per step (8
-microbatches of 4), each 4,096 latent and 512 text tokens, on synthetic
-rectified-flow batches, 4 stages of 2 GPUs with 15, 14, 14 and 14 blocks and
-zero-bubble H1: 7.269 s per step, 4.4 images/s (20.3k tokens/s) and 4.9% MFU,
-with 218, 120, 88 and 89 GiB peak HBM per GPU from the first stage to the
-last. The loss falls from 3.51 to 2.75 in 20 steps.
-
-- **MaxText's layers are as fast as JAX-Titan's Llama** when both reduce
-  gradients per microbatch: 4% faster here, for 10 GiB more memory per GPU.
-  MaxText initializes differently (step-0 loss 12.30 against 12.58); both
-  reach 7.2-7.5 after 30 steps.
-- **The gap to JAX-Titan's default, 1.39x, is the gradient reduction:**
-  all-reducing each stage's gradients in all 8 microbatches instead of once
-  per step. With that reduction, 1F1B and zero-bubble are within 1%.
-- **FLUX.1-dev does not fit in 2 stages of 4 GPUs.** The first of 2 stages
-  holds all 19 double-stream blocks, which carry 2.4 times the weights of a
-  single-stream block: 7.9B of the 11.9B parameters. With fp32 weights,
-  AdamW state and per-microbatch gradients, its GPUs reached 272 GiB at step
-  0 and ran out of memory at step 1, even with
-  `XLA_PYTHON_CLIENT_MEM_FRACTION=0.95`. With 4 stages the first holds 5.1B.
-- Compiling took 53-54 s for the MaxText pipelines, 74-110 s for JAX-Titan's
-  Llama and 123 s for FLUX.1.
-
-## Global gradient clipping, MaxText attention and Gate 0 (2026-11-07, 8x MI355X)
+## Global gradient clipping and MaxText's own trainer (2026-11-07, 8x MI355X)
 
 Since 2026-11-07 every pipeline clips by one gradient norm over all stages
 (the global norm of `optax.clip_by_global_norm`, which per-stage clipping
 only approximated) and skips the update when the norm is not finite; every
-result above used per-stage clipping. MaxText's attention can run through
-`jax_titan.ops` (`--ops=attention=te` or `aiter`), and `--parallel=dp` runs
-an adapter model's stages without the pipeline, as the Gate 0 reference.
-Medians over steps 5-29 (from step 3 in the shorter checks; MaxText's
-attention is the median of three runs), Llama 3.1 8B with 65,536 tokens per
-step, 2 stages of 4 GPUs, zero-bubble H1; per-step records are in
+result above used per-stage clipping. Medians over steps 5-29, Llama 3.1 8B
+with 65,536 tokens per step, 2 stages of 4 GPUs, zero-bubble H1, gradients
+reduced per step; per-step records are in
 [results/2026-11-07](results/2026-11-07).
 
-| Model code | Attention | Gradients reduced | Step | Against per-stage clipping |
-|---|---|---|---|---|
-| MaxText | MaxText's (native JAX) | per microbatch | 2.098 s | 2.028 s (+3.4%) |
-| MaxText | TE fused attention | per microbatch | 1.867 s | |
-| MaxText | JAX-AITER flash attention | per microbatch | 1.876 s | |
-| MaxText, no pipeline (`--parallel=dp`, 8 GPUs) | MaxText's | per step | 0.733 s | |
-| JAX-Titan's Llama | native | per step | 1.502 s | 1.457 s (+3.1%) |
-| JAX-Titan's Llama | TE fused attention | per step | 1.310 s | 1.26 s (+4%) |
+| Attention | Step | Against per-stage clipping |
+|---|---|---|
+| native | 1.502 s | 1.457 s (+3.1%) |
+| TE fused attention | 1.310 s | 1.26 s (+4%) |
 
-MaxText's own trainer (`maxtext.trainers.pre_train.train`, the same MaxText
-0.2.5 checkout, synthetic data, the same 65,536 tokens per step, full remat),
-with MaxText's attention (`attention=dot_product`) unless the row says TE:
+MaxText's own trainer (`maxtext.trainers.pre_train.train`, MaxText 0.2.5,
+synthetic data, the same 65,536 tokens per step, full remat), with MaxText's
+attention (`attention=dot_product`) unless the row says TE:
 
-| MaxText trainer layout | Step | Tokens/s per GPU | Against JAX-Titan |
+| MaxText trainer layout | Step | Tokens/s per GPU | JAX-Titan's Llama as a pipeline |
 |---|---|---|---|
-| FSDP over 8 GPUs | 0.723 s | 11.3k | `--parallel=dp` with MaxText's layers: 0.733 s |
-| Its pipeline: 2 stages x 4 GPUs (FSDP inside), 8 microbatches, 16 layers per stage | 1.763 s | 4.6k | MPMD pipeline of MaxText's layers: 2.098 s; of JAX-Titan's Llama: 1.502 s |
+| FSDP over 8 GPUs | 0.723 s | 11.3k | |
+| Its pipeline: 2 stages x 4 GPUs (FSDP inside), 8 microbatches, 16 layers per stage | 1.763 s | 4.6k | 1.502 s |
 | Its pipeline, 2026-11-09 | 1.755 s | 4.7k | |
-| Its pipeline with TE fused attention (`attention=cudnn_flash_te`), 2026-11-09 | 1.538 s | 5.3k | MPMD pipeline of JAX-Titan's Llama with TE, the same day: 1.278 s |
+| Its pipeline with TE fused attention (`attention=cudnn_flash_te`), 2026-11-09 | 1.538 s | 5.3k | With TE, the same day: 1.278 s |
 
-- **Gate 0 passes on one node.** Against `--parallel=dp` with the same
-  weights and batches, every pipeline stays within 8.7e-4 relative loss over
-  the first 10 steps (MaxText's attention 6.3e-4, TE 8.7e-4, JAX-AITER 8.7e-4;
-  step 0 within 1.1e-5). The warmup's loss spikes (steps 2-10, gradient norms
-  up to 54) then amplify bf16 rounding differences to 1-7%, so the gate is
-  K = 10 steps with a tolerance of 2e-3
-  (`summarize --gate0`, [maxtext-llama3.1-8b_gate0.json](results/2026-11-07/maxtext-llama3.1-8b_gate0.json)).
-- **TE and JAX-AITER attention make MaxText's pipeline 1.12x faster.**
-  JAX-AITER runs without `shard_map` here, since per-microbatch reduction has
-  no `vmap` over parameter copies.
 - **Global clipping costs 3-4%.** As first written it cost 16% with per-step
   reduction (1.70 s; an A/B at the previous two commits, 1.457 s at
   `d18cbca` and 1.452 s at `e9dc50f`, ruled out the operator work). Traces
@@ -255,21 +194,15 @@ with MaxText's attention (`attention=dot_product`) unless the row says TE:
   that share stage ids (1.701 s) and the Shardy options
   `mpmd_absorb_inferred_fragments_on_entry_point_function` (1.69-1.74 s) and
   `mpmd_merge_inferred_after_scheduling=false` (1.68-1.73 s) did not help.
-  With per-microbatch reduction the same structure gained 3% (2.036 s) but
-  made TE attention's custom partitioning fail to compile, so that path keeps
-  the inferred update.
-- **MaxText's own pipeline is 1.19x faster than the MPMD pipeline of
-  MaxText's layers, and 1.17x slower than the MPMD pipeline of JAX-Titan's
-  Llama.** MaxText's pipeline is one SPMD program with a GPipe-like loop. It
-  shards weights and optimizer state over each stage's 4 GPUs (FSDP, with
-  `pipeline_fsdp_ag_once` off), so in every microbatch it all-gathers weights
-  and reduce-scatters gradients, and each GPU updates a quarter of its stage
-  (37 GB estimated per GPU). The adapter replicates each stage, all-reduces
-  its gradients in every microbatch (twice the bytes of a reduce-scatter) and
-  updates the whole stage on every GPU (178 GiB). JAX-Titan's Llama reduces
-  once per step under the zero-bubble schedule. Per-step reduction or FSDP
-  inside stages for adapter models is the next step for them. Without a
-  pipeline the two trainers match (0.723 s and 0.733 s).
+  With per-microbatch reduction the same structure made TE attention's custom
+  partitioning fail to compile, so that path keeps the inferred update.
+- **MaxText's own pipeline is 1.17x slower than JAX-Titan's.** MaxText's
+  pipeline is one SPMD program with a GPipe-like loop. It shards weights and
+  optimizer state over each stage's 4 GPUs (FSDP, with `pipeline_fsdp_ag_once`
+  off), so in every microbatch it all-gathers weights and reduce-scatters
+  gradients, and each GPU updates a quarter of its stage (37 GB estimated per
+  GPU). JAX-Titan's Llama reduces once per step under the zero-bubble
+  schedule.
 - **With TE attention in both trainers, JAX-Titan's Llama pipeline is still
   1.20x faster than MaxText's** (1.278 s against 1.538 s, both on 2026-11-09;
   per-step records in [results/2026-11-09](results/2026-11-09)). TE speeds up
@@ -328,14 +261,10 @@ Training with the same layouts and batches as above:
 | Llama 3.1 8B, 2 stages | per step (shard_map) | native, 2026-11-07 | 1.689 s | 38.8k tokens/s | 9.0% |
 | Llama 3.1 8B, 2 stages | per step (shard_map) | `rms_norm=triton,rope=triton,swiglu=triton` | 1.696 s | 38.6k tokens/s | 9.0% |
 | Llama 3.1 8B, 2 stages | per step (shard_map) | `linear=gluon,swiglu=gluon` | 2.372 s | 27.6k tokens/s | 6.4% |
-| FLUX.1-dev, 4 stages | per microbatch | MaxDiffusion's attention | 7.269 s | 4.4 images/s | 4.9% |
-| FLUX.1-dev, 4 stages | per microbatch | `attention=native` (XLA) | 8.001 s | 4.0 images/s | 4.5% |
-| FLUX.1-dev, 4 stages | per microbatch | `attention=te` | 5.764 s | 5.6 images/s | 6.2% |
-| FLUX.1-dev, 4 stages | per microbatch | `attention=aiter` | 6.028 s | 5.3 images/s | 5.9% |
 
 - **TE fused attention is the biggest win:** 1.16x on Llama 3.1 8B (12.1%
-  MFU) and 1.26x on FLUX.1-dev, at the same memory. JAX-AITER's flash
-  attention gets 1.10x and 1.21x. Loss curves track native.
+  MFU), at the same memory. JAX-AITER's flash attention gets 1.10x. Loss
+  curves track native.
 - **`--per_device=shard_map` costs 16%:** Shardy MPMD does not split a
   backward fragment that contains a manual computation into its activation
   and weight gradients, so zero-bubble runs like 1F1B (16 split stage-1

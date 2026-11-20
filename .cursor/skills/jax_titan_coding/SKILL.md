@@ -53,18 +53,17 @@ for a later comparison: do not import from it or edit it.
   extra). `WholeModel` calls MaxText's `Transformer` whole, as one stage for
   `--parallel=dp` and `fsdp`, with no code per model family, and refuses a
   config whose loss has more terms than the cross-entropy and the MoE
-  load-balance term. `Model` cuts Llama 2 and 3 (`has_split`) into pipeline
-  stages. MaxText's layers constrain activations on the mesh they
-  are built with, so build them on one stage mesh and reduce gradients per
-  microbatch. Parameters keep MaxText's names and layer axis; `llama_params`
-  maps Llama weights onto `models/llama.py`.
-- **MaxDiffusion models:** `models/adapters/maxdiffusion.py` builds FLUX.1
-  stages from MaxDiffusion's transformer at commit `821afc36` with the
-  `third_party/patches/maxdiffusion-*.patch` patches. Stage boundaries carry
-  a tuple (image and text tokens, conditioning, rotary embeddings), so these
-  stages reduce gradients per microbatch. `WholeModel` calls a denoiser
-  whole, as one stage for `--parallel=dp` and `fsdp`: FLUX.1 and Wan 2.1,
-  each with a few lines (`whole_flux`, `whole_wan`).
+  load-balance term. Parameters keep MaxText's names and layer axis;
+  `llama_config` and `llama_params` map a Llama model onto `models/llama.py`,
+  whose reference the adapter is.
+- **MaxDiffusion models:** `models/adapters/maxdiffusion.py` runs
+  MaxDiffusion's denoisers at commit `821afc36` with the
+  `third_party/patches/maxdiffusion-*.patch` patches. `WholeModel` calls a
+  denoiser whole, as one stage for `--parallel=dp` and `fsdp`: FLUX.1 and
+  Wan 2.1, each with a few lines (`whole_flux`, `whole_wan`).
+- **A model of another repository is one stage.** An adapter calls the
+  repository's model whole and never cuts it: a pipeline needs a model
+  written for JAX-Titan, as `models/llama.py` is.
 - **PyTorch models:** `models/adapters/torch_bridge.py` turns a
   `torch.nn.Module` into one stage through torchax, and is the only module
   that imports torchax. PyTorch's autograd takes no part, so a model that
@@ -163,13 +162,14 @@ for a later comparison: do not import from it or edit it.
   (`rtol=1e-5` over 4 steps).
 - Resume behavior is tested in `tests/test_checkpoint.py`: a resumed run must
   equal the uninterrupted one exactly on CPU.
-- `tests/test_maxtext_adapter.py` checks MaxText's model, `models/llama.py`
-  and the pipeline step against each other; run it after changing either
-  model (it is skipped without the `maxtext` extra). Its `gpu` tests check
-  the whole model against MaxText's own loss function and against the
-  stages, and FSDP against data parallelism (`--gpus=2`).
-  `tests/test_maxdiffusion_adapter.py` does the same for FLUX.1 against
-  MaxDiffusion's transformer (skipped without MaxDiffusion).
+- `tests/test_maxtext_adapter.py` checks the whole model against MaxText's
+  own loss function, FSDP against data parallelism, and `models/llama.py`
+  against the whole model from the same weights, on GPUs (`--gpus=2`; skipped
+  without the `maxtext` extra); run it after changing either Llama.
+  `tests/test_maxdiffusion_adapter.py`
+  checks FLUX.1 and Wan 2.1 against MaxDiffusion's own modules (skipped
+  without MaxDiffusion). `tests/test_adapter_training.py` trains a model of
+  each through the trainer on CPU and resumes it exactly.
   `tests/test_transformers_adapter.py` and `tests/test_diffusers_adapter.py`
   compare the traced PyTorch models with PyTorch's own loss and gradients, on
   GPUs (skipped without the `transformers` or `diffusers` extra).

@@ -215,38 +215,40 @@ python -m jax_titan.planning.budget --model=path/to/Qwen3-14B --tokens=5e12 --gp
 
 ### From what a JAX-Titan run measured
 
-`--from_run` takes a JAX-Titan `--run_dir`, here the recorded
-[Llama 3.1 8B recipe](recipes/maxtext-llama3.1-8b.md) run: its achieved FLOP/s
-and power on the same GPU type (its MFU carried over to other types), its
-checkpoint and restart costs, and its memory overhead replace the defaults.
+`--from_run` takes a JAX-Titan `--run_dir`, here a
+[recorded run](results/2026-11-07/llama3.1-8b_pp2_run-dir) of Llama 3.1 8B on
+2 stages of 4 GPUs: its achieved FLOP/s on the same GPU type (its MFU carried
+over to other types) and its memory overhead replace the defaults. A run with
+a power record, checkpoints and a restart also supplies its power and its
+checkpoint and restart costs.
 
 ```bash
 python -m jax_titan.planning.budget --model=llama3.1-8b --tokens=2e12 --gpu=MI355X --gpus=512 \
-  --seq_len=2048 --fsdp --from_run=docs/results/2026-11-07/maxtext-llama3.1-8b_recipe
+  --seq_len=2048 --fsdp --from_run=docs/results/2026-11-07/llama3.1-8b_pp2_run-dir
 ```
 
 ```text
 --------- System Budget Full Report ---------
   ...
-  MFU:                    8.1% (measured on AMD Instinct MI355X)
-  HFU:                    10.6%
-  ETTR:                   0.985
-  checkpoint interval:    1.46 h (Daly)
+  MFU:                    8.9% (measured on AMD Instinct MI355X)
+  HFU:                    11.6%
+  ETTR:                   0.996
+  checkpoint interval:    0.36 h (Daly)
   ...
-  throughput per GPU:     4351 tokens/s
-  wall time:              10.5 days
+  throughput per GPU:     4795 tokens/s
+  wall time:              9.5 days
   ...
-  GPU-hours:              129.62k
+  GPU-hours:              116.35k
   ...
 
 --------- XLA BF16 GEMM Report ---------
   ...
-  MFU of the ceiling:     14%
+  MFU of the ceiling:     16%
 
 --------- Memory Report ---------
   ...
-  overhead:               x2.83 (measured)
-  peak per GPU:           8 GiB of 268 GiB HBM
+  overhead:               x1.96 (measured)
+  peak per GPU:           6 GiB of 268 GiB HBM
   fits:                   yes (limit: 255 GiB, 95% of HBM)
   ...
 ```
@@ -458,14 +460,16 @@ JAX-Titan's Llama 3.1 8B runs on 8x MI355X measure 8-12% MFU today
 **ETTR.** The planner projects ETTR for the GPU count with Daly's
 checkpoint interval ([metrics.md](metrics.md)). The inputs are:
 
-- the checkpoint cost (`--w_cp_s`, default the recipe's 2.4 s);
+- the checkpoint cost (`--w_cp_s`, default 2.4 s, measured on a 1,000-step
+  run of Llama 3.1 8B on 8x MI355X);
 - the restart cost (`--restart_s`, default 175 s);
 - the failure rate: Llama 3's 419 unexpected interruptions in 54 days on
   16,384 GPUs, 0.47 per 1,000 GPU-days.
 
 **Energy.** Energy is GPUs x board power x `--power_fraction` x `--pue`
-over the wall time, at the GPU boundary. AMD's board power is a maximum. The
-recipe drew 48% of it, 670 W per MI355X, which `--from_run` picks up.
+over the wall time, at the GPU boundary. AMD's board power is a maximum: a
+1,000-step run of Llama 3.1 8B drew 48% of it, 670 W per MI355X. `--from_run`
+picks the fraction up from a run with a power record.
 
 **Memory.** The analytic floor per GPU of the busiest stage has three parts:
 - **training state:** `--state_bytes`, by default 4, 4 and 8 bytes per
@@ -476,12 +480,9 @@ recipe drew 48% of it, 670 W per MI355X, which `--from_run` picks up.
 
 The layout comes from `--tp`, `--pp`, `--ep`, `--fsdp`, `--batch_tokens`
 and `--microbatches`. XLA's temporaries and unaliased buffers add a measured
-factor on top:
-
-| Run (8x MI355X, Llama 3.1 8B, 2 stages of 4) | Floor | Measured peak | Factor |
-|---|---|---|---|
-| JAX-Titan's model, gradients reduced per step | 92.7 GiB | 181-187 GiB | 1.96-2.01 |
-| MaxText's layers, gradients reduced per microbatch | 62.8 GiB | 178 GiB | 2.83 |
+factor on top: for Llama 3.1 8B on 8x MI355X, as 2 stages of 4 with gradients
+reduced per step, the floor is 92.7 GiB and the measured peak 181-187 GiB, a
+factor of 1.96-2.01.
 
 The default is 2.0. `--from_run` measures the factor on the run, and
 `memory.calibrate(run_dir)` gives it for any run with a memory event. The
