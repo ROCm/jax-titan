@@ -6,19 +6,30 @@ JAX-Titan's. A model family needs no code in JAX-Titan: `WholeModel`
 (`models/adapters/maxtext.py`) calls MaxText's `Transformer` whole, under
 `--parallel=dp` or `fsdp`.
 
-## What comes from MaxText and what from JAX-Titan
+## Models
 
-| Part | Comes from |
-|---|---|
-| Model: structure, layers, config, initialization | MaxText |
-| Published weights: converter and reader | MaxText |
-| Loss | JAX-Titan |
-| Train step: gradient, clipping, optimizer, schedule | JAX-Titan |
-| Layouts (`dp`, `fsdp`) | JAX-Titan |
-| Data | JAX-Titan |
-| Checkpoints, validation, logs, metrics | JAX-Titan |
+`<name>` is a model config of MaxText, `configs/models/<name>.yml`. The adapter
+takes every config whose training is one gradient step of the cross-entropy
+and the load-balance term. Six ran on GPUs at their real size:
 
-MaxText's own trainer is not used.
+| `--model=` | Published weights | Parameters |
+|---|---|---|
+| `maxtext:qwen3-0.6b` | `Qwen/Qwen3-0.6B` | 0.60B |
+| `maxtext:qwen3-8b` | `Qwen/Qwen3-8B` | 8.19B |
+| `maxtext:llama3.1-8b` | `meta-llama/Llama-3.1-8B` | 8.03B |
+| `maxtext:gemma3-4b` | `google/gemma-3-4b-it`, its text tower | 3.88B |
+| `maxtext:mistral-7b` | `mistralai/Mistral-7B-v0.1` | 7.24B |
+| `maxtext:qwen3-30b-a3b` | `Qwen/Qwen3-30B-A3B-Thinking-2507` | 30.53B |
+
+MaxText's other model families take the same path and were not run on GPUs
+here. A config that MaxText's own validation rejects under its defaults needs
+the override MaxText names, as `{"scan_layers": false}` for Gemma 4 E2B; none
+was run.
+
+A config under which MaxText's training holds more than this step is refused:
+multi-token prediction, the z-loss, the indexer loss of DeepSeek V3.2 and V4,
+vocabulary tiling, updates of the routing bias, QK-clip, quantization and
+gradient accumulation.
 
 ## Running it
 
@@ -43,69 +54,71 @@ the output of MaxText's own converter
 ([getting_started.md](../getting_started.md) has the commands).
 `--model_overrides` takes MaxText config fields as JSON.
 
-## What is supported
+## What comes from MaxText and what from JAX-Titan
 
-- Every model config of MaxText 0.2.5 whose training is one gradient step of
-  the cross-entropy and the load-balance term, under `dp` and `fsdp`. Six ran
-  on GPUs at their real size: Qwen3-0.6B, Qwen3-8B, Llama 3.1 8B, Gemma 3 4B
-  (its text tower), Mistral 7B and Qwen3-30B-A3B.
-- Random weights, or a MaxText parameter checkpoint with `--init_from`.
-- Checkpoints and resuming, validation, and `--ops=attention=...` for a
-  model's global causal attention.
+| Part | Comes from |
+|---|---|
+| Model: structure, layers, config, initialization | MaxText |
+| Published weights: converter and reader | MaxText |
+| Loss | JAX-Titan |
+| Train step: gradient, clipping, optimizer, schedule | JAX-Titan |
+| Layouts (`dp`, `fsdp`) | JAX-Titan |
+| Data | JAX-Titan |
+| Checkpoints, validation, logs, metrics | JAX-Titan |
 
-## What is not supported
+MaxText's own trainer is not used.
 
-- **Pipelines** (`--parallel=mpmd`). A model of another repository is called
-  whole; a pipeline needs a model written for JAX-Titan, as
-  `--model=llama3.1-8b` is.
-- **Configs under which MaxText's training holds more than this step are
-  refused**: multi-token prediction, the z-loss, the indexer loss of DeepSeek
-  V3.2 and V4, vocabulary tiling, updates of the routing bias, QK-clip,
-  quantization and gradient accumulation. `--no-remat` is refused too:
-  MaxText rematerializes its scanned layers under every policy.
-- **A model that keeps weights outside its parameters**, as DeepSeek V3
-  keeps its routing bias, does not take `--init_from`.
-- **A config that MaxText's own validation rejects under its defaults**
-  needs the override MaxText names, as `{"scan_layers": false}` for Gemma 4
-  E2B. None was run.
-- **MaxText's other model families** take the same path and were not run on
-  GPUs here. The load-balance term ran in the tests at a small size only:
-  none of these six configs weights it.
-- **The dense expert matmul computes every expert.** It was measured against
-  the other forms for Qwen3-30B-A3B's 8 of 128 experts only.
-- **Attention through `jax_titan.ops`** was checked at a small size with the
-  native provider, in the tests; no run here used TE or JAX-AITER.
-- **Checkpoints**: one resume was checked. Qwen3-0.6B from its published
-  weights under FSDP on 2 GPUs in fp32 restores the checkpoint of step 3,
-  gives that step's loss exactly and the next two within 8e-8.
-- **MaxText's `qwen3-0.6b` starts at a loss of 233 from random weights**: its
-  config ties the output to an embedding of standard deviation 1 without
-  normalizing the logits.
+## What is supported and what is not
+
+| Feature | Supported | Note |
+|---|---|---|
+| `--parallel=dp` and `fsdp` | Yes | |
+| Pipelines (`--parallel=mpmd`) | No | A model of another repository is called whole; a pipeline needs a model written for JAX-Titan, as `--model=llama3.1-8b` is |
+| Random weights | Yes | |
+| Published weights (`--init_from`) | Yes | A MaxText parameter checkpoint; not for a model that keeps weights outside its parameters, as DeepSeek V3 keeps its routing bias |
+| Real data | Yes | Token files of the model's own tokenizer |
+| Checkpoints and resuming | Yes | |
+| Validation | Yes | |
+| Rematerialization | Yes | Always on: MaxText rematerializes its scanned layers under every policy, and `--no-remat` is refused |
+| `jax_titan.ops` (`--ops`) | Attention only | `--ops=attention=...`, for a model's global causal attention |
+| MFU | Yes | |
+| Writing the trained parameters (`--save_params`) | No | |
+| Generation or sampling | No | |
 
 ## How it is verified
 
-### Tests
+The tests are `tests/test_maxtext_adapter.py`, on GPUs at a small size in
+fp32, and `tests/test_adapter_training.py`, on CPU. The runs are under
+[Runs](#runs).
 
-`tests/test_maxtext_adapter.py`, on GPUs, at a small size in fp32:
+| What is checked | By | Size | Result |
+|---|---|---|---|
+| The adapter's loss and gradients are MaxText's own: `WholeModel` against MaxText's `train.loss_fn` for six configs (Llama 3.1, Mistral, Gemma 3, Qwen3 and two mixtures of experts, Qwen3-30B-A3B's and DeepSeek's with its summed load-balance loss) | Test, GPU | Small | Loss within 1e-5, gradients within 1e-3 |
+| The trainer starts at the model's loss | Test, GPU | Small | Within 1e-5 |
+| FSDP trains as data parallelism does, for four models | Test, 2 GPUs | Small | Losses of 4 steps within 1e-4 |
+| A small model trains through the trainer, resumes exactly, and starts from a MaxText parameter checkpoint | Test, CPU | Small | Equal losses |
+| The published weights give PyTorch's loss, for the six models | Runs | Real | In fp32 within 2.3e-5 for Qwen3 and Llama, the mixture of experts included, 3.0e-6 for Mistral with its RoPE base corrected and 3.5e-4 for Gemma 3 |
+| FSDP gives data parallelism's losses on 2, 4 and 8 GPUs, for five models (Qwen3-30B-A3B with 8 of its 48 layers) | Runs | Real | In fp32 within 1.6e-5 over 10 steps |
+| A run resumes from the checkpoint of step 3: Qwen3-0.6B from its published weights, under FSDP on 2 GPUs in fp32 | Run | Real | That step's loss exactly, the next two within 8e-8 |
+| Every model trains | Runs | Real | The loss falls from 10.8-12.9 to 5.1-6.6 in 300 steps |
+| JAX-Titan's own Llama gives the adapter's loss and gradients from the same weights, with Llama 3.1's RoPE and with Llama 3's ([below](#jax-titans-own-llama-against-the-adapter)) | Test, GPU; one run | Small; real | Loss within 1e-5, gradients within 1e-3; at real size the losses are 3.6e-7 apart in fp32 |
 
-- **The adapter's loss and gradients are MaxText's own**: `WholeModel` against
-  MaxText's `train.loss_fn` for six configs (Llama 3.1, Mistral, Gemma 3, Qwen3
-  and two mixtures of experts, Qwen3-30B-A3B's and DeepSeek's with its summed
-  load-balance loss), the loss within 1e-5 and the gradients within 1e-3.
-- **The trainer starts at the model's loss.**
-- **FSDP trains as data parallelism does**, on 2 GPUs, for four models.
-- **JAX-Titan's own Llama gives the adapter's loss and gradients** from the
-  same weights, with Llama 3.1's RoPE and with Llama 3's
-  ([below](#jax-titans-own-llama-against-the-adapter)).
+Not checked:
 
-`tests/test_adapter_training.py`, on CPU: a small model trains through the
-trainer, resumes exactly, and starts from a MaxText parameter checkpoint.
+- **MaxText's other model families** on GPUs.
+- **The load-balance term at real size.** It ran in the tests at a small size
+  only: none of the six configs weights it.
+- **Attention through `jax_titan.ops` with TE or JAX-AITER.** It was checked
+  at a small size with the native provider, in the tests; no run here used
+  another.
+- **The gradients at real size.** The runs compare the loss.
 
-### Runs (2026-11-19, 8x MI350X)
+## Runs
 
-These runs take the six models above. They ran on MI350X in bf16 with fp32
-parameters and AdamW state, unless a row says fp32, on WikiText-103 in each
-model's own tokens. Llama 3.1 8B's `dp` runs are of 2026-11-20.
+On 8x MI350X, 2026-11-19; Llama 3.1 8B's `dp` runs are of 2026-11-20. The
+runs take the six models of [Models](#models), in bf16 with fp32 parameters
+and AdamW state unless a row says fp32, on WikiText-103 in each model's own
+tokens.
 
 Published weights: each model's weights from the Hugging Face Hub, converted
 with MaxText's own converter (`maxtext.checkpoint_conversion.to_maxtext`, and
@@ -130,23 +143,17 @@ JAX-Titan's holds fp32 weights and computes in bf16.
   Qwen3 and Llama, the mixture of experts included. In bf16 they are within
   6e-4 of PyTorch's fp32 loss, where PyTorch's own bf16 is up to 1.8e-3 from
   it.
-- **MaxText's `mistral-7b` config is not the published Mistral 7B v0.1.** It
-  sets `rope_max_timescale` to 1,000,000; the weights its converter names
-  have a RoPE base of 10,000. With MaxText's config the loss is 2.196 against
-  PyTorch's 1.889, and with
-  `--model_overrides='{"rope_max_timescale": 10000}'` it is within 3.0e-6.
+- **The two `mistral-7b` rows differ by the RoPE base**: MaxText's config is
+  not the published model's ([Known issues](#known-issues)).
 - **Gemma 3 is the least close**: 3.5e-4 in fp32, and 5.8e-4 when the
   converter saves fp32 instead of its default bf16, so the saved dtype is not
   the cause. In bf16 it is 8.6e-3 from PyTorch's fp32, where PyTorch's own
-  bf16 is 4.9e-3. Its converter needs
-  `--lazy_load_tensors=False --eager_load_method=transformers`: the published
-  files name their tensors `language_model.model.*`, and the converter's lazy
-  reader looks for `model.language_model.*`.
+  bf16 is 4.9e-3.
 
 FSDP against data parallelism: random weights of `--seed=0`, the same 8
 sequences per step, 10 steps, `--parallel=fsdp` on 2, 4 and 8 GPUs against
-`--parallel=dp` on one GPU. The largest relative difference of the loss over the 10 steps, with sequences
-of 2,048 tokens in bf16 and of 1,024 in fp32:
+`--parallel=dp` on one GPU. The largest relative difference of the loss over
+the 10 steps, with sequences of 2,048 tokens in bf16 and of 1,024 in fp32:
 
 | `maxtext:` model | Compute | fsdp, 2 GPUs | fsdp, 4 GPUs | fsdp, 8 GPUs | Step 0, largest of the three |
 |---|---|---|---|---|---|
@@ -273,3 +280,21 @@ From the same weights the two give the same loss and the same gradients:
   1.958628. At this size the loss was compared, not the gradients.
 
 The script of the real-size comparison is not in the repository.
+
+## Known issues
+
+- **MaxText's `mistral-7b` config is not the published Mistral 7B v0.1.** It
+  sets `rope_max_timescale` to 1,000,000; the weights its converter names
+  have a RoPE base of 10,000. With MaxText's config the loss is 2.196 against
+  PyTorch's 1.889, and with
+  `--model_overrides='{"rope_max_timescale": 10000}'` it is within 3.0e-6.
+- **MaxText's converter needs
+  `--lazy_load_tensors=False --eager_load_method=transformers` for Gemma 3**:
+  the published files name their tensors `language_model.model.*`, and the
+  converter's lazy reader looks for `model.language_model.*`.
+- **MaxText's `qwen3-0.6b` starts at a loss of 233 from random weights**: its
+  config ties the output to an embedding of standard deviation 1 without
+  normalizing the logits.
+- **The dense expert matmul computes every expert.** It is the adapter's
+  default, and it was measured against MaxText's other forms for
+  Qwen3-30B-A3B's 8 of 128 experts only ([Runs](#runs)).

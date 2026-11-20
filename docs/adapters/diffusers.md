@@ -2,20 +2,48 @@
 
 `--model=diffusers:<name>` trains a denoiser of Hugging Face diffusers 0.43.0
 with JAX-Titan's trainer, under `--parallel=dp` or `fsdp`. The network is
-diffusers' and is written in PyTorch. It does not run as PyTorch:
-torchax 0.0.13 executes the denoiser's `forward` on JAX arrays while JAX
-traces it ([transformers.md](transformers.md) says what that means for
-correctness). The adapter takes the denoiser classes it compared with
-PyTorch, each with a few lines that name its inputs
-(`models/adapters/diffusers.py`). This version registers one, FLUX.1's
-`FluxTransformer2DModel`.
+diffusers' and is written in PyTorch; the training is JAX-Titan's. The
+network does not run as PyTorch: torchax 0.0.13 executes the denoiser's
+`forward` on JAX arrays while JAX traces it (`models/adapters/diffusers.py`;
+[transformers.md](transformers.md#models) says what that means for
+correctness).
 
-A denoiser alone is not a training objective. diffusers keeps the noising, the
-timestep and the target in example scripts, not in the model, so the objective
-here is JAX-Titan's, stated once per family in `jax_titan/data/diffusion.py`
-and shared with the [MaxDiffusion adapter](maxdiffusion.md): FLUX.1 is trained
-as a rectified flow, on `(1 - s) latents + s noise` with `s` uniform in
-[0, 1), to predict `noise - latents`, with an unweighted mean squared error.
+## Models
+
+The adapter takes the denoiser classes it compared with PyTorch, each with a
+few lines that name its inputs. This version registers one:
+
+| `--model=` | Model | Parameters | Run on GPUs at real size |
+|---|---|---|---|
+| `diffusers:FluxTransformer2DModel` | FLUX.1's denoiser | 11.90B at FLUX.1-dev's size | Yes |
+
+`<name>` is a denoiser class of diffusers, built with the library's default
+sizes, or a directory with a denoiser's `config.json`, or a pipeline's
+directory, whose `transformer` is taken. The tests and runs here embed the
+guidance scale, as FLUX.1-dev does. Other denoiser classes are refused until
+they are compared with PyTorch and given their family's batches.
+
+## Running it
+
+Install the `diffusers` extra; PyTorch's CPU build is enough:
+
+```bash
+pip install -e ".[diffusers]" --extra-index-url https://download.pytorch.org/whl/cpu
+```
+
+`FluxTransformer2DModel`'s defaults are FLUX.1's sizes; FLUX.1-dev also embeds
+the guidance scale:
+
+```bash
+python -m jax_titan.trainer.train --model=diffusers:FluxTransformer2DModel \
+  --model_overrides='{"guidance_embeds": true}' --parallel=fsdp \
+  --microbatches=1 --microbatch_size=8 --resolution=512 --steps=30 --lr=1e-5
+```
+
+`--resolution` is the image side in pixels, of which the denoiser sees
+`(resolution / 16)^2` latent tokens, and `--text_tokens` the text tokens of a
+sample (512 with the guidance embedding, 256 without). `--model_overrides`
+takes config fields as JSON, and `"dtype"` for the compute dtype.
 
 ## What comes from diffusers and what from JAX-Titan
 
@@ -29,66 +57,56 @@ as a rectified flow, on `(1 - s) latents + s noise` with `s` uniform in
 
 diffusers' example training scripts are not used.
 
-## Running it
+The objective is JAX-Titan's because a denoiser alone is not a training
+objective: diffusers keeps the noising, the timestep and the target in example
+scripts, not in the model. It is stated once per family in
+`jax_titan/data/diffusion.py` and shared with the
+[MaxDiffusion adapter](maxdiffusion.md): FLUX.1 is trained as a rectified
+flow, on `(1 - s) latents + s noise` with `s` uniform in [0, 1), to predict
+`noise - latents`, with an unweighted mean squared error.
 
-Install the `diffusers` extra; PyTorch's CPU build is enough:
+## What is supported and what is not
 
-```bash
-pip install -e ".[diffusers]" --extra-index-url https://download.pytorch.org/whl/cpu
-```
+| Feature | Supported | Note |
+|---|---|---|
+| `--parallel=dp` and `fsdp` | Yes | |
+| Pipelines (`--parallel=mpmd`) | No | A model of another repository is called whole; a pipeline needs a model written for JAX-Titan |
+| Random weights | Yes | |
+| Published weights (`--init_from`) | No | |
+| Real data | No | Synthetic batches only, random latents and text features: no real images, no text encoders, no VAE |
+| Checkpoints and resuming | Yes | |
+| Validation | Yes | On held-out synthetic batches |
+| Rematerialization | Yes | `--remat`, the default |
+| `jax_titan.ops` (`--ops`) | No | |
+| MFU | No | No FLOP count is kept for a traced model |
+| Writing the trained parameters (`--save_params`) | No | |
+| Generation or sampling | No | No picture is generated |
 
-`<name>` is a denoiser class of diffusers, built with the library's default
-sizes, or a directory with a denoiser's `config.json`, or a pipeline's
-directory, whose `transformer` is taken. `FluxTransformer2DModel`'s defaults
-are FLUX.1's sizes; FLUX.1-dev also embeds the guidance scale:
-
-```bash
-python -m jax_titan.trainer.train --model=diffusers:FluxTransformer2DModel \
-  --model_overrides='{"guidance_embeds": true}' --parallel=fsdp \
-  --microbatches=1 --microbatch_size=8 --resolution=512 --steps=30 --lr=1e-5
-```
-
-`--resolution` is the image side in pixels, of which the denoiser sees
-`(resolution / 16)^2` latent tokens, and `--text_tokens` the text tokens of a
-sample (512 with the guidance embedding, 256 without). `--model_overrides`
-takes config fields as JSON, and `"dtype"` for the compute dtype.
-
-## What is supported
-
-- `FluxTransformer2DModel`, FLUX.1's denoiser, from random weights on
-  synthetic batches. The tests and runs here embed the guidance scale, as
-  FLUX.1-dev does.
-- `--parallel=dp` and `fsdp`, rematerialization (`--remat`, the default) and
-  checkpoints.
-
-## What is not supported
-
-- **Other denoiser classes** are refused until they are compared with
-  PyTorch and given their family's batches.
-- **Published weights** (`--init_from`), real images, the text encoders and
-  the VAE: a step trains the denoiser on random latents and text features.
-- **Sampling**: no picture is generated.
-- **Pipelines** (`--parallel=mpmd`), `jax_titan.ops` (`--ops`), EMA, LoRA and
-  ControlNet.
-- **MFU.** No FLOP count is kept for a traced model.
-- **A fast start from the compilation cache** was not checked for the
-  denoiser: traced language models start slowly from it
-  ([transformers.md](transformers.md#what-is-not-supported)).
+EMA, LoRA and ControlNet are not supported either.
 
 ## How it is verified
 
-### Tests
+The tests are `tests/test_diffusers_adapter.py`, on GPUs at a small size in
+fp32. The runs are under [Runs](#runs).
 
-`tests/test_diffusers_adapter.py`, on GPUs, at a small size in fp32:
+| What is checked | By | Size | Result |
+|---|---|---|---|
+| The adapter's loss and gradients are PyTorch's, over two traces: FLUX.1 with the guidance embedding on a batch of `data/diffusion.py` | Test, GPU | Small | Loss within 1e-5, gradients within 1e-3 |
+| Weight decay skips the norms of the queries and keys and nothing else | Test, GPU | Small | Passes |
+| FSDP trains as data parallelism does | Test, 2 GPUs | Small | Losses of 4 steps within 1e-4 |
+| Another denoiser class is refused | Test, GPU | Small | Passes |
+| A run resumes from the checkpoint of step 3 and validates: a small FLUX.1, under FSDP on 2 GPUs in fp32 | Run | Small | The uninterrupted run's losses of steps 3 to 5 exactly, and its validation loss after them |
+| The model runs, fits and its loss falls at FLUX.1-dev's size | Runs | Real | The table under [Runs](#runs) |
 
-- **The adapter's loss and gradients are PyTorch's**, over two traces: FLUX.1
-  with the guidance embedding on a batch of `data/diffusion.py`, the loss
-  within 1e-5 and the gradients within 1e-3.
-- **Weight decay** skips the norms of the queries and keys and nothing else.
-- **FSDP trains as data parallelism does**, on 2 GPUs.
-- **Another denoiser class is refused.**
+Not checked:
 
-### Runs (2026-11-19, 8x MI350X)
+- **A reference at real size.** The adapter loads no published weights: the
+  runs show that the model runs, fits and that its loss falls, and the
+  comparison with PyTorch is at a small size.
+
+## Runs
+
+On 8x MI350X, 2026-11-19.
 
 `FluxTransformer2DModel` with the guidance embedding, FLUX.1-dev's size of
 11.90B parameters, from random weights on synthetic batches of 512 x 512
@@ -103,8 +121,10 @@ the model runs, fits and that its loss falls, not a measurement of throughput.
 | `FluxTransformer2DModel` | dp | 1 | 1,536 | 5,397 | 158 GiB | 2.32 | 2.05 |
 | `FluxTransformer2DModel` | fsdp | 8 | 12,288 | 3,207 | 38 GiB | 2.33 | 1.88 |
 
-Checkpoints and validation: a small FLUX.1, under FSDP on 2 GPUs in fp32,
-restores the checkpoint of step 3 and gives the uninterrupted run's losses of
-steps 3 to 5 exactly, and its validation loss after them.
-
 The scripts that launched these runs are not in the repository.
+
+## Known issues
+
+- **A start from the compilation cache was not checked for the denoiser**:
+  traced language models start slowly from it
+  ([transformers.md](transformers.md#known-issues)).

@@ -4,34 +4,24 @@
 commit `821afc36`, with JAX-Titan's trainer. The network is MaxDiffusion's and
 runs as MaxDiffusion wrote it; the training is JAX-Titan's. `WholeModel`
 (`models/adapters/maxdiffusion.py`) calls a denoiser whole, MaxDiffusion's own
-`__call__`, under `--parallel=dp` or `fsdp`, with a few lines per family. This
-version has two: FLUX.1 (`flux-dev`, `flux-schnell`) and Wan 2.1 text to video
-(`wan2.1-t2v-1.3b`).
+`__call__`, under `--parallel=dp` or `fsdp`, with a few lines per family.
 
-A denoiser alone is not a training objective. MaxDiffusion keeps the noising,
-the timestep and the target in its trainers, not in the model, so the
-objective here is JAX-Titan's, stated once per family in
-`jax_titan/data/diffusion.py` and shared with the
-[diffusers adapter](diffusers.md). Both families are rectified flows with an
-unweighted mean squared error: the denoiser sees `(1 - s) latents + s noise`
-and predicts `noise - latents`.
+## Models
 
-| Family | Time `s` | What the denoiser is given | Against MaxDiffusion's trainer |
+`<name>` is a denoiser of one of the two families this version has lines for,
+FLUX.1 and Wan 2.1 text to video:
+
+| `--model=` | Model | Parameters | Run on GPUs at real size |
 |---|---|---|---|
-| FLUX.1 | Uniform in [0, 1) | `s` | The same noising and target; the trainer draws `s` from the grid of its sampler's steps |
-| Wan 2.1 | `3u / (1 + 2u)`, `u` uniform: the 1.3B model's shift of 3 | `1000 s` | The same; the trainer also weights the samples of a batch against each other, which is left out |
+| `maxdiffusion:flux-dev` | FLUX.1-dev | 11.90B | Yes |
+| `maxdiffusion:flux-schnell` | FLUX.1-schnell | | No |
+| `maxdiffusion:wan2.1-t2v-1.3b` | Wan 2.1 text to video, 1.3B | 1.42B | Yes |
 
-## What comes from MaxDiffusion and what from JAX-Titan
-
-| Part | Comes from |
-|---|---|
-| Model: structure, layers, config, initialization | MaxDiffusion |
-| Objective: noising, timestep, target, loss | JAX-Titan |
-| Train step: gradient, clipping, optimizer, schedule | JAX-Titan |
-| Layouts (`dp`, `fsdp`) | JAX-Titan |
-| Checkpoints, validation, logs, metrics | JAX-Titan |
-
-MaxDiffusion's own trainers are not used.
+MaxDiffusion's other families (Stable Diffusion, SDXL, Wan 2.2 and its
+image-to-video and VACE models, LTX-Video, Z-Image) are not taken: each needs
+its lines in the adapter and its objective. `maxdiffusion:ideogram4` is not
+this adapter but the model of MaxDiffusion's Ideogram branch
+([recipes/ideogram4.md](../recipes/ideogram4.md)).
 
 ## Running it
 
@@ -57,53 +47,78 @@ frames of a clip: Wan sees `(frames - 1) / 4 + 1` latent frames of
 for `flux-schnell`. `--model_overrides` takes the denoiser's constructor
 arguments as JSON.
 
-## What is supported
+## What comes from MaxDiffusion and what from JAX-Titan
 
-- FLUX.1-dev and FLUX.1-schnell under `dp` and `fsdp`.
-- Wan 2.1 text to video, 1.3B, under `dp` and `fsdp`.
-- Random weights on synthetic batches, rematerialization and checkpoints.
+| Part | Comes from |
+|---|---|
+| Model: structure, layers, config, initialization | MaxDiffusion |
+| Objective: noising, timestep, target, loss | JAX-Titan |
+| Train step: gradient, clipping, optimizer, schedule | JAX-Titan |
+| Layouts (`dp`, `fsdp`) | JAX-Titan |
+| Checkpoints, validation, logs, metrics | JAX-Titan |
 
-## What is not supported
+MaxDiffusion's own trainers are not used.
 
-- **MaxDiffusion's other families** (Stable Diffusion, SDXL, Wan 2.2 and its
-  image-to-video and VACE models, LTX-Video, Z-Image). Each needs its lines in
-  the adapter and its objective.
-- **Published weights**: MaxDiffusion's loaders need PyTorch. MaxDiffusion's
-  FLUX.1 class also defaults to a RoPE base of 1,000, where the published
-  FLUX.1 uses 10,000.
-- **Real images and videos**, the text encoders and the VAEs, and sampling.
-- **Pipelines** (`--parallel=mpmd`). A model of another repository is called
-  whole; a pipeline needs a model written for JAX-Titan.
-- **`--ops` for Wan 2.1.**
-- **MFU for Wan**: it has no FLOP count here.
-- **A FLUX.1 timestep embedding in full precision.** MaxDiffusion computes
-  FLUX.1's timestep and guidance embeddings in bf16 whatever the model's
-  dtype. Their angles of up to 1,000 lose their low bits there, so the
-  embedding comes out differently in eager and in compiled execution, and on
-  CPU and GPU, by as much as a sinusoid's whole range. A compiled step is
-  consistent with itself, which is what the tests compare.
-- **Wan's objective against MaxDiffusion's trainer.** MaxDiffusion's trainers
-  do not import in JAX-Titan's environment, so the objective was taken from
-  their source and not compared in a run.
+The objective is JAX-Titan's because a denoiser alone is not a training
+objective: MaxDiffusion keeps the noising, the timestep and the target in its
+trainers, not in the model. It is stated once per family in
+`jax_titan/data/diffusion.py` and shared with the
+[diffusers adapter](diffusers.md). Both families are rectified flows with an
+unweighted mean squared error: the denoiser sees `(1 - s) latents + s noise`
+and predicts `noise - latents`.
+
+| Family | Time `s` | What the denoiser is given | Against MaxDiffusion's trainer |
+|---|---|---|---|
+| FLUX.1 | Uniform in [0, 1) | `s` | The same noising and target; the trainer draws `s` from the grid of its sampler's steps |
+| Wan 2.1 | `3u / (1 + 2u)`, `u` uniform: the 1.3B model's shift of 3 | `1000 s` | The same; the trainer also weights the samples of a batch against each other, which is left out |
+
+## What is supported and what is not
+
+| Feature | Supported | Note |
+|---|---|---|
+| `--parallel=dp` and `fsdp` | Yes | |
+| Pipelines (`--parallel=mpmd`) | No | A model of another repository is called whole; a pipeline needs a model written for JAX-Titan |
+| Random weights | Yes | |
+| Published weights (`--init_from`) | No | MaxDiffusion's loaders need PyTorch |
+| Real data | No | Synthetic batches only: no real images or videos, no text encoders, no VAEs |
+| Checkpoints and resuming | Yes | |
+| Validation | Yes | On held-out synthetic batches |
+| Rematerialization | Yes | |
+| `jax_titan.ops` (`--ops`) | FLUX.1 only | Its attention, which no test covers; Wan 2.1 refuses `--ops` |
+| MFU | FLUX.1 only | Wan 2.1 has no FLOP count here |
+| Writing the trained parameters (`--save_params`) | No | |
+| Generation or sampling | No | |
 
 ## How it is verified
 
-### Tests
+The tests are `tests/test_maxdiffusion_adapter.py`, on GPUs at a small size in
+fp32, and `tests/test_adapter_training.py`, on CPU. The runs are under
+[Runs](#runs).
 
-`tests/test_maxdiffusion_adapter.py`, on GPUs, at a small size in fp32:
+| What is checked | By | Size | Result |
+|---|---|---|---|
+| FLUX.1 through the adapter gives the output of MaxDiffusion's `FluxTransformer2DModel` called directly | Test, GPU | Small | Loss within 1e-5 |
+| Wan 2.1 through the adapter gives the output of MaxDiffusion's `WanModel` built and called directly | Test, GPU | Small | Loss within 1e-5 |
+| FSDP shards every parameter of FLUX.1, and no stack of blocks along its block axis | Test, GPU | Small | Passes |
+| FSDP trains as data parallelism does, for FLUX.1 and Wan 2.1 | Test, 2 GPUs | Small | Losses of 4 steps within 1e-4 |
+| A small FLUX.1 trains through the trainer and resumes exactly | Test, CPU | Small | Equal losses |
+| A run resumes from the checkpoint of step 3 and validates: a small Wan 2.1, under FSDP on 2 GPUs in fp32 | Run | Small | The uninterrupted run's losses of steps 3 to 5 exactly, and its validation loss after them |
+| FLUX.1-dev and Wan 2.1 1.3B run, fit and their loss falls | Runs | Real | The table under [Runs](#runs) |
 
-- **FLUX.1 through the adapter gives the output of MaxDiffusion's
-  `FluxTransformer2DModel`** called directly.
-- **FSDP shards every parameter of FLUX.1**, and no stack of blocks along its
-  block axis.
-- **Wan 2.1 through the adapter gives the output of MaxDiffusion's `WanModel`**
-  built and called directly.
-- **FSDP trains as data parallelism does**, on 2 GPUs, for FLUX.1 and Wan 2.1.
+Not checked:
 
-`tests/test_adapter_training.py`, on CPU: a small FLUX.1 trains through the
-trainer and resumes exactly.
+- **Wan's objective against MaxDiffusion's trainer.** MaxDiffusion's trainers
+  do not import in JAX-Titan's environment, so the objective was taken from
+  their source and not compared in a run.
+- **A reference at real size.** The runs show that a model runs, fits and
+  that its loss falls; the comparisons with MaxDiffusion's modules are at a
+  small size.
+- **`flux-schnell`**, in a test or in a run.
+- **`--ops` for FLUX.1**, in a test or in a run.
 
-### Runs (2026-11-19 to 20, 8x MI350X)
+## Runs
+
+On 8x MI350X, 2026-11-19 to 20.
 
 From random weights on synthetic batches, one sample per GPU, in bf16 with
 fp32 parameters: 30 steps with `--lr=1e-5` and rematerialization. FLUX.1-dev
@@ -121,8 +136,15 @@ falls, not a measurement of throughput.
 | `wan2.1-t2v-1.3b` | dp | 1 | 5,012 | 23,468 | 23 GiB | 4.17 | 2.24 |
 | `wan2.1-t2v-1.3b` | fsdp | 8 | 40,096 | 19,707 | 5 GiB | 4.21 | 2.11 |
 
-Checkpoints and validation: a small Wan 2.1, under FSDP on 2 GPUs in fp32,
-restores the checkpoint of step 3 and gives the uninterrupted run's losses of
-steps 3 to 5 exactly, and its validation loss after them.
-
 The scripts that launched these runs are not in the repository.
+
+## Known issues
+
+- **FLUX.1's timestep embedding is computed in bf16.** MaxDiffusion computes
+  FLUX.1's timestep and guidance embeddings in bf16 whatever the model's
+  dtype. Their angles of up to 1,000 lose their low bits there, so the
+  embedding comes out differently in eager and in compiled execution, and on
+  CPU and GPU, by as much as a sinusoid's whole range. A compiled step is
+  consistent with itself, which is what the tests compare.
+- **MaxDiffusion's FLUX.1 class defaults to a RoPE base of 1,000**, where the
+  published FLUX.1 uses 10,000.

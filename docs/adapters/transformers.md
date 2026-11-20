@@ -3,32 +3,51 @@
 `--model=transformers:<name>` trains a decoder-only causal language model of
 Hugging Face transformers 5.23.0 with JAX-Titan's trainer, under
 `--parallel=dp` or `fsdp`. The network is transformers' and is written in
-PyTorch. It does not run as PyTorch: torchax 0.0.13 executes the model's
-`forward` on JAX arrays while JAX traces it, which gives a JAX function that
-`jax.grad` differentiates and XLA compiles. PyTorch runs on the host during
-that trace and never during a step
+PyTorch; the training is JAX-Titan's. The network does not run as PyTorch:
+torchax 0.0.13 executes its `forward` on JAX arrays while JAX traces it, so
+PyTorch runs on the host during that trace and never during a step
 (`models/adapters/torch_bridge.py`, `models/adapters/transformers.py`).
 
-Because the network is translated, operator by operator, a model can come out
-wrong without an error: PyTorch's autograd takes no part, so
+## Models
+
+The adapter takes the 125 model types of `transformers.VERIFIED`
+(`python -c "from jax_titan.models.adapters import transformers as t; print(t.VERIFIED)"`),
+among them `llama`, `mistral`, `qwen2`, `qwen3`, `gemma`, `gemma2`,
+`gemma3_text`, `phi3`, `gpt2`, `falcon`, `mamba`, and mixtures of experts
+such as `qwen3_moe`, `mixtral`, `deepseek_v3` and `gpt_oss`. `<name>` is a
+directory with a model's `config.json`, such as a download from the Hugging
+Face Hub, or a model type of transformers with the library's default sizes
+(`llama`, `qwen3_moe`). Four ran on GPUs at their real size:
+
+| Published weights | Model type | Parameters |
+|---|---|---|
+| `meta-llama/Llama-3.1-8B` | `llama` | 8.03B |
+| `Qwen/Qwen3-8B` | `qwen3` | 8.19B |
+| `mistralai/Mistral-7B-v0.1` | `mistral` | 7.24B |
+| `Qwen/Qwen3-30B-A3B-Thinking-2507` | `qwen3_moe` | 30.53B |
+
+The list exists because the network is translated, operator by operator, into
+a JAX function that `jax.grad` differentiates and XLA compiles, and a model
+can come out wrong without an error: PyTorch's autograd takes no part, so
 `torch.no_grad()`, `.data` and a custom `autograd.Function` in a model's
 `forward` neither stop nor shape the gradient. The adapter therefore takes
 only the model types whose loss and gradients it compared with PyTorch's own.
 
-## What comes from transformers and what from JAX-Titan
+A model type outside the list is refused. Of the 143 decoder-only text model
+types of `AutoModelForCausalLM`, 18 are not in it:
 
-| Part | Comes from |
+| Why | Model types |
 |---|---|
-| Model: structure, layers, config, initialization | transformers |
-| Published weights: `from_pretrained` | transformers |
-| Expert layer of a mixture of experts | JAX-Titan |
-| Loss | JAX-Titan |
-| Train step: gradient, clipping, optimizer, schedule | JAX-Titan |
-| Layouts (`dp`, `fsdp`) | JAX-Titan |
-| Data | JAX-Titan |
-| Checkpoints, validation, logs, metrics | JAX-Titan |
+| The gradient is wrong, without an error | `blt` (64-bit integer arithmetic, which JAX does in 32 bits), `hrm_text` (`torch.no_grad()` and a custom autograd function) |
+| The forward draws random numbers | `phimoe` |
+| Shapes that depend on the data | `dbrx`, `jetmoe`, `longcat_flash`, `qwen4_exp_text` |
+| A defect of torchax 0.0.13 | `gemma3n_text`, `gemma4_text`, `gemma4_unified_text` |
+| No small model could be built from the family's test configuration | `gemma4_assistant`, `gemma4_unified_assistant` |
+| No gradient-checkpointing switch, so no rematerialization | `cpmant`, `ctrl`, `gpt_neox_japanese`, `openai-gpt`, `xlnet` |
+| Not a left-to-right model under its default config | `bert-generation` |
 
-transformers' own `Trainer` is not used.
+Multimodal and encoder-decoder models, and the 46 other model types that
+`AutoModelForCausalLM` maps, are not taken either.
 
 ## Running it
 
@@ -38,11 +57,8 @@ Install the `transformers` extra; PyTorch's CPU build is enough:
 pip install -e ".[transformers]" --extra-index-url https://download.pytorch.org/whl/cpu
 ```
 
-`<name>` is a directory with a model's `config.json`, such as a download from
-the Hugging Face Hub, or a model type of transformers with the library's
-default sizes (`llama`, `qwen3_moe`). From random weights, with the config of
-a downloaded Qwen3-8B and token files of its own tokenizer
-([maxtext.md](maxtext.md#running-it) has their command):
+From random weights, with the config of a downloaded Qwen3-8B and token files
+of its own tokenizer ([maxtext.md](maxtext.md#running-it) has their command):
 
 ```bash
 python -m jax_titan.trainer.train --model=transformers:$MODELS/qwen3-8b \
@@ -61,57 +77,58 @@ python -m jax_titan.trainer.train --model=transformers:llama --parallel=dp \
   --microbatches=1 --microbatch_size=8 --seq_len=64 --data=synthetic
 ```
 
-## What is supported
+## What comes from transformers and what from JAX-Titan
 
-- The 125 model types of `transformers.VERIFIED`
-  (`python -c "from jax_titan.models.adapters import transformers as t; print(t.VERIFIED)"`),
-  among them `llama`, `mistral`, `qwen2`, `qwen3`, `gemma`, `gemma2`,
-  `gemma3_text`, `phi3`, `gpt2`, `falcon`, `mamba`, and mixtures of experts
-  such as `qwen3_moe`, `mixtral`, `deepseek_v3` and `gpt_oss`.
-- Random weights, or the weights of a local directory with `--init_from`.
-- `--parallel=dp` and `fsdp`, rematerialization (`--remat`, the default),
-  checkpoints and validation.
+| Part | Comes from |
+|---|---|
+| Model: structure, layers, config, initialization | transformers |
+| Published weights: `from_pretrained` | transformers |
+| Expert layer of a mixture of experts | JAX-Titan |
+| Loss | JAX-Titan |
+| Train step: gradient, clipping, optimizer, schedule | JAX-Titan |
+| Layouts (`dp`, `fsdp`) | JAX-Titan |
+| Data | JAX-Titan |
+| Checkpoints, validation, logs, metrics | JAX-Titan |
 
-## What is not supported
+transformers' own `Trainer` is not used.
 
-- **A model type outside the list** is refused. Of the 143 decoder-only text
-  model types of `AutoModelForCausalLM`, 18 are not in it:
+## What is supported and what is not
 
-  | Why | Model types |
-  |---|---|
-  | The gradient is wrong, without an error | `blt` (64-bit integer arithmetic, which JAX does in 32 bits), `hrm_text` (`torch.no_grad()` and a custom autograd function) |
-  | The forward draws random numbers | `phimoe` |
-  | Shapes that depend on the data | `dbrx`, `jetmoe`, `longcat_flash`, `qwen4_exp_text` |
-  | A defect of torchax 0.0.13 | `gemma3n_text`, `gemma4_text`, `gemma4_unified_text` |
-  | No small model could be built from the family's test configuration | `gemma4_assistant`, `gemma4_unified_assistant` |
-  | No gradient-checkpointing switch, so no rematerialization | `cpmant`, `ctrl`, `gpt_neox_japanese`, `openai-gpt`, `xlnet` |
-  | Not a left-to-right model under its default config | `bert-generation` |
+| Feature | Supported | Note |
+|---|---|---|
+| `--parallel=dp` and `fsdp` | Yes | |
+| Pipelines (`--parallel=mpmd`) | No | A model of another repository is called whole; a pipeline needs a model written for JAX-Titan |
+| Random weights | Yes | |
+| Published weights (`--init_from`) | Yes | The weights of a local directory |
+| Real data | Yes | Token files of the model's own tokenizer |
+| Checkpoints and resuming | Yes | |
+| Validation | Yes | |
+| Rematerialization | Yes | `--remat`, the default |
+| `jax_titan.ops` (`--ops`) | No | The model's operators are what torchax lowers them to: no MX quantization and no provider kernels |
+| MFU | No | No FLOP count exists for an arbitrary model |
+| Writing the trained parameters (`--save_params`) | No | |
+| Generation or sampling | No | |
 
-- **Multimodal and encoder-decoder models**, and the 46 other model types
-  that `AutoModelForCausalLM` maps.
-- **Pipelines** (`--parallel=mpmd`).
-- **`jax_titan.ops`**: no `--ops`, so no MX quantization and no provider
-  kernels. The model's operators are what torchax lowers them to.
-- **Dropout.** Every dropout probability of the config is set to zero, and a
-  forward that still draws random numbers is refused: a compiled step would
-  draw the same numbers at every step.
-- **MFU.** No FLOP count exists for an arbitrary model.
-- **`--save_params`** and generation.
-- **A fast mixture of experts.** The dense form computes every expert; this
-  stack has no fast kernel for the routed forms ([maxtext.md](maxtext.md)).
-- **A fast start from the compilation cache.** JAX-Titan's environment keeps
-  JAX's persistent compilation cache (`scripts/env.sh`), and a traced model's
-  step that comes from it starts slowly, with the GPUs idle: for Llama 3.1 8B
-  under FSDP on 8 GPUs the first step takes 103 s, against 9 s after a fresh
-  compile. For Qwen3-30B-A3B it runs past the 300 s the trainer allows a first
-  step (`--step_timeout`) and had not finished after 10 minutes. MaxText's and
-  MaxDiffusion's models do not show this, and the cause is not known. With
-  `JAX_ENABLE_COMPILATION_CACHE=false` Llama 3.1 8B's first step is normal
-  again; Qwen3-30B-A3B was run with an empty cache directory.
+Dropout is not supported either: every dropout probability of the config is
+set to zero, and a forward that still draws random numbers is refused, since a
+compiled step would draw the same numbers at every step.
 
 ## How it is verified
 
-### The list of model types
+The tests are `tests/test_transformers_adapter.py`, on GPUs at a small size
+in fp32. The runs are under [Runs](#runs).
+
+| What is checked | By | Size | Result |
+|---|---|---|---|
+| Each model type of the list gives PyTorch's loss and gradients, over two traces | One comparison, CPU | Small | Loss within 1e-5, gradients within 1e-3 |
+| Seven model types give PyTorch's loss and gradients, over two traces: `llama`, `mistral`, `qwen3`, `gemma3_text`, `phi3` with its long RoPE factors, `qwen3_moe` in the dense form and `gpt2` | Test, GPU | Small | Loss within 1e-5, gradients within 1e-3 |
+| Norms take no weight decay, and nothing else is exempt | Test, GPU | Small | Passes |
+| The trainer starts at the model's loss | Test, GPU | Small | Within 1e-5 |
+| FSDP trains as data parallelism does | Test, 2 GPUs | Small | Losses of 4 steps within 1e-4 |
+| A model type outside the list is refused, and so is a pipeline | Test, GPU | Small | Passes |
+| The published weights give PyTorch's loss, for four models | Runs | Real | Within 2.0e-5 in fp32, the mixture of experts included |
+| A run resumes from the checkpoint of step 3 and validates: Qwen3-0.6B from its published weights, under FSDP on 2 GPUs in fp32 | Run | Real | The uninterrupted run's losses of steps 3 to 5 exactly, and its validation loss after them within 2e-8 |
+| Every model trains | Runs | Real | The loss falls from 11.2-12.8 to 7.2-8.0 in 40 steps |
 
 `VERIFIED` is the outcome of one comparison with PyTorch, made on 2026-11-19
 with transformers 5.23.0, torch 2.10.0 and torchax 0.0.13, on CPU in fp32. For
@@ -128,20 +145,13 @@ difference is 2.1e-7 for the loss and 3.4e-5 for a gradient. The comparison
 needs transformers' test suite and is not in the repository; it has to be run
 again when one of the three versions moves.
 
-### Tests
+Not checked:
 
-`tests/test_transformers_adapter.py`, on GPUs, at a small size in fp32:
+- **The gradients at real size.** The runs compare the loss.
 
-- **The adapter's loss and gradients are PyTorch's**, over two traces, for
-  seven model types: `llama`, `mistral`, `qwen3`, `gemma3_text`, `phi3` with
-  its long RoPE factors, `qwen3_moe` in the dense form and `gpt2`. The loss
-  is within 1e-5 and the gradients within 1e-3.
-- **Norms take no weight decay**, and nothing else is exempt.
-- **The trainer starts at the model's loss.**
-- **FSDP trains as data parallelism does**, on 2 GPUs.
-- **A model type outside the list is refused**, and so is a pipeline.
+## Runs
 
-### Runs (2026-11-19 to 20, 8x MI350X)
+On 8x MI350X, 2026-11-19 to 20.
 
 Published weights: each model's weights from the Hugging Face Hub in a local
 directory, named by `--model=transformers:` and `--init_from`, in fp32. The
@@ -182,10 +192,20 @@ steps 5-39.
 - **These are single runs of 40 steps**, enough to see that a model runs,
   fits and learns, not a measurement of throughput.
 
-Checkpoints and validation: Qwen3-0.6B from its published weights, under FSDP
-on 2 GPUs in fp32, restores the checkpoint of step 3 and gives the
-uninterrupted run's losses of steps 3 to 5 exactly, and its validation loss
-after them within 2e-8.
-
 The script of the comparison with PyTorch and the scripts that launched these
 runs are not in the repository.
+
+## Known issues
+
+- **A slow start from the compilation cache.** JAX-Titan's environment keeps
+  JAX's persistent compilation cache (`scripts/env.sh`), and a traced model's
+  step that comes from it starts slowly, with the GPUs idle: for Llama 3.1 8B
+  under FSDP on 8 GPUs the first step takes 103 s, against 9 s after a fresh
+  compile. For Qwen3-30B-A3B it runs past the 300 s the trainer allows a first
+  step (`--step_timeout`) and had not finished after 10 minutes. MaxText's and
+  MaxDiffusion's models do not show this, and the cause is not known. With
+  `JAX_ENABLE_COMPILATION_CACHE=false` Llama 3.1 8B's first step is normal
+  again; Qwen3-30B-A3B was run with an empty cache directory.
+- **No fast mixture of experts.** The dense form computes every expert; this
+  stack has no fast kernel for the routed forms
+  ([maxtext.md](maxtext.md#runs)).
