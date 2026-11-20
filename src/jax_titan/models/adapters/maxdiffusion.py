@@ -1,7 +1,11 @@
-"""Pipeline stages of MaxDiffusion's FLUX.1 transformer, pinned at `821afc36`.
+"""MaxDiffusion's denoisers, pinned at `821afc36`: FLUX.1 and Wan 2.1 as one
+stage, and FLUX.1 as pipeline stages.
 
 MaxDiffusion supplies the model, its layers and its parameter layout;
-JAX-Titan supplies the stages, meshes and train step. FLUX.1 runs 19
+JAX-Titan supplies the objective (`jax_titan.data.diffusion`), the stages,
+meshes and train step. `WholeModel` calls a denoiser whole, MaxDiffusion's own
+`__call__`, with a few lines per family (`whole_flux`, `whole_wan`). `Model`
+cuts FLUX.1 into pipeline stages. FLUX.1 runs 19
 double-stream blocks, which keep image and text tokens in separate streams,
 then 38 single-stream blocks over the joined sequence. A stage holds a
 contiguous run of these blocks, counting the double-stream blocks first;
@@ -20,6 +24,8 @@ from collections.abc import Callable, Sequence
 import functools
 
 from flax import linen as nn
+from flax import nnx
+from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -27,13 +33,26 @@ from maxdiffusion.models.attention_flax import AttentionOp
 from maxdiffusion.models.embeddings_flax import CombinedTimestepGuidanceTextProjEmbeddings
 from maxdiffusion.models.flux.transformers.transformer_flux_flax import FluxTransformer2DModel
 
+from jax_titan import parallel
+
 PINNED_COMMIT = "821afc364ac1889c1039112843f4f7a17c1bef7b"
 FLAVORS = {
     "flux-dev": {"guidance_embeds": True},
     "flux-schnell": {"guidance_embeds": False},
 }
+# Wan 2.1 text to video: the sizes of Wan-AI/Wan2.1-T2V-1.3B-Diffusers.
+WAN = {
+    "wan2.1-t2v-1.3b": {
+        "num_attention_heads": 12, "attention_head_dim": 128, "ffn_dim": 8960, "num_layers": 30,
+        "in_channels": 16, "out_channels": 16, "text_dim": 4096, "patch_size": (1, 2, 2),
+    },
+}
 _FIRST = ("img_in", "txt_in", "time_text_embed")
 _LAST = ("norm_out", "proj_out")
+_STACKS = ("scanned_double_blocks", "scanned_single_blocks")
+# MaxDiffusion's batch axes on JAX-Titan's data axis; its other logical axes replicated.
+_AXIS_RULES = (("batch", "data"), ("activation_batch", "data"), ("conv_batch", "data"),
+               ("activation_kv_batch", "data"))
 
 
 def transformer(flavor: str, **overrides) -> FluxTransformer2DModel:
@@ -117,6 +136,91 @@ def _attention_interceptor(attention: Callable):
     return out.reshape(out.shape[0], out.shape[1], m.heads * m.dim_head)
 
   return intercept
+
+
+class WholeModel:
+  """A MaxDiffusion denoiser called whole, as one stage for `--parallel=dp` and `fsdp`.
+
+  `init_full(seed)` gives its parameters as MaxDiffusion initializes them and
+  `apply(params, x)` its prediction for a batch of `jax_titan.data.diffusion`;
+  `whole_flux` and `whole_wan` make the two. The loss is `flow_matching_loss`.
+  FSDP shards a parameter along its first dimension that the data axis
+  divides, and never along the block axis of the stacks in `stacked`. The
+  parameters are initialized where the trainer keeps them on `mesh`, sharded
+  with `fsdp` and replicated without.
+  """
+
+  num_stages = 1
+
+  def __init__(self, init_full: Callable, apply: Callable, mesh: jax.sharding.Mesh, *,
+               fsdp: bool = False, stacked: Sequence[str] = ()):
+    self._init_full, self._apply, self._stacked = init_full, apply, tuple(stacked)
+    self._mesh, self._fsdp = mesh, fsdp
+
+  def init(self, seed: int = 0) -> tuple[dict]:
+    specs = parallel.tree_specs(
+        *self.abstract(), self.logical_axes, self._mesh.shape, fsdp=self._fsdp)
+    shardings = jax.tree.map(lambda s: jax.sharding.NamedSharding(self._mesh, s), specs)
+    return (jax.jit(lambda: self._init_full(seed), out_shardings=shardings)(),)
+
+  def abstract(self, seed: int = 0) -> tuple[dict]:
+    """ShapeDtypeStructs of `init(seed)`, without initializing."""
+    return (jax.eval_shape(lambda: self._init_full(seed)),)
+
+  def stage_fns(self) -> list[Callable[..., jax.Array]]:
+    """The one stage function, `fn(params, x, target)`, which returns the loss."""
+    return [lambda p, x, t: flow_matching_loss(self._apply(p, x), t)]
+
+  def logical_axes(self, path, leaf) -> tuple:
+    axes = [None] * len(leaf.shape)
+    if axes and any(getattr(k, "key", None) in self._stacked for k in path):
+      axes[0] = "layers"
+    return tuple(axes)
+
+
+def whole_flux(flux: FluxTransformer2DModel, mesh: jax.sharding.Mesh, *, fsdp: bool = False,
+               attention: Callable | None = None) -> WholeModel:
+  """FLUX.1 through `FluxTransformer2DModel.__call__`; `attention` as for `Model`."""
+  interceptor = None if attention is None else _attention_interceptor(attention)
+
+  def apply(params, x):
+    call = functools.partial(
+        flux.apply, {"params": params}, hidden_states=x["img"], encoder_hidden_states=x["txt"],
+        pooled_projections=x["pooled"], timestep=x["timestep"], img_ids=x["img_ids"],
+        txt_ids=x["txt_ids"], guidance=x.get("guidance"), return_dict=False)
+    if interceptor is None:
+      return call()[0]
+    with nn.intercept_methods(interceptor):
+      return call()[0]
+
+  return WholeModel(Model(flux, num_stages=1)._init_full, apply, mesh, fsdp=fsdp,  # pylint: disable=protected-access
+                    stacked=_STACKS)
+
+
+def whole_wan(mesh: jax.sharding.Mesh, *, fsdp: bool = False, **kwargs) -> WholeModel:
+  """Wan 2.1 text to video through `WanModel.__call__`, a `WanModel(**kwargs)`
+  such as one of `WAN`.
+
+  Its blocks constrain activation shardings by MaxDiffusion's logical axis
+  names, so the call runs under `mesh`, whose axes are JAX-Titan's.
+  """
+  from maxdiffusion.models.wan.transformers.transformer_wan import WanModel  # pylint: disable=g-import-not-at-top
+
+  def init_full(seed):
+    _, params, rest = nnx.split(WanModel(rngs=nnx.Rngs(seed), **kwargs), nnx.Param, ...)
+    return params.to_pure_dict(), rest.to_pure_dict()
+
+  graph, _, _ = nnx.split(
+      nnx.eval_shape(lambda: WanModel(rngs=nnx.Rngs(0), **kwargs)), nnx.Param, ...)
+  rest = jax.jit(lambda: init_full(0)[1])()
+
+  def apply(params, x):
+    model = nnx.merge(graph, params, rest)
+    with mesh, nn_partitioning.axis_rules(_AXIS_RULES):
+      return model(hidden_states=x["latents"], timestep=x["timestep"],
+                   encoder_hidden_states=x["txt"], deterministic=True)
+
+  return WholeModel(lambda seed: init_full(seed)[0], apply, mesh, fsdp=fsdp)
 
 
 class Model:
