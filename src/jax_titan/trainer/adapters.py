@@ -1,33 +1,34 @@
 """Trainer layouts for models from MaxText, MaxDiffusion, transformers and
 diffusers, for Ideogram 4 and for Command A+.
 
-`--model=maxtext:<name>` trains a MaxText model config (e.g.
-`maxtext:llama3.1-8b` or `maxtext:qwen3-8b`) on the token data, and
-`--model=maxdiffusion:<flavor>` trains FLUX.1 (`flux-dev` or `flux-schnell`)
-or, from MaxDiffusion's Ideogram branch, Ideogram 4 (`ideogram4`) on synthetic
-rectified-flow batches until an image pipeline exists. `--model=ideogram4`
-trains JAX-Titan's own Ideogram 4 (`jax_titan.models.ideogram`) on the same
-batches, or on a cache of image tokens and text features
-(`jax_titan.data.ideogram`). They run as a Shardy MPMD pipeline with data
-parallelism inside each stage, reducing gradients in every microbatch's
-backward pass, and attention in native JAX unless the ops policy names
-attention. Ideogram 4's attention does not follow the policy: the native model
-passes a mask, which the providers decline, and the branch's model runs its
-own attention. `--model=command-a-plus` trains JAX-Titan's Command A+
+A model of another repository trains as one stage, the repository's model
+called whole, with `--parallel=dp` or `fsdp` and `--num_stages=1`:
+`--model=maxtext:<name>` a MaxText model config (e.g. `maxtext:llama3.1-8b`
+or `maxtext:qwen3-8b`) on the token data, `--model=maxdiffusion:<flavor>`
+FLUX.1 (`flux-dev`, `flux-schnell`) or Wan 2.1 (`wan2.1-t2v-1.3b`) on
+synthetic rectified-flow batches, `--model=transformers:<name>` a decoder-only
+causal language model of Hugging Face transformers, a directory with a
+`config.json`, a model type or a model on the Hub, and
+`--model=diffusers:<name>` a denoiser of diffusers on synthetic batches. The
+last two run through torchax (`models/adapters/torch_bridge.py`) and
+rematerialize through the library's own gradient-checkpointing switch.
+MaxText's and FLUX.1's attention is their own JAX implementation unless the
+ops policy names attention.
+
+`--model=ideogram4` trains JAX-Titan's own Ideogram 4
+(`jax_titan.models.ideogram`) on synthetic rectified-flow batches or on a
+cache of image tokens and text features (`jax_titan.data.ideogram`), and
+`--model=maxdiffusion:ideogram4` the model of MaxDiffusion's Ideogram branch
+on the same batches. They run as a Shardy MPMD pipeline with data parallelism
+inside each stage, reducing gradients in every microbatch's backward pass.
+Ideogram 4's attention does not follow the ops policy: the native model passes
+a mask, which the providers decline, and the branch's model runs its own
+attention. `--model=command-a-plus` trains JAX-Titan's Command A+
 (`jax_titan.models.command_a`) on token windows or on a cache of conversations
 (`jax_titan.data.command_a`), as one stage or, with its embedding frozen, as a
-pipeline. `--parallel=dp` runs the same stages, weights and batches as one
-data-parallel `jax.jit` program, the no-pipeline reference; for MaxText's
-models, Ideogram 4 and Command A+, `--parallel=fsdp` also shards parameters and
-optimizer state. Of MaxText's models, Llama 2 and 3 have pipeline stages;
-every other one, and every one under `--parallel=fsdp`, trains as one stage,
-MaxText's `Transformer` called whole. `--model=transformers:<name>` trains a
-decoder-only causal language model of Hugging Face transformers, a directory
-with a `config.json`, a model type or a model on the Hub, and
-`--model=diffusers:<name>` a denoiser of diffusers on synthetic batches. Both
-run through torchax (`models/adapters/torch_bridge.py`) as one stage, with
-`--parallel=dp` or `fsdp`, and rematerialize through the library's own
-gradient-checkpointing switch.
+pipeline. For these, `--parallel=dp` runs the same stages, weights and batches
+as one data-parallel `jax.jit` program, the no-pipeline reference, and
+`--parallel=fsdp` also shards parameters and optimizer state.
 
 The layouts here take a staged model, any object with `init(seed)` and
 `abstract(seed)`, the parameters of each stage and their shapes, and
@@ -381,12 +382,13 @@ def _needs_own_tokens(args, vocab_size: int):
         "hold: name its own token files (python -m jax_titan.data.text --tokenizer)")
 
 
-def _one_stage(args):
-  """Refuses what a model without pipeline stages cannot run as."""
+def _one_stage(args, ops: bool = False):
+  """Refuses what a model without pipeline stages cannot run as, and `--ops`
+  for one whose operators `jax_titan.ops` cannot reach."""
   if args.parallel == "mpmd" or args.num_stages != 1:
     raise NotImplementedError(
         f"{args.model} is one stage: --parallel=dp or --parallel=fsdp, with --num_stages=1")
-  if args.ops:
+  if args.ops and not ops:
     raise NotImplementedError(f"{args.model} runs its own operators: no --ops")
 
 
@@ -414,57 +416,23 @@ def _routed_attention():
 def _maxtext(args, name, devices, optimizer):
   from jax_titan.models.adapters import maxtext as mt  # pylint: disable=g-import-not-at-top
 
+  _one_stage(args, ops=True)
   if not args.remat:
     raise NotImplementedError(
         f"{args.model}: MaxText rematerializes its scanned layers under every remat_policy")
   cfg = mt.config(
       name, **{"remat_policy": "full", **_overrides(args), "max_target_length": args.seq_len})
   _needs_own_tokens(args, cfg.vocab_size)
-  # MaxText's Transformer whole, where the stages of `mt.Model` do not apply.
-  split = mt.has_split(cfg)
-  whole = args.parallel == "fsdp" or not split
-  if whole and args.parallel == "mpmd":
-    raise NotImplementedError(
-        f"{args.model} has no pipeline stages, which take MaxText's llama2 decoder block as "
-        "one scanned stack with an untied output head: --parallel=dp or --parallel=fsdp")
-  if whole and args.num_stages != 1:
-    raise NotImplementedError(
-        f"{args.model} with --parallel={args.parallel} is one stage: --num_stages=1")
-  if args.parallel == "mpmd":
-    topology = _topology(args, devices, lambda d: mt.mesh(cfg, d))
-    mesh = next(iter(topology.values()))
-  else:
-    mesh = mt.mesh(cfg, devices)
-  if whole:
-    model = mt.WholeModel(cfg, mesh, attention=_routed_attention(),
-                          fsdp=args.parallel == "fsdp")
-  else:
-    model = mt.Model(cfg, mesh, num_stages=args.num_stages, layers=_stage_layers(args),
-                     attention=_routed_attention())
-
-  seq = args.seq_len
+  mesh = mt.mesh(cfg, devices)
+  model = mt.WholeModel(cfg, mesh, attention=_routed_attention(), fsdp=args.parallel == "fsdp")
   tokens, split_batch = _token_batches(args)
-  if args.parallel == "mpmd":
-    layout = _mpmd_layout(args, topology, model, optimizer, tokens, tokens, split_batch)
-  else:
-    layout = _spmd_layout(args, mesh, model, optimizer, tokens, tokens, split_batch)
-  tokens_per_step = args.microbatches * args.microbatch_size * seq
-  flops = (model.flops_per_token() if whole else model.flops_per_token(seq)) * tokens_per_step
-  hardware = None
-  if split:
-    try:
-      from jax_titan.observability import flops as flops_lib  # pylint: disable=g-import-not-at-top
-
-      hardware = flops + flops_lib.recompute_flops_per_token(
-          mt.llama_config(cfg), seq, cfg.remat_policy != "none") * tokens_per_step
-    except NotImplementedError:
-      pass
+  layout = _spmd_layout(args, mesh, model, optimizer, tokens, tokens, split_batch)
+  tokens_per_step = args.microbatches * args.microbatch_size * args.seq_len
   work = Workload(
       num_params=_num_params(model.abstract(args.seed)),
       tokens_per_step=tokens_per_step,
-      flops_per_step=flops,
+      flops_per_step=model.flops_per_token() * tokens_per_step,
       vocab_size=cfg.vocab_size,
-      hardware_flops_per_step=hardware,
   )
   return layout, work
 
@@ -560,6 +528,8 @@ def _maxdiffusion(args, flavor, devices, optimizer):
   from jax_titan.data import diffusion  # pylint: disable=g-import-not-at-top
   from jax_titan.models.adapters import maxdiffusion as md  # pylint: disable=g-import-not-at-top
 
+  # FLUX.1's attention can run through jax_titan.ops; Wan 2.1's cannot.
+  _one_stage(args, ops=flavor not in md.WAN)
   kwargs = {
       "dtype": jnp.bfloat16,
       "weights_dtype": jnp.float32,
@@ -568,51 +538,30 @@ def _maxdiffusion(args, flavor, devices, optimizer):
   }
   for k in ("dtype", "weights_dtype"):
     kwargs[k] = jnp.dtype(kwargs[k])
+  mesh, fsdp = _data_mesh(devices), args.parallel == "fsdp"
   samples = args.microbatches * args.microbatch_size
   if flavor in md.WAN:
-    # Wan 2.1 has no pipeline stages: MaxDiffusion's `WanModel` called whole.
-    _one_stage(args)
     cfg = {**md.WAN[flavor], **kwargs}
-    mesh = _data_mesh(devices)
-    model = md.whole_wan(mesh, fsdp=args.parallel == "fsdp", **cfg)
+    model = md.whole_wan(mesh, fsdp=fsdp, **cfg)
     batches = diffusion.wan(
         args.seed, (args.microbatches, args.microbatch_size),
         frames=(args.frames - 1) // 4 + 1, height=args.resolution // 8, width=args.resolution // 8,
         patch=cfg["patch_size"], text_tokens=args.text_tokens or 512,
         in_channels=cfg["in_channels"], text_dim=cfg["text_dim"])
-    inputs, targets = _batch_specs(batches)
-    layout = _spmd_layout(args, mesh, model, optimizer, inputs, targets, lambda batch: batch)
-    work = Workload(
-        num_params=_num_params(model.abstract(args.seed)),
-        tokens_per_step=samples * batches.tokens,
-        flops_per_step=None,
-        next_batch=batches.next_batch,
-    )
-    return layout, work
-
-  if args.parallel == "fsdp" and args.num_stages != 1:
-    raise NotImplementedError(f"{args.model} with --parallel=fsdp is one stage: --num_stages=1")
-  flux = md.transformer(flavor, **kwargs)
-  stages = md.Model(flux, num_stages=args.num_stages, blocks=_stage_layers(args),
-                    attention=_routed_attention())
-  # Under fsdp MaxDiffusion's `FluxTransformer2DModel` called whole, else its stages.
-  model = stages
-  if args.parallel == "fsdp":
-    model = md.whole_flux(flux, _data_mesh(devices), fsdp=True, attention=_routed_attention())
-  batches, text_tokens = _flux_batches(
-      args, in_channels=flux.in_channels, joint_attention_dim=flux.joint_attention_dim,
-      pooled_projection_dim=flux.pooled_projection_dim, guidance_embeds=flux.guidance_embeds)
-  inputs, targets = _batch_specs(batches)
-  if args.parallel == "mpmd":
-    layout = _mpmd_layout(args, _topology(args, devices, _data_mesh), model, optimizer,
-                          inputs, targets, lambda batch: batch)
+    flops = None
   else:
-    layout = _spmd_layout(args, _data_mesh(devices), model, optimizer, inputs, targets,
-                          lambda batch: batch)
+    flux = md.transformer(flavor, **kwargs)
+    model = md.whole_flux(flux, mesh, fsdp=fsdp, attention=_routed_attention())
+    batches, text_tokens = _flux_batches(
+        args, in_channels=flux.in_channels, joint_attention_dim=flux.joint_attention_dim,
+        pooled_projection_dim=flux.pooled_projection_dim, guidance_embeds=flux.guidance_embeds)
+    flops = samples * md.flux_flops_per_sample(flux, batches.tokens - text_tokens, text_tokens)
+  inputs, targets = _batch_specs(batches)
+  layout = _spmd_layout(args, mesh, model, optimizer, inputs, targets, lambda batch: batch)
   work = Workload(
       num_params=_num_params(model.abstract(args.seed)),
       tokens_per_step=samples * batches.tokens,
-      flops_per_step=stages.flops_per_sample(batches.tokens - text_tokens, text_tokens) * samples,
+      flops_per_step=flops,
       next_batch=batches.next_batch,
   )
   return layout, work

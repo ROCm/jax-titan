@@ -2,10 +2,10 @@
 
   python -m jax_titan.trainer.train --model=llama3.1-8b --num_stages=2
 
-`--model` is a JAX-Titan Llama flavor, `ideogram4`, `command-a-plus`,
-`maxtext:<MaxText model>` such as `maxtext:llama3.1-8b`, or
-`maxdiffusion:flux-dev` or `maxdiffusion:ideogram4` (see
-`jax_titan.trainer.adapters`).
+`--model` is a JAX-Titan Llama flavor, `ideogram4`, `command-a-plus`, or a
+model of another repository, which trains as one stage: `maxtext:<name>`,
+`maxdiffusion:<name>`, `transformers:<name>` or `diffusers:<name>` (see
+`jax_titan.trainer.adapters` and docs/adapters).
 
 `--parallel=dp` and `--parallel=fsdp` train the same model on the same batches
 without the pipeline, as one `jax.jit` program over all devices.
@@ -39,16 +39,17 @@ def parse_args(argv=None):
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument(
       "--model", default="llama3.1-8b",
-      help="A Llama flavor (llama3.1-8b, llama3-test), ideogram4, command-a-plus, "
-      "maxtext:<MaxText model name> (Llama 2 and 3 as a pipeline; every MaxText model "
-      "without one, with --parallel=dp or fsdp, and --num_stages=1 unless it is Llama 2 or 3 "
-      "under dp), maxdiffusion:flux-dev or maxdiffusion:flux-schnell, or maxdiffusion:ideogram4 "
-      "with MaxDiffusion's Ideogram branch.",
+      help="A Llama flavor (llama3.1-8b, llama3-test), ideogram4, command-a-plus, or a model "
+      "of another repository as one stage, with --parallel=dp or fsdp and --num_stages=1: "
+      "maxtext:<MaxText model name>, maxdiffusion:flux-dev, maxdiffusion:flux-schnell or "
+      "maxdiffusion:wan2.1-t2v-1.3b, transformers:<directory or model type>, "
+      "diffusers:<denoiser class or directory>. maxdiffusion:ideogram4 is the pipeline of "
+      "MaxDiffusion's Ideogram branch.",
   )
   parser.add_argument(
       "--model_overrides", default="",
       help="JSON object of model config overrides for ideogram4, command-a-plus and for "
-      "maxtext: and maxdiffusion: models, e.g. '{\"base_num_decoder_layers\": 4}'.",
+      "the models of other repositories, e.g. '{\"base_num_decoder_layers\": 4}'.",
   )
   parser.add_argument(
       "--ops", default="",
@@ -60,9 +61,8 @@ def parse_args(argv=None):
       "--parallel", default="mpmd", choices=["mpmd", "dp", "fsdp"],
       help="mpmd: Shardy MPMD pipeline, data parallel inside each stage. "
       "dp, fsdp: no pipeline; one jax.jit program over all devices with "
-      "replicated or sharded parameters and optimizer state. Besides the Llama "
-      "flavors, only maxtext: models, ideogram4, command-a-plus and maxdiffusion:ideogram4 "
-      "have fsdp.",
+      "replicated or sharded parameters and optimizer state. A model of another "
+      "repository takes dp or fsdp only.",
   )
   parser.add_argument(
       "--num_stages", type=int, default=2,
@@ -200,6 +200,7 @@ def parse_args(argv=None):
       "--init_from", default="",
       help="maxtext: models start from this MaxText parameter checkpoint, e.g. "
       "pretrained weights converted with MaxText's checkpoint_conversion/to_maxtext.py, "
+      "transformers: models from a directory of published weights, "
       "and ideogram4 and command-a-plus from published weights (a directory of safetensors "
       "files) or from parameters that --save_params wrote, instead of a random initialization. "
       "A checkpoint in --checkpoint_dir wins for the trained parameters; the parameters a model "

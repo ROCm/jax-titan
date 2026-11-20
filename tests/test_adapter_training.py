@@ -14,8 +14,8 @@ from jax_titan.observability import records
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 FLAGS = [
-    "--platform=cpu", "--microbatches=4", "--microbatch_size=4", "--steps=4",
-    "--warmup_steps=1", "--checkpoint_every=2",
+    "--platform=cpu", "--parallel=dp", "--num_stages=1", "--microbatches=4",
+    "--microbatch_size=4", "--steps=4", "--warmup_steps=1", "--checkpoint_every=2",
 ]
 MAXTEXT_OVERRIDES = {
     "base_emb_dim": 64, "base_mlp_dim": 128, "base_num_query_heads": 4,
@@ -79,28 +79,12 @@ def test_maxtext_starts_from_a_parameter_checkpoint(tmp_path):
 
   # The trainer's own initialization, saved as MaxText's parameter-only checkpoint.
   cfg = mt.config("llama3.1-8b", max_target_length=32, remat_policy="full", **MAXTEXT_OVERRIDES)
-  model = mt.Model(cfg, mt.mesh(cfg, jax.devices()[:4]), num_stages=2)
-  full = jax.jit(lambda: model._init_full(0)[0])()  # pylint: disable=protected-access
+  model = mt.WholeModel(cfg, mt.mesh(cfg, jax.devices()[:4]))
+  (full,) = model.init(0)
   path = str(tmp_path / "params")
   checkpointing.save_params_to_path(path, {"params": full})
-  for a, b in zip(jax.tree.leaves(model.load(path)), jax.tree.leaves(model.split(full))):
-    np.testing.assert_array_equal(a, b)
+  jax.tree.map(np.testing.assert_array_equal, model.load(path)[0], full)
 
   base, _ = _run("maxtext", tmp_path / "base.jsonl")
   loaded, _ = _run("maxtext", tmp_path / "loaded.jsonl", f"--init_from={path}")
   assert loaded[0]["loss"] == base[0]["loss"]
-
-
-@pytest.mark.parametrize("provider", sorted(MODELS))
-def test_pipeline_matches_no_pipeline_reference(provider, tmp_path):
-  if importlib.util.find_spec(provider) is None:
-    pytest.skip(f"needs {provider}")
-  pipeline, _ = _run(provider, tmp_path / "mpmd.jsonl")
-  reference, out = _run(provider, tmp_path / "dp.jsonl", "--parallel=dp")
-  assert "no pipeline" in out
-  # Same weights and batch: step 0's loss agrees to rounding; bf16 gradient
-  # reductions in a different order move later steps apart.
-  assert pipeline[0]["loss"] == pytest.approx(reference[0]["loss"], rel=1e-4)
-  for step in range(4):
-    assert pipeline[step]["loss"] == pytest.approx(reference[step]["loss"], rel=1e-3), step
-    assert pipeline[step]["grad_norm"] == pytest.approx(reference[step]["grad_norm"], rel=5e-3), step
