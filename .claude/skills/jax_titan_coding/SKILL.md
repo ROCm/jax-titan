@@ -13,7 +13,8 @@ description: >-
 ## Core Principle
 
 JAX-Titan is JAX-native: it builds on `jax.jit`, Shardy MPMD, IFRT IR, PJRT
-and XLA, with no PyTorch runtime. A pipeline is one Shardy MPMD program, not
+and XLA, and no training step runs PyTorch: the adapters of PyTorch models
+execute PyTorch only while JAX traces a model. A pipeline is one Shardy MPMD program, not
 hand-written point-to-point code. Changes to jaxlib, XLA or Shardy are
 upstreamable patches in `third_party/patches/`, never workarounds in
 `src/jax_titan`. `third_party/jaxpp/` is the earlier JaxPP project, kept unchanged
@@ -61,7 +62,20 @@ for a later comparison: do not import from it or edit it.
   stages from MaxDiffusion's transformer at commit `821afc36` with the
   `third_party/patches/maxdiffusion-*.patch` patches. Stage boundaries carry
   a tuple (image and text tokens, conditioning, rotary embeddings), so these
-  stages reduce gradients per microbatch.
+  stages reduce gradients per microbatch. `WholeModel` calls a denoiser
+  whole, as one stage for `--parallel=dp` and `fsdp`: FLUX.1 and Wan 2.1,
+  each with a few lines (`whole_flux`, `whole_wan`).
+- **PyTorch models:** `models/adapters/torch_bridge.py` turns a
+  `torch.nn.Module` into one stage through torchax, and is the only module
+  that imports torchax. PyTorch's autograd takes no part, so a model that
+  leans on it (`torch.no_grad()`, `.data`, a custom `autograd.Function`)
+  comes out wrong without an error: `models/adapters/transformers.py` and
+  `diffusers.py` take only what was compared with PyTorch (`VERIFIED`,
+  `FAMILIES`). Compare again when transformers, diffusers, torchax or torch
+  moves (`docs/adapters/transformers.md`). These models take no `--ops`.
+- **Diffusion objectives:** a denoiser's repository keeps the noising, the
+  timestep and the target outside the model. JAX-Titan states them once per
+  family in `data/diffusion.py`, for every adapter that runs the family.
 - **Ideogram 4:** `models/ideogram.py` is JAX-Titan's own model, written after
   diffusers' `Ideogram4Transformer2DModel` and its training example. It
   trains through the layouts of `trainer/adapters.py` (`--model=ideogram4`),
@@ -156,6 +170,9 @@ for a later comparison: do not import from it or edit it.
   stages, and FSDP against data parallelism (`--gpus=2`).
   `tests/test_maxdiffusion_adapter.py` does the same for FLUX.1 against
   MaxDiffusion's transformer (skipped without MaxDiffusion).
+  `tests/test_transformers_adapter.py` and `tests/test_diffusers_adapter.py`
+  compare the traced PyTorch models with PyTorch's own loss and gradients, on
+  GPUs (skipped without the `transformers` or `diffusers` extra).
 - `tests/test_ideogram.py` checks `models/ideogram.py` against diffusers'
   model (skipped without `torch` and `diffusers`), its stages against one
   stage, and its layouts against `--parallel=dp`.

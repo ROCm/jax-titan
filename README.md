@@ -33,14 +33,23 @@ This is the target design; [What works](#what-works) lists what runs today.
 - MaxText models, built from MaxText 0.2.5's own layers and trained with
   `--model=maxtext:<name>`: a model config as one stage (`--parallel=dp` or
   `fsdp`) with MaxText's own loss and no code per model family, six models
-  checked on GPUs
-  ([docs/pipelines.md](docs/pipelines.md#maxtext-models-as-one-stage-2026-11-19-8x-mi350x)),
+  checked on GPUs ([docs/adapters/maxtext.md](docs/adapters/maxtext.md)),
   and Llama 2 and 3 also as pipeline stages, which match MaxText's model and,
   with the weights mapped, JAX-Titan's Llama.
 - MaxDiffusion's FLUX.1 (dev and schnell) as pipeline stages of its
   double- and single-stream blocks, with its flow-matching loss, matching
   MaxDiffusion's transformer; `--model=maxdiffusion:flux-dev` trains it on
-  synthetic batches.
+  synthetic batches. FLUX.1 and Wan 2.1 also train as one stage,
+  MaxDiffusion's model called whole
+  ([docs/adapters/maxdiffusion.md](docs/adapters/maxdiffusion.md)).
+- Models of Hugging Face's PyTorch libraries, traced into JAX through torchax
+  and trained as one stage: the decoder-only causal language models of
+  transformers, `--model=transformers:<name>`, for the 125 model types
+  compared with PyTorch
+  ([docs/adapters/transformers.md](docs/adapters/transformers.md)), and
+  FLUX.1's denoiser of diffusers, `--model=diffusers:<name>`
+  ([docs/adapters/diffusers.md](docs/adapters/diffusers.md)). PyTorch runs
+  while a model is traced, never in a training step.
 - Ideogram 4 as JAX-Titan's own model on `jax_titan.ops`, written after
   diffusers' transformer and training example and matching diffusers' model;
   `--model=ideogram4` trains it on synthetic batches as a pipeline, with data
@@ -159,6 +168,9 @@ FLUX.1-dev's timestep embedding at the pinned commit.
 container, the from-source JAX build and the Python environment.
 [docs/tools.md](docs/tools.md) lists the scripts, command-line tools and agent
 skills by the stage of a training job they serve.
+[docs/adapters](docs/adapters) has one page per model repository whose models
+train here: what comes from the repository and what from JAX-Titan, how to
+run a model, and how the adapter is verified.
 [docs/amd-jax-train-runbook](docs/amd-jax-train-runbook) covers running
 JAX-Titan on AMD's SPUR cluster.
 

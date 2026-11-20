@@ -15,7 +15,7 @@ new push to a pull request cancels the run of the older one, and
 |---|---|---|
 | Runner | GitHub's `ubuntu-24.04`, with Python 3.12 | Self-hosted, with one gfx950 GPU, in the TheRock 10.1 container |
 | JAX | jax, jaxlib and Shardy's MPMD package, built from source | The same, with the two ROCm plugin wheels of that build |
-| JAX-Titan | With MaxText and MaxDiffusion | With MaxText |
+| JAX-Titan | With MaxText and MaxDiffusion | With MaxText, MaxDiffusion, and transformers and diffusers through torchax, with PyTorch's CPU build |
 | Command | `python -m pytest tests/` | `python -m pytest tests/ --gpus=1` |
 | Tests | Every test not marked `gpu`, on 8 CPU devices | The tests marked `gpu` that need one GPU |
 | Time | About 25 minutes | About 2 minutes |
@@ -90,6 +90,7 @@ Every package CI installs has its version fixed in the repository:
 | jax, jaxlib, the ROCm plugin wheels and Shardy's MPMD package | `WHEELS` in `ci.yml`, which names a release of this repository, and the checksums in `.github/ci-wheels.sha256` | Publish new wheels (below) |
 | MaxText | `maxtext==0.2.5` in the `maxtext` extra of `pyproject.toml` | Change the pin, and its line in the constraints file |
 | MaxDiffusion | `PINNED_COMMIT` in `src/jax_titan/models/adapters/maxdiffusion.py`, with `third_party/patches/maxdiffusion-*.patch` | Change the commit or the patches: every run applies them to a new checkout |
+| transformers, diffusers, torchax and PyTorch | The `transformers` and `diffusers` extras of `pyproject.toml` and their lines in the constraints file; PyTorch's CPU build comes from `download.pytorch.org/whl/cpu` | Change the pins, then compare the adapters with PyTorch again ([adapters/transformers.md](adapters/transformers.md)) |
 | Every other Python package | `.github/ci-constraints.txt` | Replace its lines, as its first lines say |
 | ROCm 10.1 and the rest of the GPU job's system | The digest of the container image in `ci.yml` | Change the digest |
 | GitHub Actions | Commit hashes in `ci.yml` | Dependabot opens the pull requests |

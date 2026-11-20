@@ -73,6 +73,17 @@ XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" timeout -s KILL 1800 python -m jax_titan.t
 ... --model=maxtext:qwen3-8b --parallel=fsdp --num_stages=1 --microbatches=1 \
   --microbatch_size=32 --data=$JAX_TITAN_ROOT/data/wikitext103_train.qwen3.bin ...
 
+# A causal language model of transformers, or FLUX.1's denoiser of diffusers,
+# traced through torchax, as one stage (docs/adapters/).
+... --model=transformers:$MODELS/qwen3-8b --parallel=fsdp --num_stages=1 \
+  --microbatches=1 --microbatch_size=32 --data=$JAX_TITAN_ROOT/data/wikitext103_train.qwen3.bin ...
+... --model=diffusers:FluxTransformer2DModel --model_overrides='{"guidance_embeds": true}' \
+  --parallel=fsdp --num_stages=1 --microbatches=1 --microbatch_size=8 --resolution=512 --lr=1e-5 ...
+
+# MaxDiffusion's Wan 2.1 1.3B on clips of 17 frames, as one stage.
+... --model=maxdiffusion:wan2.1-t2v-1.3b --parallel=fsdp --num_stages=1 --microbatches=1 \
+  --microbatch_size=8 --resolution=480 --frames=17 --lr=1e-5 ...
+
 # JAX-Titan's own Ideogram 4, on synthetic batches (docs/recipes/ideogram4.md).
 ... --model=ideogram4 --parallel=fsdp --num_stages=1 --microbatches=1 \
   --microbatch_size=8 --lr=1e-5 ...
