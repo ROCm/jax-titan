@@ -10,14 +10,18 @@ PyTorch runs on the host during that trace and never during a step
 
 ## Models
 
-The adapter takes the 125 model types of `transformers.VERIFIED`
-(`python -c "from jax_titan.models.adapters import transformers as t; print(t.VERIFIED)"`),
-among them `llama`, `mistral`, `qwen2`, `qwen3`, `gemma`, `gemma2`,
-`gemma3_text`, `phi3`, `gpt2`, `falcon`, `mamba`, and mixtures of experts
-such as `qwen3_moe`, `mixtral`, `deepseek_v3` and `gpt_oss`. `<name>` is a
-directory with a model's `config.json`, such as a download from the Hugging
-Face Hub, or a model type of transformers with the library's default sizes
-(`llama`, `qwen3_moe`). Four ran on GPUs at their real size:
+The adapter supports 125 model types of transformers. To print them:
+
+```bash
+python -c "from jax_titan.models.adapters import transformers as t; print(t.VERIFIED)"
+```
+
+Among them are `llama`, `mistral`, `qwen2`, `qwen3`, `gemma`, `gemma2`,
+`gemma3_text`, `phi3`, `gpt2`, `falcon`, `mamba`, and mixtures of experts such
+as `qwen3_moe`, `mixtral`, `deepseek_v3` and `gpt_oss`. For each of the 125, a
+small model gave PyTorch's loss and gradients.
+
+Four of them were verified on GPUs at their real size:
 
 | Published weights | Model type | Parameters |
 |---|---|---|
@@ -26,28 +30,17 @@ Face Hub, or a model type of transformers with the library's default sizes
 | `mistralai/Mistral-7B-v0.1` | `mistral` | 7.24B |
 | `Qwen/Qwen3-30B-A3B-Thinking-2507` | `qwen3_moe` | 30.53B |
 
+`<name>` is a directory with a model's `config.json`, such as a download from
+the Hugging Face Hub, or a model type of transformers with the library's
+default sizes (`llama`, `qwen3_moe`).
+
 The list exists because the network is translated, operator by operator, into
 a JAX function that `jax.grad` differentiates and XLA compiles, and a model
 can come out wrong without an error: PyTorch's autograd takes no part, so
 `torch.no_grad()`, `.data` and a custom `autograd.Function` in a model's
 `forward` neither stop nor shape the gradient. The adapter therefore takes
 only the model types whose loss and gradients it compared with PyTorch's own.
-
-A model type outside the list is refused. Of the 143 decoder-only text model
-types of `AutoModelForCausalLM`, 18 are not in it:
-
-| Why | Model types |
-|---|---|
-| The gradient is wrong, without an error | `blt` (64-bit integer arithmetic, which JAX does in 32 bits), `hrm_text` (`torch.no_grad()` and a custom autograd function) |
-| The forward draws random numbers | `phimoe` |
-| Shapes that depend on the data | `dbrx`, `jetmoe`, `longcat_flash`, `qwen4_exp_text` |
-| A defect of torchax 0.0.13 | `gemma3n_text`, `gemma4_text`, `gemma4_unified_text` |
-| No small model could be built from the family's test configuration | `gemma4_assistant`, `gemma4_unified_assistant` |
-| No gradient-checkpointing switch, so no rematerialization | `cpmant`, `ctrl`, `gpt_neox_japanese`, `openai-gpt`, `xlnet` |
-| Not a left-to-right model under its default config | `bert-generation` |
-
-Multimodal and encoder-decoder models, and the 46 other model types that
-`AutoModelForCausalLM` maps, are not taken either.
+A model type outside the list is refused.
 
 ## Running it
 
@@ -131,18 +124,20 @@ The unit tests are in `tests/test_transformers_adapter.py`.
 
 `VERIFIED` is the outcome of one comparison with PyTorch, made on 2026-11-19
 with transformers 5.23.0, torch 2.10.0 and torchax 0.0.13, on CPU in fp32. For
-each of the 143 model types it built a small model the adapter's way, from the
-configuration of the family's own model tester in transformers' test suite,
-or from the default config with its sizes shrunk. PyTorch computed the mean
-cross-entropy of the logits and its gradients on a copy of the module. The
-adapter's loss function, with rematerialization, was traced twice under
-`jax.jit(jax.value_and_grad)`, as the trainer traces it for its train step and
-its validation step. A model type passed when both traces gave PyTorch's loss
-within 1e-5 and every parameter's gradient within 1e-3: 126 passed, 2 gave
-another gradient and 15 raised an error. Among those that passed, the largest
-difference is 2.1e-7 for the loss and 3.4e-5 for a gradient. The comparison
-needs transformers' test suite and is not in the repository; it has to be run
-again when one of the three versions moves.
+each of the 143 decoder-only text model types of `AutoModelForCausalLM` it
+built a small model the adapter's way, from the configuration of the family's
+own model tester in transformers' test suite, or from the default config with
+its sizes shrunk. PyTorch computed the mean cross-entropy of the logits and
+its gradients on a copy of the module. The adapter's loss function, with
+rematerialization, was traced twice under `jax.jit(jax.value_and_grad)`, as
+the trainer traces it for its train step and its validation step. A model type
+passed when both traces gave PyTorch's loss within 1e-5 and every parameter's
+gradient within 1e-3: 126 passed, 2 gave another gradient and 15 raised an
+error. The list holds the 126 without `bert-generation`, which is not a
+left-to-right model under its default config. Among those that passed, the
+largest difference is 2.1e-7 for the loss and 3.4e-5 for a gradient. The
+comparison needs transformers' test suite and is not in the repository; it has
+to be run again when one of the three versions moves.
 
 Not checked:
 

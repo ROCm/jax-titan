@@ -20,8 +20,7 @@ few lines that name its inputs. This version registers one:
 `<name>` is a denoiser class of diffusers, built with the library's default
 sizes, or a directory with a denoiser's `config.json`, or a pipeline's
 directory, whose `transformer` is taken. The tests and runs here embed the
-guidance scale, as FLUX.1-dev does. Other denoiser classes are refused until
-they are compared with PyTorch and given their family's batches.
+guidance scale, as FLUX.1-dev does. Another denoiser class is refused.
 
 ## Running it
 
