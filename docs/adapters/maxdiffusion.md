@@ -91,43 +91,46 @@ and predicts `noise - latents`.
 
 ## How it is verified
 
-The tests are `tests/test_maxdiffusion_adapter.py`, on GPUs at a small size in
-fp32, and `tests/test_adapter_training.py`, on CPU. The runs are under
-[Runs](#runs).
+The unit tests are in `tests/test_maxdiffusion_adapter.py` and
+`tests/test_adapter_training.py`.
 
 | What is checked | By | Size | Result |
 |---|---|---|---|
-| FLUX.1 through the adapter gives the output of MaxDiffusion's `FluxTransformer2DModel` called directly | Test, GPU | Small | Loss within 1e-5 |
-| Wan 2.1 through the adapter gives the output of MaxDiffusion's `WanModel` built and called directly | Test, GPU | Small | Loss within 1e-5 |
-| FSDP shards every parameter of FLUX.1, and no stack of blocks along its block axis | Test, GPU | Small | Passes |
-| FSDP trains as data parallelism does, for FLUX.1 and Wan 2.1 | Test, 2 GPUs | Small | Losses of 4 steps within 1e-4 |
-| A small FLUX.1 trains through the trainer and resumes exactly | Test, CPU | Small | Equal losses |
-| A run resumes from the checkpoint of step 3 and validates: a small Wan 2.1, under FSDP on 2 GPUs in fp32 | Run | Small | The uninterrupted run's losses of steps 3 to 5 exactly, and its validation loss after them |
-| FLUX.1-dev and Wan 2.1 1.3B run, fit and their loss falls | Runs | Real | The table under [Runs](#runs) |
+| FLUX.1 through the adapter gives the output of MaxDiffusion's `FluxTransformer2DModel` called directly | Unit test | Small | Loss within 1e-5 |
+| Wan 2.1 through the adapter gives the output of MaxDiffusion's `WanModel` built and called directly | Unit test | Small | Loss within 1e-5 |
+| FSDP shards every parameter of FLUX.1, and no stack of blocks along its block axis | Unit test | Small | Passes |
+| FSDP on 2 GPUs trains as data parallelism does, for FLUX.1 and Wan 2.1 | Unit test | Small | Losses of 4 steps within 1e-4 |
+| A small FLUX.1 trains through the trainer and resumes exactly | Unit test | Small | Equal losses |
+| A run resumes from its checkpoint and validates | [Experiment](#checkpoints) | Small | The uninterrupted run's losses exactly, and its validation loss |
+| FLUX.1-dev and Wan 2.1 1.3B run, fit and their loss falls | [Experiment](#training-from-random-weights) | Real | The loss falls over 30 steps under `dp` and under `fsdp` |
 
 Not checked:
 
 - **Wan's objective against MaxDiffusion's trainer.** MaxDiffusion's trainers
   do not import in JAX-Titan's environment, so the objective was taken from
   their source and not compared in a run.
-- **A reference at real size.** The runs show that a model runs, fits and
-  that its loss falls; the comparisons with MaxDiffusion's modules are at a
-  small size.
-- **`flux-schnell`**, in a test or in a run.
-- **`--ops` for FLUX.1**, in a test or in a run.
+- **A reference at real size.** The experiments show that a model runs, fits
+  and that its loss falls; the comparisons with MaxDiffusion's modules are at
+  a small size.
+- **`flux-schnell`**, in a unit test or in an experiment.
+- **`--ops` for FLUX.1**, in a unit test or in an experiment.
 
-## Runs
+## Experiments
 
-On 8x MI350X, 2026-11-19 to 20.
+These are runs of the trainer on the adapter's models, launched by hand on
+GPUs. They are not part of the test suite, and the scripts that launched them
+are not in the repository. They ran on 8x MI350X on 2026-11-19 and 20.
 
-From random weights on synthetic batches, one sample per GPU, in bf16 with
-fp32 parameters: 30 steps with `--lr=1e-5` and rematerialization. FLUX.1-dev
-(11.90B parameters) on 512 x 512 images, 1,024 image tokens and 512 text
-tokens a sample. Wan 2.1 1.3B (1.42B parameters) on clips of 17 frames of 480 x 480
-pixels, 4,500 video tokens and 512 text tokens a sample. One run each;
-tokens/s per GPU is the median over steps 5-29. These are single runs of 30
-steps on random data, enough to see that a model runs, fits and that its loss
-falls, not a measurement of throughput.
+### Training from random weights
+
+Each model trains from random weights on synthetic batches, one sample per
+GPU, in bf16 with fp32 parameters: 30 steps with `--lr=1e-5` and
+rematerialization. FLUX.1-dev (11.90B parameters) on 512 x 512 images, 1,024
+image tokens and 512 text tokens a sample. Wan 2.1 1.3B (1.42B parameters) on
+clips of 17 frames of 480 x 480 pixels, 4,500 video tokens and 512 text tokens
+a sample. One run each; tokens/s per GPU is the median over steps 5-29. These
+are single runs of 30 steps on random data, enough to see that a model runs,
+fits and that its loss falls, not a measurement of throughput.
 
 | Model | Layout | GPUs | Tokens per step | Tokens/s per GPU | Peak HBM per GPU | Loss, step 0 | Steps 25-29 |
 |---|---|---|---|---|---|---|---|
@@ -136,7 +139,11 @@ falls, not a measurement of throughput.
 | `wan2.1-t2v-1.3b` | dp | 1 | 5,012 | 23,468 | 23 GiB | 4.17 | 2.24 |
 | `wan2.1-t2v-1.3b` | fsdp | 8 | 40,096 | 19,707 | 5 GiB | 4.21 | 2.11 |
 
-The scripts that launched these runs are not in the repository.
+### Checkpoints
+
+A small Wan 2.1, under FSDP on 2 GPUs in fp32, restores the checkpoint of step
+3 and gives the uninterrupted run's losses of steps 3 to 5 exactly, and its
+validation loss after them.
 
 ## Known issues
 

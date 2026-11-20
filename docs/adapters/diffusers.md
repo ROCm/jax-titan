@@ -86,42 +86,49 @@ EMA, LoRA and ControlNet are not supported either.
 
 ## How it is verified
 
-The tests are `tests/test_diffusers_adapter.py`, on GPUs at a small size in
-fp32. The runs are under [Runs](#runs).
+The unit tests are in `tests/test_diffusers_adapter.py`.
 
 | What is checked | By | Size | Result |
 |---|---|---|---|
-| The adapter's loss and gradients are PyTorch's, over two traces: FLUX.1 with the guidance embedding on a batch of `data/diffusion.py` | Test, GPU | Small | Loss within 1e-5, gradients within 1e-3 |
-| Weight decay skips the norms of the queries and keys and nothing else | Test, GPU | Small | Passes |
-| FSDP trains as data parallelism does | Test, 2 GPUs | Small | Losses of 4 steps within 1e-4 |
-| Another denoiser class is refused | Test, GPU | Small | Passes |
-| A run resumes from the checkpoint of step 3 and validates: a small FLUX.1, under FSDP on 2 GPUs in fp32 | Run | Small | The uninterrupted run's losses of steps 3 to 5 exactly, and its validation loss after them |
-| The model runs, fits and its loss falls at FLUX.1-dev's size | Runs | Real | The table under [Runs](#runs) |
+| The adapter's loss and gradients are PyTorch's, over two traces: FLUX.1 with the guidance embedding on a batch of `data/diffusion.py` | Unit test | Small | Loss within 1e-5, gradients within 1e-3 |
+| Weight decay skips the norms of the queries and keys and nothing else | Unit test | Small | Passes |
+| FSDP on 2 GPUs trains as data parallelism does | Unit test | Small | Losses of 4 steps within 1e-4 |
+| Another denoiser class is refused | Unit test | Small | Passes |
+| A run resumes from its checkpoint and validates | [Experiment](#checkpoints) | Small | The uninterrupted run's losses exactly, and its validation loss |
+| The model runs, fits and its loss falls at FLUX.1-dev's size | [Experiment](#training-from-random-weights) | Real | The loss falls over 30 steps under `dp` and under `fsdp` |
 
 Not checked:
 
 - **A reference at real size.** The adapter loads no published weights: the
-  runs show that the model runs, fits and that its loss falls, and the
+  experiments show that the model runs, fits and that its loss falls, and the
   comparison with PyTorch is at a small size.
 
-## Runs
+## Experiments
 
-On 8x MI350X, 2026-11-19.
+These are runs of the trainer on the adapter's models, launched by hand on
+GPUs. They are not part of the test suite, and the scripts that launched them
+are not in the repository. They ran on 8x MI350X on 2026-11-19.
+
+### Training from random weights
 
 `FluxTransformer2DModel` with the guidance embedding, FLUX.1-dev's size of
-11.90B parameters, from random weights on synthetic batches of 512 x 512
-images, 1,024 image tokens and 512 text tokens a sample, one sample per GPU,
-in bf16 with fp32 parameters: 30 steps with `--lr=1e-5` and
+11.90B parameters, trains from random weights on synthetic batches of
+512 x 512 images, 1,024 image tokens and 512 text tokens a sample, one sample
+per GPU, in bf16 with fp32 parameters: 30 steps with `--lr=1e-5` and
 rematerialization. One run each; tokens/s per GPU is the median over steps
-5-29. These are single runs of 30 steps on random data, enough to see that
-the model runs, fits and that its loss falls, not a measurement of throughput.
+5-29. These are single runs of 30 steps on random data, enough to see that the
+model runs, fits and that its loss falls, not a measurement of throughput.
 
 | Model | Layout | GPUs | Tokens per step | Tokens/s per GPU | Peak HBM per GPU | Loss, step 0 | Steps 25-29 |
 |---|---|---|---|---|---|---|---|
 | `FluxTransformer2DModel` | dp | 1 | 1,536 | 5,397 | 158 GiB | 2.32 | 2.05 |
 | `FluxTransformer2DModel` | fsdp | 8 | 12,288 | 3,207 | 38 GiB | 2.33 | 1.88 |
 
-The scripts that launched these runs are not in the repository.
+### Checkpoints
+
+A small FLUX.1, under FSDP on 2 GPUs in fp32, restores the checkpoint of step
+3 and gives the uninterrupted run's losses of steps 3 to 5 exactly, and its
+validation loss after them.
 
 ## Known issues
 

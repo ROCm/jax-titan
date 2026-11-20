@@ -87,21 +87,20 @@ MaxText's own trainer is not used.
 
 ## How it is verified
 
-The tests are `tests/test_maxtext_adapter.py`, on GPUs at a small size in
-fp32, and `tests/test_adapter_training.py`, on CPU. The runs are under
-[Runs](#runs).
+The unit tests are in `tests/test_maxtext_adapter.py` and
+`tests/test_adapter_training.py`.
 
 | What is checked | By | Size | Result |
 |---|---|---|---|
-| The adapter's loss and gradients are MaxText's own: `WholeModel` against MaxText's `train.loss_fn` for six configs (Llama 3.1, Mistral, Gemma 3, Qwen3 and two mixtures of experts, Qwen3-30B-A3B's and DeepSeek's with its summed load-balance loss) | Test, GPU | Small | Loss within 1e-5, gradients within 1e-3 |
-| The trainer starts at the model's loss | Test, GPU | Small | Within 1e-5 |
-| FSDP trains as data parallelism does, for four models | Test, 2 GPUs | Small | Losses of 4 steps within 1e-4 |
-| A small model trains through the trainer, resumes exactly, and starts from a MaxText parameter checkpoint | Test, CPU | Small | Equal losses |
-| The published weights give PyTorch's loss, for the six models | Runs | Real | In fp32 within 2.3e-5 for Qwen3 and Llama, the mixture of experts included, 3.0e-6 for Mistral with its RoPE base corrected and 3.5e-4 for Gemma 3 |
-| FSDP gives data parallelism's losses on 2, 4 and 8 GPUs, for five models (Qwen3-30B-A3B with 8 of its 48 layers) | Runs | Real | In fp32 within 1.6e-5 over 10 steps |
-| A run resumes from the checkpoint of step 3: Qwen3-0.6B from its published weights, under FSDP on 2 GPUs in fp32 | Run | Real | That step's loss exactly, the next two within 8e-8 |
-| Every model trains | Runs | Real | The loss falls from 10.8-12.9 to 5.1-6.6 in 300 steps |
-| JAX-Titan's own Llama gives the adapter's loss and gradients from the same weights, with Llama 3.1's RoPE and with Llama 3's ([below](#jax-titans-own-llama-against-the-adapter)) | Test, GPU; one run | Small; real | Loss within 1e-5, gradients within 1e-3; at real size the losses are 3.6e-7 apart in fp32 |
+| The adapter's loss and gradients are MaxText's own: `WholeModel` against MaxText's `train.loss_fn` for six configs (Llama 3.1, Mistral, Gemma 3, Qwen3 and two mixtures of experts, Qwen3-30B-A3B's and DeepSeek's with its summed load-balance loss) | Unit test | Small | Loss within 1e-5, gradients within 1e-3 |
+| The trainer starts at the model's loss | Unit test | Small | Within 1e-5 |
+| FSDP on 2 GPUs trains as data parallelism does, for four models | Unit test | Small | Losses of 4 steps within 1e-4 |
+| A small model trains through the trainer, resumes exactly, and starts from a MaxText parameter checkpoint | Unit test | Small | Equal losses |
+| The published weights give PyTorch's loss, for the six models | [Experiment](#published-weights) | Real | In fp32 within 2.3e-5 for Qwen3 and Llama, the mixture of experts included, 3.0e-6 for Mistral with its RoPE base corrected and 3.5e-4 for Gemma 3 |
+| FSDP gives data parallelism's losses on 2, 4 and 8 GPUs, for five models (Qwen3-30B-A3B with 8 of its 48 layers) | [Experiment](#fsdp-against-data-parallelism) | Real | In fp32 within 1.6e-5 over 10 steps |
+| A run resumes from its checkpoint | [Experiment](#checkpoints) | Real | That step's loss exactly, the next two within 8e-8 |
+| Every model trains | [Experiment](#training-from-random-weights) | Real | The loss falls from 10.8-12.9 to 5.1-6.6 in 300 steps |
+| JAX-Titan's own Llama gives the adapter's loss and gradients from the same weights, with Llama 3.1's RoPE and with Llama 3's ([below](#jax-titans-own-llama-against-the-adapter)) | Unit test, experiment | Small; real | Loss within 1e-5, gradients within 1e-3; at real size the losses are 3.6e-7 apart in fp32 |
 
 Not checked:
 
@@ -109,23 +108,29 @@ Not checked:
 - **The load-balance term at real size.** It ran in the tests at a small size
   only: none of the six configs weights it.
 - **Attention through `jax_titan.ops` with TE or JAX-AITER.** It was checked
-  at a small size with the native provider, in the tests; no run here used
-  another.
-- **The gradients at real size.** The runs compare the loss.
+  at a small size with the native provider, in the tests; no experiment here
+  used another.
+- **The gradients at real size.** The experiments compare the loss.
 
-## Runs
+## Experiments
 
-On 8x MI350X, 2026-11-19; Llama 3.1 8B's `dp` runs are of 2026-11-20. The
-runs take the six models of [Models](#models), in bf16 with fp32 parameters
-and AdamW state unless a row says fp32, on WikiText-103 in each model's own
+These are runs of the trainer on the adapter's models, launched by hand on
+GPUs. They are not part of the test suite, and neither the scripts that
+launched them nor the script of the PyTorch reference are in the repository.
+They ran on 8x MI350X on 2026-11-19, Llama 3.1 8B's `dp` runs on 2026-11-20,
+and take the six models of [Models](#models), in bf16 with fp32 parameters and
+AdamW state unless a row says fp32, on WikiText-103 in each model's own
 tokens.
 
-Published weights: each model's weights from the Hugging Face Hub, converted
-with MaxText's own converter (`maxtext.checkpoint_conversion.to_maxtext`, and
+### Published weights
+
+Each model starts from its published weights, and its loss is compared with
+PyTorch's. The weights come from the Hugging Face Hub, converted with
+MaxText's own converter (`maxtext.checkpoint_conversion.to_maxtext`, and
 `standalone_scripts/llama_or_mistral_ckpt` for Mistral) and loaded with
-`--init_from`, against transformers 5.23.0's model in PyTorch on CPU. Both
-compute the mean cross-entropy of the batch the trainer draws at step 0 from
-WikiText-103's validation split, 8 sequences of 1,024 tokens. One MI350X;
+`--init_from`; the reference is transformers 5.23.0's model in PyTorch on CPU.
+Both compute the mean cross-entropy of the batch the trainer draws at step 0
+from WikiText-103's validation split, 8 sequences of 1,024 tokens. One MI350X;
 Qwen3-30B-A3B with FSDP on 8. PyTorch's bf16 column holds bf16 weights;
 JAX-Titan's holds fp32 weights and computes in bf16.
 
@@ -150,10 +155,13 @@ JAX-Titan's holds fp32 weights and computes in bf16.
   the cause. In bf16 it is 8.6e-3 from PyTorch's fp32, where PyTorch's own
   bf16 is 4.9e-3.
 
-FSDP against data parallelism: random weights of `--seed=0`, the same 8
-sequences per step, 10 steps, `--parallel=fsdp` on 2, 4 and 8 GPUs against
-`--parallel=dp` on one GPU. The largest relative difference of the loss over
-the 10 steps, with sequences of 2,048 tokens in bf16 and of 1,024 in fp32:
+### FSDP against data parallelism
+
+The same training under `--parallel=fsdp` on 2, 4 and 8 GPUs and under
+`--parallel=dp` on one GPU: random weights of `--seed=0`, the same 8 sequences
+per step, 10 steps. The table gives the largest relative difference of the
+loss over the 10 steps, with sequences of 2,048 tokens in bf16 and of 1,024 in
+fp32.
 
 | `maxtext:` model | Compute | fsdp, 2 GPUs | fsdp, 4 GPUs | fsdp, 8 GPUs | Step 0, largest of the three |
 |---|---|---|---|---|---|
@@ -179,12 +187,14 @@ the 10 steps, with sequences of 2,048 tokens in bf16 and of 1,024 in fp32:
   on a second GPU: at these 16,384 tokens per step that gate is too tight for
   bf16, and fp32 is what tells one layout from another.
 
-Training from random weights with 4 sequences of 2,048 tokens per GPU, AdamW
-at the trainer's defaults (peak rate 3e-4 after 10 warm-up steps) and full
-remat. Tokens/s per GPU is the median of three runs, one of 300 steps and two
-of 40, each taken over its steps 5-39; the spread is their range over that
-median. "Over 300 steps" is the 300-step run over its steps 5-299, and the
-losses are that run's. The peak memory is the 40-step runs': the 300-step
+### Training from random weights
+
+Each model trains from random weights with 4 sequences of 2,048 tokens per
+GPU, AdamW at the trainer's defaults (peak rate 3e-4 after 10 warm-up steps)
+and full remat. Tokens/s per GPU is the median of three runs, one of 300 steps
+and two of 40, each taken over its steps 5-39; the spread is their range over
+that median. "Over 300 steps" is the 300-step run over its steps 5-299, and
+the losses are that run's. The peak memory is the 40-step runs': the 300-step
 runs predate the initialization of the weights on their shardings, and in
 them one GPU holds more than the others. MFU is against MI350X's 2,306.9
 TFLOP/s in bf16; the trainer's own `mfu` is against its default of 2,500.
@@ -209,22 +219,8 @@ TFLOP/s in bf16; the trainer's own `mfu` is against its default of 2,500.
 | `mistral-7b` | fsdp | 8 | 65,536 | 10,230 | 1.6% | 9,893 | 19.6% | 23 GiB | 10.85 | 6.02 | 5.45 | 5.30 |
 | `qwen3-30b-a3b` | fsdp | 8 | 65,536 | 2,158 | 0.1% | 2,114 | 1.9% | 82 GiB | 12.40 | 6.13 | 5.54 | 5.32 |
 
-MaxText's own trainer (`maxtext.trainers.pre_train.train`, the same MaxText,
-node, stack and day) with the same 8,192 tokens per GPU, full remat and
-dot-product attention, on synthetic data. Tokens/s per GPU over steps 5-39,
-the median of three runs of 40 steps on each side:
-
-| `maxtext:` model | GPUs | MaxText's own trainer | JAX-Titan | Difference |
-|---|---|---|---|---|
-| `llama3.1-8b` | 1 | 10,189 | 10,632 | +4.3% |
-| `llama3.1-8b` | 8, FSDP | 9,660 | 9,955 | +3.1% |
-| `qwen3-8b` | 1 | 9,669 | 10,074 | +4.2% |
-| `qwen3-8b` | 8, FSDP | 9,194 | 9,417 | +2.4% |
-
 - **Every model trains**: the loss falls from 10.8-12.9 to 5.1-6.6 in 300
   steps, and lower where a step holds more tokens.
-- **MaxText's models run 2.4% to 4.3% faster here than in MaxText's own
-  trainer** over the same steps, on one GPU and under FSDP on 8.
 - **Over 300 steps the throughput is 1% to 3% below that of the first 40.**
   The GPUs warm up and their clock drops under the power limit: for Llama
   3.1 8B on one GPU from 1,622 to 1,573 MHz, at 54 and 63 C and 1 kW.
@@ -236,12 +232,32 @@ the median of three runs of 40 steps on each side:
   GiB on each of 8 GPUs with its published weights and at 82 GiB with random
   ones.
 
-The mixture of experts: MaxText computes an expert layer in three forms. The
-adapter's default is the dense matmul over every expert
-(`sparse_matmul=false`), and `--model_overrides` selects the others.
-Qwen3-30B-A3B, which routes a token to 8 of 128 experts, with 8 of its 48
-layers (5.6B parameters) on one GPU: 4 sequences of 2,048 tokens, three runs
-of 30 steps, each taken over its steps 5-29:
+### MaxText's own trainer
+
+The throughput of the same models in MaxText's own trainer
+(`maxtext.trainers.pre_train.train`, the same MaxText, node, stack and day),
+with the same 8,192 tokens per GPU, full remat and dot-product attention, on
+synthetic data. Tokens/s per GPU over steps 5-39, the median of three runs of
+40 steps on each side:
+
+| `maxtext:` model | GPUs | MaxText's own trainer | JAX-Titan | Difference |
+|---|---|---|---|---|
+| `llama3.1-8b` | 1 | 10,189 | 10,632 | +4.3% |
+| `llama3.1-8b` | 8, FSDP | 9,660 | 9,955 | +3.1% |
+| `qwen3-8b` | 1 | 9,669 | 10,074 | +4.2% |
+| `qwen3-8b` | 8, FSDP | 9,194 | 9,417 | +2.4% |
+
+- **MaxText's models run 2.4% to 4.3% faster here than in MaxText's own
+  trainer** over the same steps, on one GPU and under FSDP on 8.
+
+### Mixture of experts
+
+MaxText computes an expert layer in three forms. The adapter's default is the
+dense matmul over every expert (`sparse_matmul=false`), and
+`--model_overrides` selects the others. Qwen3-30B-A3B, which routes a token to
+8 of 128 experts, with 8 of its 48 layers (5.6B parameters) on one GPU: 4
+sequences of 2,048 tokens, three runs of 30 steps, each taken over its steps
+5-29:
 
 | Expert matmul | Tokens/s per GPU | Spread | Peak HBM | Loss, step 0 | Steps 25-29 |
 |---|---|---|---|---|---|
@@ -253,11 +269,16 @@ of 30 steps, each taken over its steps 5-29:
   this stack**: 4.9x `jax.lax.ragged_dot` and 7.3x megablox, with the same
   losses.
 - **The whole model trains on 8 GPUs at 2,158 tokens/s per GPU** (the last
-  row of the table before). Its MFU of 1.9% counts the 8 experts a token is
-  routed to, as MaxText's FLOP count does; the dense matmul computes all 128.
+  row of the table under
+  [Training from random weights](#training-from-random-weights)). Its MFU of
+  1.9% counts the 8 experts a token is routed to, as MaxText's FLOP count
+  does; the dense matmul computes all 128.
 
-The script of the PyTorch reference and the scripts that launched these runs
-are not in the repository.
+### Checkpoints
+
+Qwen3-0.6B from its published weights, under FSDP on 2 GPUs in fp32, restores
+the checkpoint of step 3 and gives that step's loss exactly and the next two
+within 8e-8.
 
 ## JAX-Titan's own Llama against the adapter
 
@@ -297,4 +318,5 @@ The script of the real-size comparison is not in the repository.
   normalizing the logits.
 - **The dense expert matmul computes every expert.** It is the adapter's
   default, and it was measured against MaxText's other forms for
-  Qwen3-30B-A3B's 8 of 128 experts only ([Runs](#runs)).
+  Qwen3-30B-A3B's 8 of 128 experts only
+  ([Mixture of experts](#mixture-of-experts)).
