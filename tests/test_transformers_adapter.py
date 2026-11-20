@@ -25,8 +25,9 @@ SMALL = {
     "num_attention_heads": 4, "num_key_value_heads": 2, "max_position_embeddings": 128,
 }
 # Other ways of a family: Qwen3's query and key norms, Gemma 3's local attention, Phi-3's long
-# RoPE factors, which its forward caches on the module, a mixture of experts in the dense
-# form, and GPT-2's tied embedding, biases and learned positions.
+# RoPE factors, which its forward caches on the module, mixtures of experts in the dense
+# form, gpt-oss's with biases and transposed weights, and GPT-2's tied embedding, biases and
+# learned positions.
 FAMILIES = {
     "llama": SMALL,
     "mistral": SMALL,
@@ -40,6 +41,7 @@ FAMILIES = {
     "qwen3_moe": {**SMALL, "head_dim": 16, "moe_intermediate_size": 32, "num_experts": 8,
                   "num_experts_per_tok": 2, "decoder_sparse_step": 1, "mlp_only_layers": [],
                   "norm_topk_prob": True},
+    "gpt_oss": {**SMALL, "head_dim": 16, "num_local_experts": 8, "num_experts_per_tok": 2},
     "gpt2": {"vocab_size": 256, "n_embd": 64, "n_layer": 2, "n_head": 4, "n_positions": 128},
 }
 
@@ -61,6 +63,8 @@ def test_bridged_model_gives_pytorchs_loss_and_gradient(family):
 
   # PyTorch on a copy: a forward on the module itself would leave Phi-3's cache behind.
   eager = copy.deepcopy(model.module)
+  # The copy keeps the adapter's dense experts; the reference runs transformers' own.
+  eager.set_experts_implementation("eager")
   eager._set_gradient_checkpointing(enable=False)  # pylint: disable=protected-access
   logits = eager(input_ids=torch.from_numpy(ids))[0]
   loss = torch.nn.functional.cross_entropy(
