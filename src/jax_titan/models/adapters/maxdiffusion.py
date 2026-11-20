@@ -85,8 +85,6 @@ class WholeModel:
   with `fsdp` and replicated without.
   """
 
-  num_stages = 1
-
   def __init__(self, init_full: Callable, apply: Callable, mesh: jax.sharding.Mesh, *,
                fsdp: bool = False, stacked: Sequence[str] = ()):
     self._init_full, self._apply, self._stacked = init_full, apply, tuple(stacked)
@@ -189,4 +187,4 @@ def whole_wan(mesh: jax.sharding.Mesh, *, fsdp: bool = False, **kwargs) -> Whole
       return model(hidden_states=x["latents"], timestep=x["timestep"],
                    encoder_hidden_states=x["txt"], deterministic=True)
 
-  return WholeModel(lambda seed: init_full(seed)[0], apply, mesh, fsdp=fsdp)
+  return WholeModel(lambda seed: init_full(seed)[0], apply, mesh, fsdp=fsdp, stacked=("blocks",))
