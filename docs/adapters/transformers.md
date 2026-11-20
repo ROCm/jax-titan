@@ -113,7 +113,7 @@ The unit tests are in `tests/test_transformers_adapter.py`.
 | What is checked | By | Size | Result |
 |---|---|---|---|
 | Each model type of the list gives PyTorch's loss and gradients, over two traces | One comparison | Small | Loss within 1e-5, gradients within 1e-3 |
-| Seven model types give PyTorch's loss and gradients, over two traces: `llama`, `mistral`, `qwen3`, `gemma3_text`, `phi3` with its long RoPE factors, `qwen3_moe` in the dense form and `gpt2` | Unit test | Small | Loss within 1e-5, gradients within 1e-3 |
+| Eight model types give PyTorch's loss and gradients, over two traces: `llama`, `mistral`, `qwen3`, `gemma3_text`, `phi3` with its long RoPE factors, `gpt2`, and the mixtures of experts `qwen3_moe` and `gpt_oss`, whose dense expert layer is compared with transformers' own | Unit test | Small | Loss within 1e-5, gradients within 1e-3 |
 | Norms take no weight decay, and nothing else is exempt | Unit test | Small | Passes |
 | The trainer starts at the model's loss | Unit test | Small | Within 1e-5 |
 | FSDP on 2 GPUs trains as data parallelism does | Unit test | Small | Losses of 4 steps within 1e-4 |
@@ -128,16 +128,20 @@ each of the 143 decoder-only text model types of `AutoModelForCausalLM` it
 built a small model the adapter's way, from the configuration of the family's
 own model tester in transformers' test suite, or from the default config with
 its sizes shrunk. PyTorch computed the mean cross-entropy of the logits and
-its gradients on a copy of the module. The adapter's loss function, with
-rematerialization, was traced twice under `jax.jit(jax.value_and_grad)`, as
-the trainer traces it for its train step and its validation step. A model type
-passed when both traces gave PyTorch's loss within 1e-5 and every parameter's
-gradient within 1e-3: 126 passed, 2 gave another gradient and 15 raised an
-error. The list holds the 126 without `bert-generation`, which is not a
-left-to-right model under its default config. Among those that passed, the
-largest difference is 2.1e-7 for the loss and 3.4e-5 for a gradient. The
-comparison needs transformers' test suite and is not in the repository; it has
-to be run again when one of the three versions moves.
+its gradients on a copy of the module; for the 49 model types whose experts
+transformers dispatches through its `ExpertsInterface`, that copy runs the
+adapter's dense expert layer too, which the unit tests and Qwen3-30B-A3B's
+loss from its published weights compare with transformers' own. The adapter's
+loss function, with rematerialization, was traced twice under
+`jax.jit(jax.value_and_grad)`, as the trainer traces it for its train step and
+its validation step. A model type passed when both traces gave PyTorch's loss
+within 1e-5 and every parameter's gradient within 1e-3: 126 passed, 2 gave
+another gradient and 15 raised an error. The list holds the 126 without
+`bert-generation`, which is not a left-to-right model under its default
+config. Among those that passed, the largest difference is 2.1e-7 for the loss
+and 3.4e-5 for a gradient. The comparison needs transformers' test suite and
+is not in the repository; it has to be run again when one of the three
+versions moves.
 
 Not checked:
 

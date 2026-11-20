@@ -58,11 +58,12 @@ diffusers' example training scripts are not used.
 
 The objective is JAX-Titan's because a denoiser alone is not a training
 objective: diffusers keeps the noising, the timestep and the target in example
-scripts, not in the model. It is stated once per family in
+scripts, not in the model. These three are stated once per family in
 `jax_titan/data/diffusion.py` and shared with the
-[MaxDiffusion adapter](maxdiffusion.md): FLUX.1 is trained as a rectified
-flow, on `(1 - s) latents + s noise` with `s` uniform in [0, 1), to predict
-`noise - latents`, with an unweighted mean squared error.
+[MaxDiffusion adapter](maxdiffusion.md); the loss is the adapter's. FLUX.1 is
+trained as a rectified flow, on `(1 - s) latents + s noise` with `s` uniform
+in [0, 1), to predict `noise - latents`, with an unweighted mean squared
+error.
 
 ## What is supported and what is not
 
@@ -91,6 +92,7 @@ The unit tests are in `tests/test_diffusers_adapter.py`.
 |---|---|---|---|
 | The adapter's loss and gradients are PyTorch's, over two traces: FLUX.1 with the guidance embedding on a batch of `data/diffusion.py` | Unit test | Small | Loss within 1e-5, gradients within 1e-3 |
 | Weight decay skips the norms of the queries and keys and nothing else | Unit test | Small | Passes |
+| The trainer starts at the model's loss | Unit test | Small | Within 1e-5 |
 | FSDP on 2 GPUs trains as data parallelism does | Unit test | Small | Losses of 4 steps within 1e-4 |
 | Another denoiser class is refused | Unit test | Small | Passes |
 | A run resumes from its checkpoint and validates | [Experiment](#checkpoints) | Small | The uninterrupted run's losses exactly, and its validation loss |

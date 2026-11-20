@@ -70,9 +70,9 @@ When a test fails in CI and passes locally, two things can differ:
   those packages are not installed, and they run in CI. Ideogram 4's
   comparisons with diffusers', transformers' and the Ideogram branch's models
   and Command A+'s comparisons with transformers' model and processor are
-  skipped in CI, which has neither `torch` nor that branch: they run only
-  where these are installed. pytest ends with a line for every skipped test
-  and its reason.
+  skipped in CI: they are CPU tests, and the CPU job has neither `torch` nor
+  that branch. They run only where these are installed. pytest ends with a
+  line for every skipped test and its reason.
 - **Package versions.** The step `Show installed versions` of each job prints
   every package it installed, to compare with `python -m pip freeze`.
 
@@ -125,8 +125,7 @@ revisions, CI keeps testing the old build until `WHEELS` names a new one:
 - **No autotuning.** Unless `XLA_FLAGS` is set, `--gpus` makes XLA run
   hipBLASLt's first choice for every GEMM
   (`--xla_gpu_autotune_level=0 --xla_gpu_enable_triton_gemm=false`). With
-  XLA's defaults, compiling takes the GPU tests from under 2 minutes to 20 or
-  more.
+  XLA's defaults, compiling makes the GPU tests several times slower.
 - **Forks.** The GPU job does not run for a pull request from a fork: the
   self-hosted runner never runs a fork's code.
 - **Memory.** The CPU runner has 16 GB of memory, and the tests peak near

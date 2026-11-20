@@ -276,8 +276,8 @@ and memory, on one GPU type or several side by side (CPU only;
 ```bash
 python -m jax_titan.planning.budget --model=maxtext:llama3.1-70b --tokens=15e12 \
   --gpu=MI300X,MI325X,MI355X --gpus=2048 --tp=8 --fsdp
-python -m jax_titan.planning.budget --model=maxtext:llama3.1-8b --tokens=2e12 \
-  --gpu=MI325X --gpus=256 --seq_len=2048 --from_run=runs/mt_pp2
+python -m jax_titan.planning.budget --model=llama3.1-8b --tokens=2e12 \
+  --gpu=MI325X --gpus=256 --seq_len=2048 --from_run=runs/pp2
 ```
 
 When a job is done, free the GPUs for the next user. On the host,

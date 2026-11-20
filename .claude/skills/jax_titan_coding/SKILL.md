@@ -61,9 +61,11 @@ for a later comparison: do not import from it or edit it.
   `third_party/patches/maxdiffusion-*.patch` patches. `WholeModel` calls a
   denoiser whole, as one stage for `--parallel=dp` and `fsdp`: FLUX.1 and
   Wan 2.1, each with a few lines (`whole_flux`, `whole_wan`).
-- **A model of another repository is one stage.** An adapter calls the
-  repository's model whole and never cuts it: a pipeline needs a model
-  written for JAX-Titan, as `models/llama.py` is.
+- **A model of another repository is one stage.** The adapters of MaxText,
+  MaxDiffusion, transformers and diffusers call the repository's model whole
+  and do not cut it: a pipeline needs a model written for JAX-Titan, as
+  `models/llama.py` is. The one exception is `maxdiffusion:ideogram4`, whose
+  stages `models/adapters/ideogram.py` builds from the Ideogram branch.
 - **PyTorch models:** `models/adapters/torch_bridge.py` turns a
   `torch.nn.Module` into one stage through torchax, and is the only module
   that imports torchax. PyTorch's autograd takes no part, so a model that
@@ -136,18 +138,19 @@ for a later comparison: do not import from it or edit it.
 - `python -m pytest tests/` (CPU, 8 devices) must pass before every commit.
 - CI runs the tests in `tests/` on the JAX built from source, with MaxText
   (the `maxtext` extra) and MaxDiffusion (at the `PINNED_COMMIT` of its
-  adapter, with the patches) installed, so the adapter tests run there. It
-  has neither `torch` nor MaxDiffusion's Ideogram branch, so Ideogram 4's
-  and Command A+'s comparisons with other implementations run only locally:
-  run them after changing one of these models.
+  adapter, with the patches) installed, so the adapter tests run there; the
+  GPU job also installs the `transformers` and `diffusers` extras with
+  PyTorch's CPU build. The CPU job has neither `torch` nor MaxDiffusion's
+  Ideogram branch, so Ideogram 4's and Command A+'s comparisons with other
+  implementations, which are CPU tests, run only locally: run them after
+  changing one of these models.
 - Mark a test that needs a GPU `gpu`, or `gpu(n)` for n GPUs.
   `python -m pytest tests/` never runs it; `python -m pytest tests/ --gpus=N`
   runs only the `gpu` tests, with JAX on ROCm, and skips those that need more
   than N. Unless `XLA_FLAGS` is set, it turns XLA's GEMM autotuning off
-  (hipBLASLt's first choice for every GEMM): with autotuning the tests take 20
-  minutes or more instead of under 2. CI's GPU job, with MaxText installed,
-  runs `--gpus=1` on one gfx950, so a test that needs more GPUs runs only by
-  hand on a dev node.
+  (hipBLASLt's first choice for every GEMM): with autotuning the tests take
+  several times as long. CI's GPU job runs `--gpus=1` on one gfx950, so a test
+  that needs more GPUs runs only by hand on a dev node.
 - CI's JAX built from source is a release of wheels named in
   `.github/workflows/ci.yml`, with their checksums in
   `.github/ci-wheels.sha256`. After a change to a revision in
@@ -169,7 +172,7 @@ for a later comparison: do not import from it or edit it.
   `tests/test_maxdiffusion_adapter.py`
   checks FLUX.1 and Wan 2.1 against MaxDiffusion's own modules (skipped
   without MaxDiffusion). `tests/test_adapter_training.py` trains a model of
-  each through the trainer on CPU and resumes it exactly.
+  each through the trainer on CPU, under dp and FSDP, and resumes it exactly.
   `tests/test_transformers_adapter.py` and `tests/test_diffusers_adapter.py`
   compare the traced PyTorch models with PyTorch's own loss and gradients, on
   GPUs (skipped without the `transformers` or `diffusers` extra).
