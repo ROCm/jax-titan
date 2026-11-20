@@ -3,8 +3,8 @@
 `--model=maxtext:<name>` trains a model config of MaxText 0.2.5 with JAX-Titan's
 trainer. The network is MaxText's and runs as MaxText wrote it; the training is
 JAX-Titan's. A model family needs no code in JAX-Titan: `WholeModel`
-(`models/adapters/maxtext.py`) calls MaxText's `Transformer` whole, as one
-stage, under `--parallel=dp` or `fsdp`.
+(`models/adapters/maxtext.py`) calls MaxText's `Transformer` whole, under
+`--parallel=dp` or `fsdp`.
 
 ## What comes from MaxText and what from JAX-Titan
 
@@ -33,7 +33,7 @@ python -m jax_titan.data.text --tokenizer=$MODEL_DIR --name=qwen3
 From random weights, on every GPU of the node:
 
 ```bash
-python -m jax_titan.trainer.train --model=maxtext:qwen3-8b --parallel=fsdp --num_stages=1 \
+python -m jax_titan.trainer.train --model=maxtext:qwen3-8b --parallel=fsdp \
   --microbatches=1 --microbatch_size=32 --seq_len=2048 \
   --data=$DATA/wikitext103_train.qwen3.bin --eval_data=$DATA/wikitext103_validation.qwen3.bin
 ```
@@ -46,18 +46,18 @@ the output of MaxText's own converter
 ## What is supported
 
 - Every model config of MaxText 0.2.5 whose training is one gradient step of
-  the cross-entropy and the load-balance term, as one stage under `dp` and
-  `fsdp`. Six ran on GPUs at their real size: Qwen3-0.6B, Qwen3-8B, Llama 3.1
-  8B, Gemma 3 4B (its text tower), Mistral 7B and Qwen3-30B-A3B.
+  the cross-entropy and the load-balance term, under `dp` and `fsdp`. Six ran
+  on GPUs at their real size: Qwen3-0.6B, Qwen3-8B, Llama 3.1 8B, Gemma 3 4B
+  (its text tower), Mistral 7B and Qwen3-30B-A3B.
 - Random weights, or a MaxText parameter checkpoint with `--init_from`.
 - Checkpoints and resuming, validation, and `--ops=attention=...` for a
   model's global causal attention.
 
 ## What is not supported
 
-- **Pipelines**: `--parallel=mpmd`, more than one stage. A model of another
-  repository is called whole; a pipeline needs a model written for JAX-Titan,
-  as `--model=llama3.1-8b` is.
+- **Pipelines** (`--parallel=mpmd`). A model of another repository is called
+  whole; a pipeline needs a model written for JAX-Titan, as
+  `--model=llama3.1-8b` is.
 - **Configs under which MaxText's training holds more than this step are
   refused**: multi-token prediction, the z-loss, the indexer loss of DeepSeek
   V3.2 and V4, vocabulary tiling, updates of the routing bias, QK-clip,
@@ -105,9 +105,7 @@ trainer, resumes exactly, and starts from a MaxText parameter checkpoint.
 
 These runs take the six models above. They ran on MI350X in bf16 with fp32
 parameters and AdamW state, unless a row says fp32, on WikiText-103 in each
-model's own tokens. Llama 3.1 8B's `dp` runs were made again on 2026-11-20:
-until then `dp` ran Llama as the one stage of a pipeline the adapter no
-longer has.
+model's own tokens. Llama 3.1 8B's `dp` runs are of 2026-11-20.
 
 Published weights: each model's weights from the Hugging Face Hub, converted
 with MaxText's own converter (`maxtext.checkpoint_conversion.to_maxtext`, and
@@ -209,7 +207,7 @@ node, stack and day) with the same 8,192 tokens per GPU, full remat and
 dot-product attention, on synthetic data. Tokens/s per GPU over steps 5-39,
 the median of three runs of 40 steps on each side:
 
-| `maxtext:` model | GPUs | MaxText's own trainer | JAX-Titan, one stage | Difference |
+| `maxtext:` model | GPUs | MaxText's own trainer | JAX-Titan | Difference |
 |---|---|---|---|---|
 | `llama3.1-8b` | 1 | 10,189 | 10,632 | +4.3% |
 | `llama3.1-8b` | 8, FSDP | 9,660 | 9,955 | +3.1% |

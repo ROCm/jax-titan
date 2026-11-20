@@ -31,16 +31,15 @@ This is the target design; [What works](#what-works) lists what runs today.
 - Llama 3 models using MaxText's `llama3.1-8b` configuration, WikiText-103
   with the Llama 3 tokenizer, and throughput and MFU reporting.
 - MaxText models, built from MaxText 0.2.5's own layers and trained with
-  `--model=maxtext:<name>`: a model config as one stage (`--parallel=dp` or
-  `fsdp`) with MaxText's own loss and no code per model family, six models
-  checked on GPUs ([docs/adapters/maxtext.md](docs/adapters/maxtext.md)).
-- MaxDiffusion's FLUX.1 (dev and schnell) and Wan 2.1 as one stage,
-  MaxDiffusion's model called whole, with a flow-matching loss on synthetic
-  batches ([docs/adapters/maxdiffusion.md](docs/adapters/maxdiffusion.md)).
-- Models of Hugging Face's PyTorch libraries, traced into JAX through torchax
-  and trained as one stage: the decoder-only causal language models of
-  transformers, `--model=transformers:<name>`, for the 125 model types
-  compared with PyTorch
+  `--model=maxtext:<name>`: a model config under `--parallel=dp` or `fsdp`,
+  with MaxText's own loss and no code per model family, six models checked on
+  GPUs ([docs/adapters/maxtext.md](docs/adapters/maxtext.md)).
+- MaxDiffusion's FLUX.1 (dev and schnell) and Wan 2.1, MaxDiffusion's model
+  called whole, with a flow-matching loss on synthetic batches
+  ([docs/adapters/maxdiffusion.md](docs/adapters/maxdiffusion.md)).
+- Models of Hugging Face's PyTorch libraries, traced into JAX through torchax:
+  the decoder-only causal language models of transformers,
+  `--model=transformers:<name>`, for the 125 model types compared with PyTorch
   ([docs/adapters/transformers.md](docs/adapters/transformers.md)), and
   FLUX.1's denoiser of diffusers, `--model=diffusers:<name>`
   ([docs/adapters/diffusers.md](docs/adapters/diffusers.md)). PyTorch runs
