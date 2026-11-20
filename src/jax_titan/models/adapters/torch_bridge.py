@@ -79,11 +79,9 @@ class Bridged:
   `forward(arrays, **constants)` calls the module with a dict of JAX arrays as
   keyword arguments and returns its first output. A forward that draws random
   numbers is refused: under `jax.jit` it would draw the same ones every step.
-  Parameters that belong to a normalization module do not decay, and FSDP
+  The scales and biases of a normalization module do not decay, and FSDP
   shards a parameter along its first dimension that the data axis divides.
   """
-
-  num_stages = 1
 
   def __init__(self, module: torch.nn.Module, *, dtype, loss: Callable):
     self.module = module
@@ -93,8 +91,8 @@ class Bridged:
     self._env = torchax.default_env()
     self._buffers = self._env.t2j_copy(dict(self._jittable.buffers))
     self._no_decay = {
-        name for name in self._jittable.params
-        if is_norm(module.get_submodule(name.rpartition(".")[0]))
+        name for name, value in self._jittable.params.items()
+        if value.ndim <= 1 and is_norm(module.get_submodule(name.rpartition(".")[0]))
     }
 
   def init(self, seed: int = 0) -> tuple[dict]:

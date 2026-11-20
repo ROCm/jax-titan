@@ -831,12 +831,8 @@ def build(args, devices, make_optimizer) -> tuple[Layout, Workload]:
   provider, _, name = args.model.partition(":")
   native = args.model in MODELS
   ideogram = args.model == "ideogram4" or (provider == "maxdiffusion" and name == "ideogram4")
-  bridged = provider in ("transformers", "diffusers")
-  fsdp = native or ideogram or bridged or provider in ("maxtext", "maxdiffusion")
-  if args.stage_fsdp or args.tensor_parallel != 1 or (args.parallel == "fsdp" and not fsdp):
-    raise NotImplementedError(
-        f"{args.model} takes neither --stage_fsdp nor --tensor_parallel"
-        + ("" if fsdp else " nor --parallel=fsdp"))
+  if args.stage_fsdp or args.tensor_parallel != 1:
+    raise NotImplementedError(f"{args.model} takes neither --stage_fsdp nor --tensor_parallel")
   if args.parallel == "mpmd" and args.reduce_grads != "microbatch":
     raise NotImplementedError(f"{args.model} reduces gradients per microbatch only")
   if args.init_from and provider not in ("maxtext", "transformers") and not native:

@@ -17,13 +17,13 @@ import torch
 from jax_titan.models.adapters import torch_bridge
 
 PINNED_VERSION = "0.43.0"
-# Denoiser class -> the family of `jax_titan.data.diffusion` it trains on, and
-# the argument of its forward for each input of that family's batches.
+# Denoiser class -> the argument of its forward for each input of its family's
+# batches in `jax_titan.data.diffusion`.
 FAMILIES = {
-    "FluxTransformer2DModel": ("flux", {
+    "FluxTransformer2DModel": {
         "img": "hidden_states", "txt": "encoder_hidden_states", "pooled": "pooled_projections",
         "timestep": "timestep", "img_ids": "img_ids", "txt_ids": "txt_ids", "guidance": "guidance",
-    }),
+    },
 }
 
 
@@ -46,7 +46,7 @@ def denoiser(cfg: dict, *, seed: int, dtype, remat: bool = True) -> torch_bridge
   rematerializes each block through the library's own gradient-checkpointing
   switch. Position ids keep their dtype; every other input is cast to `dtype`.
   """
-  _, names = FAMILIES[cfg["_class_name"]]
+  names = FAMILIES[cfg["_class_name"]]
   torch.manual_seed(seed)
   module = getattr(diffusers, cfg["_class_name"]).from_config(cfg)
   module.train()

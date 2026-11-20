@@ -574,7 +574,8 @@ def main(argv=None):
   else:
     if args.init_from:
       raise NotImplementedError(
-          "--init_from loads parameters of maxtext: models, ideogram4 and command-a-plus")
+          "--init_from loads parameters of maxtext: and transformers: models, ideogram4 and "
+          "command-a-plus")
     cfg = llama.FLAVORS[args.model]
     build = _build_mpmd if args.parallel == "mpmd" else _build_spmd
     layout = build(args, cfg, devices, make_optimizer())

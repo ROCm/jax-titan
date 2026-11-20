@@ -70,9 +70,9 @@ maxdiffusion = [
 # through torchax (jax_titan.models.adapters.transformers and .diffusers).
 # PyTorch only runs on the host while a model is traced, so its CPU build is
 # enough: pip install --extra-index-url https://download.pytorch.org/whl/cpu.
-# torchax 0.0.13 does not import under torch 2.13.
-transformers = ["torch>=2.10,<2.13", "torchax==0.0.13", "transformers==5.23.0"]
-diffusers = ["torch>=2.10,<2.13", "torchax==0.0.13", "diffusers==0.43.0"]
+# The versions are those the adapters were compared with PyTorch under.
+transformers = ["torch==2.10.0", "torchax==0.0.13", "transformers==5.23.0"]
+diffusers = ["torch==2.10.0", "torchax==0.0.13", "diffusers==0.43.0"]
 # Ideogram 4 with published weights and real images: the text encoder's
 # tokenizer and image files (jax_titan.models.ideogram_generate).
 ideogram = ["pillow", "tokenizers"]
