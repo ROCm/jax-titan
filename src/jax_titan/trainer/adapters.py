@@ -2,7 +2,7 @@
 diffusers, for Ideogram 4 and for Command A+.
 
 A model of another repository trains as one stage, the repository's model
-called whole, with `--parallel=dp` or `fsdp` and `--num_stages=1`:
+called whole, with `--parallel=dp` or `fsdp`:
 `--model=maxtext:<name>` a MaxText model config (e.g. `maxtext:llama3.1-8b`
 or `maxtext:qwen3-8b`) on the token data, `--model=maxdiffusion:<flavor>`
 FLUX.1 (`flux-dev`, `flux-schnell`) or Wan 2.1 (`wan2.1-t2v-1.3b`) on
@@ -62,6 +62,14 @@ from jax_titan.trainer.layout import EVAL_STEPS, Layout, Workload, abstract, pla
 PROVIDERS = ("maxtext", "maxdiffusion", "transformers", "diffusers")
 # JAX-Titan's own models that train through these layouts.
 MODELS = ("ideogram4", "command-a-plus")
+
+
+def default_num_stages(model: str) -> int:
+  """`--num_stages` where it is not given: 2, and 1 for a model of another
+  repository, which is called whole."""
+  provider, _, name = model.partition(":")
+  whole = provider in PROVIDERS and (provider, name) != ("maxdiffusion", "ideogram4")
+  return 1 if whole else 2
 
 
 def _overrides(args) -> dict:
@@ -387,7 +395,7 @@ def _one_stage(args, ops: bool = False):
   for one whose operators `jax_titan.ops` cannot reach."""
   if args.parallel == "mpmd" or args.num_stages != 1:
     raise NotImplementedError(
-        f"{args.model} is one stage: --parallel=dp or --parallel=fsdp, with --num_stages=1")
+        f"{args.model} has no pipeline: --parallel=dp or --parallel=fsdp, without --num_stages")
   if args.ops and not ops:
     raise NotImplementedError(f"{args.model} runs its own operators: no --ops")
 

@@ -121,8 +121,8 @@ def _losses(tmp_path, model, overrides, *flags):
   result = subprocess.run(
       [sys.executable, "-m", "jax_titan.trainer.train", f"--model=maxdiffusion:{model}",
        "--model_overrides=" + json.dumps(overrides), "--resolution=64", "--frames=5",
-       "--text_tokens=8", "--num_stages=1", "--microbatches=1", "--microbatch_size=8",
-       "--steps=4", "--warmup_steps=1", f"--log_file={log}", *flags],
+       "--text_tokens=8", "--microbatches=1", "--microbatch_size=8", "--steps=4",
+       "--warmup_steps=1", f"--log_file={log}", *flags],
       # os.environ, not the process environment: see conftest's ROCPROFILER note.
       capture_output=True, text=True, check=False, cwd=REPO, env=dict(os.environ),
   )

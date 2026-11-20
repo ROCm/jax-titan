@@ -14,8 +14,8 @@ from jax_titan.observability import records
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 FLAGS = [
-    "--platform=cpu", "--parallel=dp", "--num_stages=1", "--microbatches=4",
-    "--microbatch_size=4", "--steps=4", "--warmup_steps=1", "--checkpoint_every=2",
+    "--platform=cpu", "--parallel=dp", "--microbatches=4", "--microbatch_size=4",
+    "--steps=4", "--warmup_steps=1", "--checkpoint_every=2",
 ]
 MAXTEXT_OVERRIDES = {
     "base_emb_dim": 64, "base_mlp_dim": 128, "base_num_query_heads": 4,
