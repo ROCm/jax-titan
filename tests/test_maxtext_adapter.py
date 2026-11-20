@@ -1,6 +1,5 @@
-"""MaxText Llama stages match MaxText, `jax_titan.models.llama` and `jax.jit`,
-and a MaxText model as one stage gives MaxText's loss and trains under FSDP as
-it does data-parallel."""
+"""A MaxText model as one stage gives MaxText's loss and gradients, and trains
+under FSDP as it does data-parallel; JAX-Titan's own Llama gives MaxText's."""
 
 import importlib.util
 import json
@@ -39,24 +38,6 @@ WHOLE = {
     "deepseek3-tiny": {"base_num_kv_heads": 4, "base_moe_mlp_dim": 96,
                        "load_balance_loss_weight": 0.01, "moe_use_megatron_seq_aux_loss": True},
 }
-
-
-@pytest.mark.parametrize("flags", [
-    [],
-    ["--stage_layers=3,1"],
-    ["--num_stages=4", "--microbatches=8", "--schedule=GPIPE"],
-    ["--model=llama3-8b"],
-], ids=lambda f: " ".join(f) or "llama3.1-8b")
-def test_maxtext_llama_parity(flags):
-  result = subprocess.run(
-      [sys.executable, str(REPO / "examples/maxtext_llama_parity.py"), "--platform=cpu", *flags],
-      capture_output=True, text=True, check=False,
-  )
-  assert result.returncode == 0, result.stdout[-2000:] + result.stderr[-4000:]
-  assert "match MaxText's Transformer" in result.stdout
-  assert "with attention through jax_titan.ops, they still match" in result.stdout
-  assert "jax_titan.models.llama matches the MaxText stages" in result.stdout
-  assert "matches the single-mesh reference" in result.stdout
 
 
 @pytest.mark.gpu
@@ -113,6 +94,37 @@ def test_whole_model_gives_maxtexts_loss_and_gradient(name):
     assert float(loss) > float(jax.jit(plain)(params, x, t)) + 1e-4
 
 
+@pytest.mark.gpu
+@pytest.mark.parametrize("name", ["llama3.1-8b", "llama3-8b"])
+def test_native_llama_gives_the_whole_models_loss_and_gradient(name):
+  """JAX-Titan's own Llama against MaxText's, from MaxText's weights: with Llama 3.1's
+  RoPE, which rotates adjacent pairs and scales its frequencies, and with Llama 3's."""
+  import jax  # pylint: disable=g-import-not-at-top
+  import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+  from jax_titan.models import llama  # pylint: disable=g-import-not-at-top
+  from jax_titan.models.adapters import maxtext as mt  # pylint: disable=g-import-not-at-top
+
+  cfg = mt.config(name, **SMALL)
+  model = mt.WholeModel(cfg, mt.mesh(cfg, jax.devices()[:1]))
+  (params,) = model.init(0)
+  (theirs,) = model.stage_fns()
+  llama_cfg = mt.llama_config(cfg)
+
+  def ours(params, tokens, targets):
+    return llama.stage_forward(
+        mt.llama_params(cfg, params), tokens, targets, cfg=llama_cfg, stage=0, num_stages=1,
+        remat=False, compute_dtype=jnp.float32)
+
+  tokens = np.random.default_rng(0).integers(0, cfg.vocab_size, (8, 33), dtype=np.int32)
+  x, t = tokens[:, :-1], tokens[:, 1:]
+  # Both gradients are with respect to MaxText's parameters: `ours` maps them inside.
+  loss, grads = jax.jit(jax.value_and_grad(ours))(params, x, t)
+  ref_loss, ref_grads = jax.jit(jax.value_and_grad(theirs))(params, x, t)
+  np.testing.assert_allclose(loss, ref_loss, rtol=1e-5)
+  jax.tree.map(lambda a, b: np.testing.assert_allclose(a, b, rtol=1e-3, atol=1e-6),
+               grads, ref_grads)
+
+
 def _losses(tmp_path, name, *flags):
   """The losses of 4 steps of `maxtext:<name>` at a small size on every GPU."""
   log = tmp_path / f"{name}-{'-'.join(flags)}.jsonl"
@@ -145,16 +157,8 @@ def test_trainer_starts_at_the_whole_models_loss(tmp_path):
   assert losses[-1] < losses[0]
 
 
-@pytest.mark.gpu
-def test_whole_llama_trains_as_its_stages_do(tmp_path):
-  # fsdp builds MaxText's Transformer whole, dp the one stage of the split model.
-  whole = _losses(tmp_path, "llama3.1-8b", "--parallel=fsdp")
-  staged = _losses(tmp_path, "llama3.1-8b", "--parallel=dp")
-  np.testing.assert_allclose(whole, staged, rtol=1e-4)
-
-
 @pytest.mark.gpu(2)
-@pytest.mark.parametrize("name", ["gemma3-4b", "qwen3-8b", "qwen3-30b-a3b"])
+@pytest.mark.parametrize("name", ["gemma3-4b", "llama3.1-8b", "qwen3-8b", "qwen3-30b-a3b"])
 def test_fsdp_trains_as_dp_does(name, tmp_path):
   fsdp = _losses(tmp_path, name, "--parallel=fsdp")
   dp = _losses(tmp_path, name, "--parallel=dp")

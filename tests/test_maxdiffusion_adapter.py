@@ -1,5 +1,4 @@
-"""MaxDiffusion FLUX.1 stages match MaxDiffusion and single-mesh `jax.jit`; FLUX.1 and
-Wan 2.1 called whole match the stages and MaxDiffusion's own module."""
+"""MaxDiffusion's FLUX.1 and Wan 2.1 as one stage, against MaxDiffusion's own modules."""
 
 import importlib.util
 import json
@@ -30,23 +29,6 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest.mark.parametrize("flags", [
-    [],
-    ["--blocks=3,1"],
-    ["--num_stages=4", "--microbatches=8", "--schedule=GPIPE"],
-    ["--flavor=flux-schnell"],
-], ids=lambda f: " ".join(f) or "flux-dev")
-def test_maxdiffusion_flux_parity(flags):
-  result = subprocess.run(
-      [sys.executable, str(REPO / "examples/maxdiffusion_flux_parity.py"), "--platform=cpu",
-       *flags],
-      capture_output=True, text=True, check=False,
-  )
-  assert result.returncode == 0, result.stdout[-2000:] + result.stderr[-4000:]
-  assert "match the transformer" in result.stdout
-  assert "matches the single-mesh reference" in result.stdout
-
-
 def test_flux_kernels_decay():
   """FLUX.1 keeps the Dense of its single blocks' adaptive norm under a module named `norm`."""
   import jax  # pylint: disable=g-import-not-at-top
@@ -58,8 +40,8 @@ def test_flux_kernels_decay():
       "flux-dev", in_channels=16, num_layers=2, num_single_layers=2, attention_head_dim=16,
       num_attention_heads=2, joint_attention_dim=32, pooled_projection_dim=16,
       axes_dims_rope=(4, 6, 6), dtype=jnp.float32, weights_dtype=jnp.float32)
-  stage = md.Model(flux, num_stages=1).abstract()
-  mask = train._decay_mask(stage)  # pylint: disable=protected-access
+  mesh = jax.sharding.Mesh(np.asarray(jax.devices()[:1]).reshape(1, 1), ("data", "tensor"))
+  mask = train._decay_mask(md.whole_flux(flux, mesh).abstract())  # pylint: disable=protected-access
   paths = {tuple(getattr(k, "key", None) for k in path): decays
            for path, decays in jax.tree_util.tree_flatten_with_path(mask)[0]}
   assert any(path[-3:-1] == ("norm", "lin") for path in paths)
@@ -67,7 +49,7 @@ def test_flux_kernels_decay():
 
 
 @pytest.mark.gpu
-def test_whole_flux_gives_the_stages_loss_and_gradient():
+def test_whole_flux_gives_fluxs_output():
   import jax  # pylint: disable=g-import-not-at-top
   import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
   from jax_titan import parallel  # pylint: disable=g-import-not-at-top
@@ -76,21 +58,28 @@ def test_whole_flux_gives_the_stages_loss_and_gradient():
 
   flux = md.transformer(
       "flux-dev", **{**SMALL_FLUX, "dtype": jnp.float32}, weights_dtype=jnp.float32)
-  # `FluxTransformer2DModel.__call__` against the one stage that reimplements it.
   mesh = jax.sharding.Mesh(np.asarray(jax.devices()[:1]).reshape(1, 1), ("data", "tensor"))
-  whole, stages = md.whole_flux(flux, mesh), md.Model(flux, num_stages=1)
+  whole = md.whole_flux(flux, mesh)
   (params,) = whole.init(0)
-  jax.tree.map(np.testing.assert_array_equal, params, stages.init(0)[0])
   batches = diffusion.flux(
       0, (1, 2), image_side=4, text_tokens=8, in_channels=16, joint_attention_dim=32,
       pooled_projection_dim=16, guidance_embeds=True)
   x, target = batches.next_batch(0)
   x, target = {k: v[0] for k, v in x.items()}, target[0]
-  loss, grads = jax.jit(jax.value_and_grad(whole.stage_fns()[0]))(params, x, target)
-  ref_loss, ref_grads = jax.jit(jax.value_and_grad(stages.stage_fns()[0]))(params, x, target)
-  np.testing.assert_allclose(loss, ref_loss, rtol=1e-5)
-  jax.tree.map(lambda a, b: np.testing.assert_allclose(a, b, rtol=1e-3, atol=1e-6),
-               grads, ref_grads)
+  loss = jax.jit(whole.stage_fns()[0])(params, x, target)
+
+  def direct(params, x):
+    """MaxDiffusion's own module, called directly."""
+    return flux.apply(
+        {"params": params}, hidden_states=x["img"], encoder_hidden_states=x["txt"],
+        pooled_projections=x["pooled"], timestep=x["timestep"], img_ids=x["img_ids"],
+        txt_ids=x["txt_ids"], guidance=x["guidance"]).sample
+
+  # Compiled, as the step is: MaxDiffusion computes FLUX.1's timestep embedding in bf16
+  # whatever the model's dtype, and bf16 rounds its angles of up to 1,000 one way in a
+  # compiled program and another way in eager execution.
+  pred = jax.jit(direct)(params, x)
+  np.testing.assert_allclose(loss, jnp.mean((target - pred) ** 2), rtol=1e-5)
   # FSDP shards every parameter, and a stack of blocks never along its block axis.
   specs = parallel.tree_specs(params, whole.logical_axes, {"data": 2}, fsdp=True)
   for path, spec in jax.tree_util.tree_flatten_with_path(specs)[0]:
@@ -145,7 +134,6 @@ def _losses(tmp_path, model, overrides, *flags):
 @pytest.mark.parametrize("model, overrides", [
     ("flux-dev", SMALL_FLUX), ("wan2.1-t2v-1.3b", SMALL_WAN)], ids=["flux-dev", "wan2.1"])
 def test_fsdp_trains_as_dp_does(model, overrides, tmp_path):
-  # For FLUX.1, fsdp calls the transformer whole and dp runs its one stage.
   np.testing.assert_allclose(
       _losses(tmp_path, model, overrides, "--parallel=fsdp"),
       _losses(tmp_path, model, overrides, "--parallel=dp"), rtol=1e-4)
