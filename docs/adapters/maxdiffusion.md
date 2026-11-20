@@ -4,9 +4,9 @@
 commit `821afc36`, with JAX-Titan's trainer. The network is MaxDiffusion's and
 runs as MaxDiffusion wrote it; the training is JAX-Titan's. `WholeModel`
 (`models/adapters/maxdiffusion.py`) calls a denoiser whole, MaxDiffusion's own
-`__call__`, as one stage under `--parallel=dp` or `fsdp`, with a few lines per
-family. This version has two: FLUX.1 (`flux-dev`, `flux-schnell`) and Wan 2.1
-text to video (`wan2.1-t2v-1.3b`).
+`__call__`, under `--parallel=dp` or `fsdp`, with a few lines per family. This
+version has two: FLUX.1 (`flux-dev`, `flux-schnell`) and Wan 2.1 text to video
+(`wan2.1-t2v-1.3b`).
 
 A denoiser alone is not a training objective. MaxDiffusion keeps the noising,
 the timestep and the target in its trainers, not in the model, so the
@@ -40,14 +40,14 @@ Install MaxDiffusion at the pinned commit with JAX-Titan's patches, and the
 whole, on every GPU of the node:
 
 ```bash
-python -m jax_titan.trainer.train --model=maxdiffusion:flux-dev --parallel=fsdp --num_stages=1 \
+python -m jax_titan.trainer.train --model=maxdiffusion:flux-dev --parallel=fsdp \
   --microbatches=1 --microbatch_size=8 --resolution=512 --steps=30 --lr=1e-5
 ```
 
 Wan 2.1 1.3B on clips of 17 frames of 480 x 480 pixels:
 
 ```bash
-python -m jax_titan.trainer.train --model=maxdiffusion:wan2.1-t2v-1.3b --parallel=fsdp --num_stages=1 \
+python -m jax_titan.trainer.train --model=maxdiffusion:wan2.1-t2v-1.3b --parallel=fsdp \
   --microbatches=1 --microbatch_size=8 --resolution=480 --frames=17 --steps=30 --lr=1e-5
 ```
 
@@ -59,8 +59,8 @@ arguments as JSON.
 
 ## What is supported
 
-- FLUX.1-dev and FLUX.1-schnell as one stage under `dp` and `fsdp`.
-- Wan 2.1 text to video, 1.3B, as one stage under `dp` and `fsdp`.
+- FLUX.1-dev and FLUX.1-schnell under `dp` and `fsdp`.
+- Wan 2.1 text to video, 1.3B, under `dp` and `fsdp`.
 - Random weights on synthetic batches, rematerialization and checkpoints.
 
 ## What is not supported
@@ -72,8 +72,8 @@ arguments as JSON.
   FLUX.1 class also defaults to a RoPE base of 1,000, where the published
   FLUX.1 uses 10,000.
 - **Real images and videos**, the text encoders and the VAEs, and sampling.
-- **Pipelines**: `--parallel=mpmd`, more than one stage. A model of another
-  repository is called whole; a pipeline needs a model written for JAX-Titan.
+- **Pipelines** (`--parallel=mpmd`). A model of another repository is called
+  whole; a pipeline needs a model written for JAX-Titan.
 - **`--ops` for Wan 2.1.**
 - **MFU for Wan**: it has no FLOP count here.
 - **A FLUX.1 timestep embedding in full precision.** MaxDiffusion computes

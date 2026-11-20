@@ -176,12 +176,11 @@ XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" python -m jax_titan.trainer.train \
   --model=llama3.1-8b --parallel=dp \
   --microbatches=8 --microbatch_size=4 --seq_len=2048 --steps=100
 
-# MaxText's Llama 3.1 8B (the maxtext extra) on the same data, as one stage:
-# MaxText's Transformer called whole, on all 8 GPUs with replicated (dp) or
-# sharded (fsdp) state. A model of another repository has no pipeline
-# (docs/adapters).
+# MaxText's Llama 3.1 8B (the maxtext extra) on the same data: MaxText's
+# Transformer called whole, on all 8 GPUs with replicated (dp) or sharded
+# (fsdp) state. A model of another repository has no pipeline (docs/adapters).
 XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" python -m jax_titan.trainer.train \
-  --model=maxtext:llama3.1-8b --parallel=fsdp --num_stages=1 \
+  --model=maxtext:llama3.1-8b --parallel=fsdp \
   --microbatches=1 --microbatch_size=32 --seq_len=2048 --steps=100
 
 # From pretrained weights: convert Hugging Face's Llama 3.1 8B once with
@@ -192,7 +191,7 @@ HF_AUTH_TOKEN=$HF_TOKEN python -m maxtext.checkpoint_conversion.to_maxtext \
   base_output_directory=${JAX_TITAN_ROOT}/checkpoints/llama3.1-8b-hf hardware=cpu \
   skip_jax_distributed_system=True scan_layers=True --lazy_load_tensors=True
 XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" python -m jax_titan.trainer.train \
-  --model=maxtext:llama3.1-8b --parallel=fsdp --num_stages=1 \
+  --model=maxtext:llama3.1-8b --parallel=fsdp \
   --microbatches=1 --microbatch_size=32 --seq_len=2048 \
   --init_from=${JAX_TITAN_ROOT}/checkpoints/llama3.1-8b-hf/0/items --steps=100
 
@@ -206,7 +205,7 @@ XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" python -m jax_titan.trainer.train \
 # the model's own (see the data preparation below); the defaults of --data and
 # --eval_data hold Llama 3's token ids.
 XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" python -m jax_titan.trainer.train \
-  --model=maxtext:qwen3-8b --parallel=fsdp --num_stages=1 \
+  --model=maxtext:qwen3-8b --parallel=fsdp \
   --microbatches=1 --microbatch_size=32 --seq_len=2048 --steps=100 \
   --data=${JAX_TITAN_ROOT}/data/wikitext103_train.qwen3.bin \
   --eval_data=${JAX_TITAN_ROOT}/data/wikitext103_validation.qwen3.bin
@@ -222,10 +221,10 @@ XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" python -m jax_titan.trainer.train \
 python -m jax_titan.observability.summarize --gate0 runs/dp runs/pp2 \
   --gate0_steps 10 --gate0_rtol 2e-3
 
-# MaxDiffusion's FLUX.1-dev (12B) as one stage on synthetic 512x512 batches:
-# noised random latents and text embeddings, with the flow-matching loss.
+# MaxDiffusion's FLUX.1-dev (12B) on synthetic 512x512 batches: noised random
+# latents and text embeddings, with the flow-matching loss.
 XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" python -m jax_titan.trainer.train \
-  --model=maxdiffusion:flux-dev --parallel=fsdp --num_stages=1 \
+  --model=maxdiffusion:flux-dev --parallel=fsdp \
   --microbatches=1 --microbatch_size=8 --resolution=512 --steps=30 --lr=1e-5
 
 # JAX-Titan's own Ideogram 4 (9.3B) on synthetic 1024x1024 batches, with FSDP

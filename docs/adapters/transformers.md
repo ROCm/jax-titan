@@ -1,7 +1,7 @@
 # transformers adapter
 
 `--model=transformers:<name>` trains a decoder-only causal language model of
-Hugging Face transformers 5.23.0 with JAX-Titan's trainer, as one stage under
+Hugging Face transformers 5.23.0 with JAX-Titan's trainer, under
 `--parallel=dp` or `fsdp`. The network is transformers' and is written in
 PyTorch. It does not run as PyTorch: torchax 0.0.13 executes the model's
 `forward` on JAX arrays while JAX traces it, which gives a JAX function that
@@ -46,7 +46,7 @@ a downloaded Qwen3-8B and token files of its own tokenizer
 
 ```bash
 python -m jax_titan.trainer.train --model=transformers:$MODELS/qwen3-8b \
-  --parallel=fsdp --num_stages=1 --microbatches=1 --microbatch_size=32 --seq_len=2048 \
+  --parallel=fsdp --microbatches=1 --microbatch_size=32 --seq_len=2048 \
   --data=$DATA/wikitext103_train.qwen3.bin --eval_data=$DATA/wikitext103_validation.qwen3.bin
 ```
 
@@ -55,7 +55,7 @@ From the published weights in that directory, add `--init_from=$MODELS/qwen3-8b`
 dtype:
 
 ```bash
-python -m jax_titan.trainer.train --model=transformers:llama --parallel=dp --num_stages=1 \
+python -m jax_titan.trainer.train --model=transformers:llama --parallel=dp \
   --model_overrides='{"vocab_size": 1024, "hidden_size": 128, "intermediate_size": 256,
     "num_hidden_layers": 4, "num_attention_heads": 4, "num_key_value_heads": 2}' \
   --microbatches=1 --microbatch_size=8 --seq_len=64 --data=synthetic
@@ -89,7 +89,7 @@ python -m jax_titan.trainer.train --model=transformers:llama --parallel=dp --num
 
 - **Multimodal and encoder-decoder models**, and the 46 other model types
   that `AutoModelForCausalLM` maps.
-- **Pipelines**: `--parallel=mpmd`, more than one stage.
+- **Pipelines** (`--parallel=mpmd`).
 - **`jax_titan.ops`**: no `--ops`, so no MX quantization and no provider
   kernels. The model's operators are what torchax lowers them to.
 - **Dropout.** Every dropout probability of the config is set to zero, and a
@@ -119,7 +119,7 @@ each of the 143 model types it built a small model the adapter's way, from the
 configuration of the family's own model tester in transformers' test suite,
 or from the default config with its sizes shrunk. PyTorch computed the mean
 cross-entropy of the logits and its gradients on a copy of the module. The
-adapter's stage function, with rematerialization, was traced twice under
+adapter's loss function, with rematerialization, was traced twice under
 `jax.jit(jax.value_and_grad)`, as the trainer traces it for its train step and
 its validation step. A model type passed when both traces gave PyTorch's loss
 within 1e-5 and every parameter's gradient within 1e-3: 126 passed, 2 gave

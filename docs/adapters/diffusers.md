@@ -1,8 +1,8 @@
 # diffusers adapter
 
 `--model=diffusers:<name>` trains a denoiser of Hugging Face diffusers 0.43.0
-with JAX-Titan's trainer, as one stage under `--parallel=dp` or `fsdp`. The
-network is diffusers' and is written in PyTorch. It does not run as PyTorch:
+with JAX-Titan's trainer, under `--parallel=dp` or `fsdp`. The network is
+diffusers' and is written in PyTorch. It does not run as PyTorch:
 torchax 0.0.13 executes the denoiser's `forward` on JAX arrays while JAX
 traces it ([transformers.md](transformers.md) says what that means for
 correctness). The adapter takes the denoiser classes it compared with
@@ -44,7 +44,7 @@ are FLUX.1's sizes; FLUX.1-dev also embeds the guidance scale:
 
 ```bash
 python -m jax_titan.trainer.train --model=diffusers:FluxTransformer2DModel \
-  --model_overrides='{"guidance_embeds": true}' --parallel=fsdp --num_stages=1 \
+  --model_overrides='{"guidance_embeds": true}' --parallel=fsdp \
   --microbatches=1 --microbatch_size=8 --resolution=512 --steps=30 --lr=1e-5
 ```
 
