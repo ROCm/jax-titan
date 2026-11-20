@@ -6,9 +6,7 @@ runs as MaxDiffusion wrote it; the training is JAX-Titan's. `WholeModel`
 (`models/adapters/maxdiffusion.py`) calls a denoiser whole, MaxDiffusion's own
 `__call__`, as one stage under `--parallel=dp` or `fsdp`, with a few lines per
 family. This version has two: FLUX.1 (`flux-dev`, `flux-schnell`) and Wan 2.1
-text to video (`wan2.1-t2v-1.3b`). FLUX.1 can also be cut into pipeline stages
-([pipelines.md](../pipelines.md)); it keeps those stages under
-`--parallel=mpmd` and `dp`, and runs whole under `fsdp`.
+text to video (`wan2.1-t2v-1.3b`).
 
 A denoiser alone is not a training objective. MaxDiffusion keeps the noising,
 the timestep and the target in its trainers, not in the model, so the
@@ -38,7 +36,6 @@ and predicts `noise - latents`.
 | Gradient, clipping, optimizer, schedule | | The train step |
 | Layouts (`dp`, `fsdp`) | Its constraints on activations | The mesh; a parameter is sharded along its first dimension that the data axis divides, never along the block axis of a stack |
 | Checkpoints, logs, metrics | | JAX-Titan's; a FLOP count for FLUX.1 only |
-| Pipeline stages (FLUX.1) | The blocks inside a stage | The cut into stages and the MPMD schedule |
 
 MaxDiffusion's own trainers take no part.
 
@@ -67,8 +64,7 @@ for `flux-schnell`.
 
 ## What is supported
 
-- FLUX.1-dev and FLUX.1-schnell as one stage under `dp` and `fsdp`, and as a
-  pipeline, as before.
+- FLUX.1-dev and FLUX.1-schnell as one stage under `dp` and `fsdp`.
 - Wan 2.1 text to video, 1.3B, as one stage under `dp` and `fsdp`.
 - Random weights on synthetic batches, rematerialization and checkpoints.
 
@@ -81,8 +77,16 @@ for `flux-schnell`.
   FLUX.1 class also defaults to a RoPE base of 1,000, where the published
   FLUX.1 uses 10,000.
 - **Real images and videos**, the text encoders and the VAEs, and sampling.
-- **Wan 2.1 as a pipeline**, and `--ops` for Wan.
+- **Pipelines**: `--parallel=mpmd`, more than one stage. A model of another
+  repository is called whole; a pipeline needs a model written for JAX-Titan.
+- **`--ops` for Wan 2.1.**
 - **MFU for Wan**: it has no FLOP count here.
+- **A FLUX.1 timestep embedding in full precision.** MaxDiffusion computes
+  FLUX.1's timestep and guidance embeddings in bf16 whatever the model's
+  dtype. Their angles of up to 1,000 lose their low bits there, so the
+  embedding comes out differently in eager and in compiled execution, and on
+  CPU and GPU, by as much as a sinusoid's whole range. A compiled step is
+  consistent with itself, which is what the tests compare.
 - **Wan's objective against MaxDiffusion's trainer.** MaxDiffusion's trainers
   do not import in JAX-Titan's environment, so the objective was taken from
   their source and not compared in a run.
@@ -93,24 +97,23 @@ for `flux-schnell`.
 
 `tests/test_maxdiffusion_adapter.py`, on GPUs, at a small size in fp32:
 
-- **FLUX.1 called whole gives the loss and gradients of its one stage**, which
-  reimplements the call, within 1e-5 and 1e-3, from the same parameters.
+- **FLUX.1 through the adapter gives the output of MaxDiffusion's
+  `FluxTransformer2DModel`** called directly.
 - **FSDP shards every parameter of FLUX.1**, and no stack of blocks along its
   block axis.
 - **Wan 2.1 through the adapter gives the output of MaxDiffusion's `WanModel`**
   built and called directly.
 - **FSDP trains as data parallelism does**, on 2 GPUs, for FLUX.1 and Wan 2.1.
 
-The pipeline stages of FLUX.1 have their own tests, on CPU
-(`test_maxdiffusion_flux_parity`).
+`tests/test_adapter_training.py`, on CPU: a small FLUX.1 trains through the
+trainer and resumes exactly.
 
 ### Runs (2026-11-19 to 20, 8x MI350X)
 
 From random weights on synthetic batches, one sample per GPU, in bf16 with
 fp32 parameters: 30 steps with `--lr=1e-5` and rematerialization. FLUX.1-dev
 (11.90B parameters) on 512 x 512 images, 1,024 image tokens and 512 text
-tokens a sample: its one stage under `dp`, the transformer called whole under
-`fsdp`. Wan 2.1 1.3B (1.42B parameters) on clips of 17 frames of 480 x 480
+tokens a sample. Wan 2.1 1.3B (1.42B parameters) on clips of 17 frames of 480 x 480
 pixels, 4,500 video tokens and 512 text tokens a sample. One run each;
 tokens/s per GPU is the median over steps 5-29. These are single runs of 30
 steps on random data, enough to see that a model runs, fits and that its loss
@@ -118,7 +121,7 @@ falls, not a measurement of throughput.
 
 | Model | Layout | GPUs | Tokens per step | Tokens/s per GPU | Peak HBM per GPU | Loss, step 0 | Steps 25-29 |
 |---|---|---|---|---|---|---|---|
-| `flux-dev` | dp | 1 | 1,536 | 4,472 | 179 GiB | 3.52 | 3.35 |
+| `flux-dev` | dp | 1 | 1,536 | 4,445 | 179 GiB | 3.52 | 3.34 |
 | `flux-dev` | fsdp | 8 | 12,288 | 3,366 | 24 GiB | 3.54 | 2.84 |
 | `wan2.1-t2v-1.3b` | dp | 1 | 5,012 | 23,468 | 23 GiB | 4.17 | 2.24 |
 | `wan2.1-t2v-1.3b` | fsdp | 8 | 40,096 | 19,707 | 5 GiB | 4.21 | 2.11 |

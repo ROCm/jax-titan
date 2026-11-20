@@ -33,15 +33,10 @@ This is the target design; [What works](#what-works) lists what runs today.
 - MaxText models, built from MaxText 0.2.5's own layers and trained with
   `--model=maxtext:<name>`: a model config as one stage (`--parallel=dp` or
   `fsdp`) with MaxText's own loss and no code per model family, six models
-  checked on GPUs ([docs/adapters/maxtext.md](docs/adapters/maxtext.md)),
-  and Llama 2 and 3 also as pipeline stages, which match MaxText's model and,
-  with the weights mapped, JAX-Titan's Llama.
-- MaxDiffusion's FLUX.1 (dev and schnell) as pipeline stages of its
-  double- and single-stream blocks, with its flow-matching loss, matching
-  MaxDiffusion's transformer; `--model=maxdiffusion:flux-dev` trains it on
-  synthetic batches. FLUX.1 and Wan 2.1 also train as one stage,
-  MaxDiffusion's model called whole
-  ([docs/adapters/maxdiffusion.md](docs/adapters/maxdiffusion.md)).
+  checked on GPUs ([docs/adapters/maxtext.md](docs/adapters/maxtext.md)).
+- MaxDiffusion's FLUX.1 (dev and schnell) and Wan 2.1 as one stage,
+  MaxDiffusion's model called whole, with a flow-matching loss on synthetic
+  batches ([docs/adapters/maxdiffusion.md](docs/adapters/maxdiffusion.md)).
 - Models of Hugging Face's PyTorch libraries, traced into JAX through torchax
   and trained as one stage: the decoder-only causal language models of
   transformers, `--model=transformers:<name>`, for the 125 model types
@@ -119,19 +114,11 @@ pipeline, the same step as one `jax.jit` program takes 0.83 s with data
 parallelism and 0.80 s with FSDP, so on one node the pipeline is still 1.7x
 and 1.8x slower. [docs/pipelines.md](docs/pipelines.md) has every schedule and
 layout measured, and the reasons for the gap. With TE's fused attention
-(`--ops=attention=te`) the pipeline step takes 1.26 s (12.1% MFU). MaxText's
-Llama 3.1 8B runs the same pipeline at 2.03 s per step, with gradients reduced
-per microbatch, and FLUX.1-dev (12B) trains at 4.4 images/s at 1024x1024 on 4
-stages of 2 GPUs, 5.6 images/s with TE attention. These numbers clip each
-stage's gradients by its own norm; clipping by one norm over all stages, as
-now, costs 3-4% (1.50 s, 1.31 s with TE attention, and 2.10 s for MaxText's
-layers, 1.87 s with TE attention). MaxText's own trainer runs its pipeline at
-1.76 s per step and FSDP at 0.72 s; see
-[docs/pipelines.md](docs/pipelines.md#global-gradient-clipping-maxtext-attention-and-gate-0-2026-11-07-8x-mi355x).
-[docs/recipes/maxtext-llama3.1-8b.md](docs/recipes/maxtext-llama3.1-8b.md) is
-the recipe for MaxText's Llama 3.1 8B with TE attention: 1,000 steps with
-validation, checkpoints and a rehearsed restart, with its expected step time,
-loss curve, startup and checkpoint costs, energy and ETTR.
+(`--ops=attention=te`) the pipeline step takes 1.26 s (12.1% MFU). These
+numbers clip each stage's gradients by its own norm; clipping by one norm over
+all stages, as now, costs 3-4% (1.50 s, 1.31 s with TE attention). MaxText's
+own trainer runs its pipeline at 1.76 s per step and FSDP at 0.72 s; see
+[docs/pipelines.md](docs/pipelines.md#global-gradient-clipping-and-maxtexts-own-trainer-2026-11-07-8x-mi355x).
 
 ```python
 from jax_titan import mpmd as jt_mpmd
@@ -160,7 +147,7 @@ XLA needs no patch: ROCm support in the IFRT IR atom-program passes landed as
 [openxla/xla#52290](https://github.com/openxla/xla/pull/52290) (`dfca2c9`), so
 build against XLA `main` at or after that commit.
 
-The optional MaxDiffusion FLUX.1 stages need two MaxDiffusion patches, kept
+The optional MaxDiffusion models need two MaxDiffusion patches, kept
 there too: one imports PyTorch only to load PyTorch weights, and one fixes
 FLUX.1-dev's timestep embedding at the pinned commit.
 

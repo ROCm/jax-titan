@@ -61,14 +61,15 @@ XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" timeout -s KILL 1800 python -m jax_titan.t
   --model=llama3.1-8b --num_stages=2 --microbatches=8 --microbatch_size=4 \
   --seq_len=2048 --steps=30 --run_dir=$RUN > $RUN.out 2>&1
 
-# The same step without a pipeline: --parallel=dp or --parallel=fsdp
-# (MaxDiffusion's FLUX.1: --parallel=dp only).
+# The same step without a pipeline: --parallel=dp or --parallel=fsdp.
 
-# Models from MaxText and MaxDiffusion (FLUX.1 trains on synthetic batches).
-... --model=maxtext:llama3.1-8b --num_stages=2 ...
-... --model=maxdiffusion:flux-dev --num_stages=4 --steps=20 --lr=1e-5 ...
+# A model of another repository trains as one stage, the repository's model
+# called whole (docs/adapters/): --parallel=dp or fsdp with --num_stages=1,
+# never a pipeline. MaxDiffusion's FLUX.1 on synthetic batches:
+... --model=maxdiffusion:flux-dev --parallel=fsdp --num_stages=1 --microbatches=1 \
+  --microbatch_size=8 --resolution=512 --lr=1e-5 ...
 
-# Any other MaxText model, as one stage on its own token file
+# A MaxText model on its own token file
 # (python -m jax_titan.data.text --tokenizer=DIR --name=qwen3).
 ... --model=maxtext:qwen3-8b --parallel=fsdp --num_stages=1 --microbatches=1 \
   --microbatch_size=32 --data=$JAX_TITAN_ROOT/data/wikitext103_train.qwen3.bin ...
@@ -113,16 +114,15 @@ Layout flags: `--schedule`, `--stage_fsdp`, `--tensor_parallel`,
 `docs/pipelines.md`. Operators: `--ops=attention=te` (TE fused attention) or
 `--ops=attention=aiter`; TE's FP8 GEMMs and every JAX-AITER op need
 `--per_device=shard_map` with per-step reduction, and the `ops:` lines after
-`compiled in` show what each op ran on. `maxtext:` and `maxdiffusion:` models,
-`ideogram4` and `command-a-plus` support only data parallelism inside stages
-with gradients reduced per microbatch (the default for them);
-`--stage_layers` counts their decoder layers or blocks, and
-`--model_overrides` takes JSON config overrides. `command-a-plus` is one
-stage, or more with `"freeze": ["embed"]` among its overrides. Of the
-`maxtext:` models only Llama 2 and 3 have pipeline stages; every other one,
-and Llama under `fsdp`, trains as one stage (`--parallel=dp` or `fsdp` with
-`--num_stages=1`), on token files of its own tokenizer (`--data` and
-`--eval_data` default to Llama 3's).
+`compiled in` show what each op ran on. `ideogram4`, `maxdiffusion:ideogram4`
+and `command-a-plus` support only data parallelism inside stages with
+gradients reduced per microbatch (the default for them); `--stage_layers`
+counts their layers or blocks, and `--model_overrides` takes JSON config
+overrides. `command-a-plus` is one stage, or more with `"freeze": ["embed"]`
+among its overrides. A `maxtext:`, `maxdiffusion:`, `transformers:` or
+`diffusers:` model has no pipeline stages: it trains as one stage
+(`--parallel=dp` or `fsdp` with `--num_stages=1`), a language model on token
+files of its own tokenizer (`--data` and `--eval_data` default to Llama 3's).
 
 ## Monitor
 
@@ -140,9 +140,7 @@ and Llama under `fsdp`, trains as one stage (`--parallel=dp` or `fsdp` with
     who holds the GPUs with `scripts/preflight_dev.sh`, and rerun on an idle
     node.
   - `RESOURCE_EXHAUSTED` in a fragment such as `p33_stage1_fwd_call15`: use
-    fewer microbatches, `--stage_fsdp`, or `--tensor_parallel`. FLUX.1-dev
-    needs 4 stages: on 2, the first stage's 7.9B parameters with fp32 AdamW
-    state reach 272 GiB per GPU.
+    fewer microbatches, `--stage_fsdp`, or `--tensor_parallel`.
   - `Input signature does not match the signature of the compiled function`
     at step 1: see `jax_titan_debug`.
   - A non-finite loss or gradient norm: the step made no update, nothing is

@@ -4,9 +4,7 @@
 trainer. The network is MaxText's and runs as MaxText wrote it; the training is
 JAX-Titan's. A model family needs no code in JAX-Titan: `WholeModel`
 (`models/adapters/maxtext.py`) calls MaxText's `Transformer` whole, as one
-stage, under `--parallel=dp` or `fsdp`. MaxText's Llama 2 and 3 can also be cut
-into pipeline stages ([pipelines.md](../pipelines.md)); they keep those stages
-under `--parallel=mpmd` and `dp`, and run whole under `fsdp`.
+stage, under `--parallel=dp` or `fsdp`.
 
 ## What comes from MaxText and what from JAX-Titan
 
@@ -28,7 +26,6 @@ under `--parallel=mpmd` and `dp`, and run whole under `fsdp`.
 | Checkpoints and resuming | | JAX-Titan's (Orbax) |
 | Validation, logs, metrics | The FLOP count of a step | Everything else |
 | What MaxText's training holds beyond this step | In its own trainer | Not implemented: such a config is refused |
-| Pipeline stages (Llama 2 and 3) | The layers inside a stage | The cut into stages and the MPMD schedule |
 
 MaxText's own trainer takes no part: not its training loop, its `loss_fn`, its
 optimizer, its input pipeline or its checkpointing.
@@ -65,10 +62,12 @@ the output of MaxText's own converter
 - Random weights, or a MaxText parameter checkpoint with `--init_from`.
 - Checkpoints and resuming, validation, and `--ops=attention=...` for a
   model's global causal attention.
-- Llama 2 and 3 as a pipeline, as before.
 
 ## What is not supported
 
+- **Pipelines**: `--parallel=mpmd`, more than one stage. A model of another
+  repository is called whole; a pipeline needs a model written for JAX-Titan,
+  as `--model=llama3.1-8b` is.
 - **Configs under which MaxText's training holds more than this step are
   refused**: multi-token prediction, the z-loss, the indexer loss of DeepSeek
   V3.2 and V4, vocabulary tiling, updates of the routing bias, QK-clip,
@@ -84,8 +83,6 @@ the output of MaxText's own converter
   none of these six configs weights it.
 - **The dense expert matmul computes every expert.** It was measured against
   the other forms for Qwen3-30B-A3B's 8 of 128 experts only.
-- **A Llama checkpoint saved under `dp`** holds the split model and does not
-  resume under `fsdp`, which holds the whole one, nor the reverse.
 - **Attention through `jax_titan.ops`** was checked at a small size with the
   native provider, in the tests; no run here used TE or JAX-AITER.
 - **Checkpoints**: one resume was checked. Qwen3-0.6B from its published
@@ -106,17 +103,21 @@ the output of MaxText's own converter
   and two mixtures of experts, Qwen3-30B-A3B's and DeepSeek's with its summed
   load-balance loss), the loss within 1e-5 and the gradients within 1e-3.
 - **The trainer starts at the model's loss.**
-- **MaxText's `Transformer` called whole trains as its Llama stages do.**
-- **FSDP trains as data parallelism does**, on 2 GPUs, for three models.
+- **FSDP trains as data parallelism does**, on 2 GPUs, for four models.
+- **JAX-Titan's own Llama gives the adapter's loss and gradients** from the
+  same weights, with Llama 3.1's RoPE and with Llama 3's
+  ([below](#jax-titans-own-llama-against-the-adapter)).
 
-The pipeline stages of Llama have their own tests, on CPU
-(`test_maxtext_llama_parity`).
+`tests/test_adapter_training.py`, on CPU: a small model trains through the
+trainer, resumes exactly, and starts from a MaxText parameter checkpoint.
 
 ### Runs (2026-11-19, 8x MI350X)
 
 These runs take the six models above. They ran on MI350X in bf16 with fp32
 parameters and AdamW state, unless a row says fp32, on WikiText-103 in each
-model's own tokens.
+model's own tokens. Llama 3.1 8B's `dp` runs were made again on 2026-11-20:
+until then `dp` ran Llama as the one stage of a pipeline the adapter no
+longer has.
 
 Published weights: each model's weights from the Hugging Face Hub, converted
 with MaxText's own converter (`maxtext.checkpoint_conversion.to_maxtext`, and
@@ -156,33 +157,32 @@ JAX-Titan's holds fp32 weights and computes in bf16.
 
 FSDP against data parallelism: random weights of `--seed=0`, the same 8
 sequences per step, 10 steps, `--parallel=fsdp` on 2, 4 and 8 GPUs against
-`--parallel=dp` on one GPU. Under `dp` Llama is the split model's one stage,
-so its rows also set MaxText's `Transformer` called whole against the stages.
-The largest relative difference of the loss over the 10 steps, with sequences
+`--parallel=dp` on one GPU. The largest relative difference of the loss over the 10 steps, with sequences
 of 2,048 tokens in bf16 and of 1,024 in fp32:
 
 | `maxtext:` model | Compute | fsdp, 2 GPUs | fsdp, 4 GPUs | fsdp, 8 GPUs | Step 0, largest of the three |
 |---|---|---|---|---|---|
 | `qwen3-8b` | bf16 | 2.4e-03 | 8.3e-04 | 2.9e-03 | 2.8e-06 |
-| `llama3.1-8b` | bf16 | 1.8e-03 | 7.1e-03 | 2.5e-03 | 9.5e-06 |
+| `llama3.1-8b` | bf16 | 5.9e-03 | 1.7e-03 | 3.4e-03 | 1.9e-05 |
 | `gemma3-4b` | bf16 | 1.7e-03 | 1.3e-03 | 2.7e-03 | 2.4e-05 |
 | `mistral-7b` | bf16 | 1.4e-03 | 7.7e-04 | 1.7e-03 | 1.7e-05 |
 | `qwen3-30b-a3b`, 8 of 48 layers | bf16 | 5.1e-05 | 7.2e-05 | 2.1e-05 | 9.9e-06 |
 | `qwen3-8b` | fp32 | 3.0e-07 | 4.6e-07 | 7.6e-07 | 7.7e-08 |
-| `llama3.1-8b` | fp32 | 1.1e-06 | 8.4e-06 | 1.4e-05 | 0.0e+00 |
+| `llama3.1-8b` | fp32 | 2.4e-06 | 9.8e-06 | 1.6e-05 | 0.0e+00 |
 | `gemma3-4b` | fp32 | 1.7e-06 | 2.2e-06 | 1.4e-06 | 7.4e-08 |
 | `mistral-7b` | fp32 | 2.2e-06 | 6.2e-06 | 2.4e-06 | 8.8e-08 |
 | `qwen3-30b-a3b`, 8 of 48 layers | fp32 | 2.1e-07 | 2.1e-07 | 2.1e-07 | 0.0e+00 |
 
-- **In fp32 FSDP gives data parallelism's losses**, within 1.4e-5 over 10
+- **In fp32 FSDP gives data parallelism's losses**, within 1.6e-5 over 10
   steps on 2, 4 and 8 GPUs for every model.
-- **In bf16 the difference is rounding.** It is at most 2.4e-5 at step 0 and
-  reaches up to 7.1e-3 within 10 steps, as the warm-up's loss spikes amplify
-  it (the Gate 0 note above). The `dp` run of Llama 3.1 8B itself, run twice
-  on one GPU, differs by 7.9e-3, and by 6.0e-3 from a run on another GPU.
-  Five of the twelve runs of the four 8B-class models exceed the 2e-3 the
-  docs pass to `summarize --gate0`: at these 16,384 tokens per step, that
-  gate does not tell a layout from noise in bf16.
+- **In bf16 the layouts part by rounding.** The difference is at most 2.4e-5
+  at step 0 and reaches up to 5.9e-3 within 10 steps, as the warm-up's loss
+  spikes amplify it. The `dp` run of Llama 3.1 8B itself, run twice on one
+  GPU, differs by 8.7e-4, and by 2.0e-3 from a run on another GPU. Five of
+  the twelve runs of the four 8B-class models exceed the 2e-3 the docs pass to
+  `summarize --gate0`, which is what one `dp` run already differs from another
+  on a second GPU: at these 16,384 tokens per step that gate is too tight for
+  bf16, and fp32 is what tells one layout from another.
 
 Training from random weights with 4 sequences of 2,048 tokens per GPU, AdamW
 at the trainer's defaults (peak rate 3e-4 after 10 warm-up steps) and full
@@ -200,7 +200,7 @@ TFLOP/s in bf16; the trainer's own `mfu` is against its default of 2,500.
 | `qwen3-8b` | fsdp | 2 | 16,384 | 6,672 | 0.3% | 6,553 | 13.7% | 80 GiB | 12.42 | 6.50 | 5.90 | 5.54 |
 | `qwen3-8b` | fsdp | 4 | 32,768 | 8,230 | 0.9% | 8,012 | 16.8% | 44 GiB | 12.47 | 6.25 | 5.65 | 5.35 |
 | `qwen3-8b` | fsdp | 8 | 65,536 | 9,417 | 1.6% | 9,036 | 19.3% | 28 GiB | 12.48 | 6.06 | 5.40 | 5.07 |
-| `llama3.1-8b` | dp | 1 | 8,192 | 10,673 | 1.1% | 10,331 | 21.6% | 123 GiB | 12.33 | 7.04 | 6.54 | 6.18 |
+| `llama3.1-8b` | dp | 1 | 8,192 | 10,632 | 0.7% | 10,435 | 21.5% | 123 GiB | 12.33 | 7.22 | 6.67 | 6.30 |
 | `llama3.1-8b` | fsdp | 2 | 16,384 | 6,913 | 0.4% | 6,873 | 14.0% | 78 GiB | 12.31 | 6.91 | 6.34 | 6.03 |
 | `llama3.1-8b` | fsdp | 4 | 32,768 | 8,638 | 0.9% | 8,420 | 17.5% | 46 GiB | 12.29 | 6.57 | 6.00 | 5.73 |
 | `llama3.1-8b` | fsdp | 8 | 65,536 | 9,955 | 1.8% | 9,609 | 20.1% | 28 GiB | 12.30 | 6.38 | 5.89 | 5.68 |
@@ -221,18 +221,18 @@ the median of three runs of 40 steps on each side:
 
 | `maxtext:` model | GPUs | MaxText's own trainer | JAX-Titan, one stage | Difference |
 |---|---|---|---|---|
-| `llama3.1-8b` | 1 | 10,189 | 10,673 | +4.7% |
+| `llama3.1-8b` | 1 | 10,189 | 10,632 | +4.3% |
 | `llama3.1-8b` | 8, FSDP | 9,660 | 9,955 | +3.1% |
 | `qwen3-8b` | 1 | 9,669 | 10,074 | +4.2% |
 | `qwen3-8b` | 8, FSDP | 9,194 | 9,417 | +2.4% |
 
 - **Every model trains**: the loss falls from 10.8-12.9 to 5.1-6.6 in 300
   steps, and lower where a step holds more tokens.
-- **MaxText's models run 2.4% to 4.7% faster here than in MaxText's own
+- **MaxText's models run 2.4% to 4.3% faster here than in MaxText's own
   trainer** over the same steps, on one GPU and under FSDP on 8.
 - **Over 300 steps the throughput is 1% to 3% below that of the first 40.**
   The GPUs warm up and their clock drops under the power limit: for Llama
-  3.1 8B on one GPU from 1,577 to 1,512 MHz, at 60 and 72 C and 1 kW.
+  3.1 8B on one GPU from 1,622 to 1,573 MHz, at 54 and 63 C and 1 kW.
 - **Under FSDP a GPU's throughput rises with the number of GPUs** at the
   same tokens per GPU: 0.65-0.69 of one GPU's `dp` throughput on 2 GPUs,
   0.81-0.82 on 4 and 0.90-0.94 on 8. These runs do not show why.
@@ -240,12 +240,6 @@ the median of three runs of 40 steps on each side:
   initialized and restored on their shardings. Qwen3-30B-A3B peaks at 65-68
   GiB on each of 8 GPUs with its published weights and at 82 GiB with random
   ones.
-- **The Llama pipeline is unchanged.** At a small size the lowered train
-  step of `--model=maxtext:llama3.1-8b --num_stages=2` is the same text on
-  `main` and with this change, and so is its `dp` reference. On 8 GPUs,
-  three runs of each give 3,126 tokens/s per GPU against main's 3,140, and
-  losses within 8.6e-4 of main's over 10 steps in bf16, where main's own
-  runs differ by 3.8e-4.
 
 The mixture of experts: MaxText computes an expert layer in three forms. The
 adapter's default is the dense matmul over every expert
@@ -269,3 +263,25 @@ of 30 steps, each taken over its steps 5-29:
 
 The script of the PyTorch reference and the scripts that launched these runs
 are not in the repository.
+
+## JAX-Titan's own Llama against the adapter
+
+The adapter is the reference for `jax_titan.models.llama`: MaxText's Llama
+and JAX-Titan's are two implementations of one model. `llama_config` gives a
+MaxText Llama's sizes as a config of JAX-Titan's model, and `llama_params`
+maps its weights: the layer axis first, MaxText's `1/sqrt(head_dim)` taken
+back out of the query projection, and, for Llama 3.1's RoPE, the query and
+key features of each head reordered from adjacent pairs to split halves.
+
+From the same weights the two give the same loss and the same gradients:
+
+- **At a small size**, in the tests above: within 1e-5 for the loss and 1e-3
+  for the gradients, in fp32 on a GPU, for `llama3.1-8b` and `llama3-8b`.
+- **At real size**, from Meta's Llama 3.1 8B weights on one MI350X, on the
+  batch of the published-weights table above (8 sequences of 1,024 tokens):
+  in fp32 JAX-Titan's Llama gives a loss of 1.959045 and the adapter
+  1.959046, 3.6e-7 apart, where PyTorch gives 1.959044. In bf16 they give
+  1.958346 and 1.958825, 4.8e-4 apart, where PyTorch's own bf16 gives
+  1.958628. At this size the loss was compared, not the gradients.
+
+The script of the real-size comparison is not in the repository.

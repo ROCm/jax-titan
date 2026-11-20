@@ -341,13 +341,6 @@ is recomputed; XLA recomputed 70% of it.
   16384x16384x16384 (57% of the nominal 2,500), FP8 GEMM 2,455 TFLOP/s, HBM
   stream 5.74 TB/s. MFU against the calibrated BF16 ceiling is 1.74x MFU
   against the nominal peak.
-- **Gate 0, MaxText Llama 3.1 8B** (2 stages x 4 GPUs, zero-bubble, against
-  `--parallel=dp` on 8 GPUs, same weights and batches): over the first 10
-  steps every pipeline stays within 8.7e-4 relative loss of the reference
-  (MaxText's attention 6.3e-4, TE 8.7e-4, JAX-AITER 8.7e-4; step 0 within
-  1.1e-5). After the warmup's loss spikes (steps 2-10, gradient norms up to
-  54), bf16 rounding differences grow to 1-7%, so K = 10 with a tolerance of
-  2e-3 is the gate on one node.
 - **A recorded run** ([results/2026-11-07/llama3.1-8b_pp2_run-dir](results/2026-11-07/llama3.1-8b_pp2_run-dir)),
   JAX-Titan's Llama 3.1 8B on 2 stages of 4 GPUs: step time p50 1.703 s, p95
   1.761 s; MFU 9.0% nominal, 15.6% calibrated; startup 153 s (compile 113 s,
@@ -361,9 +354,9 @@ is recomputed; XLA recomputed 70% of it.
   ([collectives](results/2026-11-07/llama3.1-8b_pp2_rccl-inspector_collectives.json)).
   MPMD's cross-mesh transfers do not go through RCCL, so the Inspector does
   not see them.
-- **Detector overhead** (`detectors --repeats 3`, MaxText Llama 3.1 8B on 2
-  stages of 4 GPUs; the baseline's three runs lie within 0.2%,
-  [table](results/2026-11-07/maxtext-llama3.1-8b_pp2_detector-overhead.json)):
+- **Detector overhead** (`detectors --repeats 3`, Llama 3.1 8B on 2 stages of
+  4 GPUs with gradients reduced per microbatch; the baseline's three runs lie
+  within 0.2%):
 
   | Detector | Step p50 | Overhead |
   |---|---|---|
@@ -382,10 +375,6 @@ is recomputed; XLA recomputed 70% of it.
   shapes"): `GetModuleOutputSlices` in `gpu_executable.cc` lists the result
   tuple itself, at upstream XLA's head too, so they need an XLA fix first.
 
-- **MFU variants of the recipe run** ([recipe](recipes/maxtext-llama3.1-8b.md),
-  1,000 steps with a rehearsed restart): 8.10% at the median step, 8.12%
-  sustained, 7.99% training-active, 5.99% end to end (ETTR 0.739), 6.9-8.2%
-  over 50-step windows.
 - **FLOPs model, Llama 3.1 8B on 2 stages** (`flops`): 46.6 GFLOP per token,
   3.06 PFLOP per step of model FLOPs and 4.01 PFLOP executed with
   rematerialization. The last stage carries the output head, 11% more executed
@@ -395,7 +384,7 @@ is recomputed; XLA recomputed 70% of it.
   the 1.50 s step. Each GPU all-reduces 24 GB of gradients per step, about
   150 ms at the 160 GB/s the Inspector measured, close to the 140 ms of
   exposed collective time in traces; with gradients reduced in every
-  microbatch, as MaxText's layers are today, it is 193 GB.
+  microbatch it is 193 GB.
 
 ## Not covered yet
 
