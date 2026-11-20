@@ -17,21 +17,18 @@ only the model types whose loss and gradients it compared with PyTorch's own.
 
 ## What comes from transformers and what from JAX-Titan
 
-| Part | From transformers | From JAX-Titan |
-|---|---|---|
-| Model structure and modules | The model class of `AutoModelForCausalLM`, traced through torchax | |
-| Model config | `config.json`, or the library's defaults of a model type | `--model_overrides`; every dropout set to zero |
-| Parameter initialization | The library's, under `--seed` | Placed on the trainer's shardings |
-| Published weights | `from_pretrained` of a local directory, in fp32 | The shardings they are placed on |
-| Precision | | fp32 parameters, cast to bf16 inside the step (`"dtype"` in `--model_overrides`) |
-| Rematerialization | Its gradient-checkpointing switch, which says where the layers are | `jax.checkpoint` as the function that switch calls |
-| Expert layers of a mixture of experts | The interface that registers an implementation | The `dense` implementation: every expert on every token |
-| Loss | The logits | The mean next-token cross-entropy |
-| Gradient | | `jax.grad` of the traced function |
-| Clipping, optimizer and schedule | | AdamW without weight decay on the parameters of normalization modules; warm-up and cosine decay |
-| Layouts (`dp`, `fsdp`) | | The mesh; a parameter is sharded along its first dimension that the data axis divides |
-| Data and tokenizer | | Token files and their sampling; the tokenizer is the model's published `tokenizer.json` |
-| Checkpoints, validation, logs, metrics | | JAX-Titan's; no FLOP count, so no MFU |
+| Part | Comes from |
+|---|---|
+| Model: structure, layers, config, initialization | transformers |
+| Published weights: `from_pretrained` | transformers |
+| Expert layer of a mixture of experts | JAX-Titan |
+| Loss | JAX-Titan |
+| Train step: gradient, clipping, optimizer, schedule | JAX-Titan |
+| Layouts (`dp`, `fsdp`) | JAX-Titan |
+| Data | JAX-Titan |
+| Checkpoints, validation, logs, metrics | JAX-Titan |
+
+transformers' own `Trainer` is not used.
 
 ## Running it
 

@@ -23,21 +23,15 @@ and predicts `noise - latents`.
 
 ## What comes from MaxDiffusion and what from JAX-Titan
 
-| Part | From MaxDiffusion | From JAX-Titan |
-|---|---|---|
-| Denoiser structure and layers | `FluxTransformer2DModel`, `WanModel`, called as they are | |
-| Sizes | The class's defaults | Wan 2.1 1.3B's sizes; `--model_overrides` |
-| Parameter initialization | Its initializers | Placed on the trainer's shardings |
-| Precision | Its `dtype` and `weights_dtype` | Their values: bf16 compute, fp32 weights |
-| Block scan and rematerialization | Its own (`remat_policy`) | |
-| Attention | Its dot-product attention | For FLUX.1, `--ops` routes it to `jax_titan.ops` |
-| Objective: noising, timestep, target, loss | | `jax_titan/data/diffusion.py` |
-| Batches | | Synthetic: standard normal latents and text features |
-| Gradient, clipping, optimizer, schedule | | The train step |
-| Layouts (`dp`, `fsdp`) | Its constraints on activations | The mesh; a parameter is sharded along its first dimension that the data axis divides, never along the block axis of a stack |
-| Checkpoints, logs, metrics | | JAX-Titan's; a FLOP count for FLUX.1 only |
+| Part | Comes from |
+|---|---|
+| Model: structure, layers, config, initialization | MaxDiffusion |
+| Objective: noising, timestep, target, loss | JAX-Titan |
+| Train step: gradient, clipping, optimizer, schedule | JAX-Titan |
+| Layouts (`dp`, `fsdp`) | JAX-Titan |
+| Checkpoints, validation, logs, metrics | JAX-Titan |
 
-MaxDiffusion's own trainers take no part.
+MaxDiffusion's own trainers are not used.
 
 ## Running it
 
@@ -60,7 +54,8 @@ python -m jax_titan.trainer.train --model=maxdiffusion:wan2.1-t2v-1.3b --paralle
 `--resolution` is the side of an image or a frame in pixels and `--frames` the
 frames of a clip: Wan sees `(frames - 1) / 4 + 1` latent frames of
 `(resolution / 16)^2` tokens each. `--text_tokens` defaults to 512, and to 256
-for `flux-schnell`.
+for `flux-schnell`. `--model_overrides` takes the denoiser's constructor
+arguments as JSON.
 
 ## What is supported
 

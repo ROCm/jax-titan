@@ -19,18 +19,15 @@ as a rectified flow, on `(1 - s) latents + s noise` with `s` uniform in
 
 ## What comes from diffusers and what from JAX-Titan
 
-| Part | From diffusers | From JAX-Titan |
-|---|---|---|
-| Denoiser structure and modules | The model class, traced through torchax | |
-| Config | The class's defaults, or a `config.json` | `--model_overrides` |
-| Parameter initialization | The library's, under `--seed` | Placed on the trainer's shardings |
-| Precision | | fp32 parameters, cast to bf16 inside the step (`"dtype"` in `--model_overrides`) |
-| Rematerialization | Its gradient-checkpointing switch, which says where the blocks are | `jax.checkpoint` as the function that switch calls |
-| Objective: noising, timestep, target, loss | | `jax_titan/data/diffusion.py` |
-| Batches | | Synthetic: standard normal latents and text features |
-| Gradient, clipping, optimizer, schedule | | The train step; AdamW without weight decay on the parameters of normalization modules |
-| Layouts (`dp`, `fsdp`) | | The mesh; a parameter is sharded along its first dimension that the data axis divides |
-| Checkpoints, logs, metrics | | JAX-Titan's; no FLOP count, so no MFU |
+| Part | Comes from |
+|---|---|
+| Model: structure, layers, config, initialization | diffusers |
+| Objective: noising, timestep, target, loss | JAX-Titan |
+| Train step: gradient, clipping, optimizer, schedule | JAX-Titan |
+| Layouts (`dp`, `fsdp`) | JAX-Titan |
+| Checkpoints, validation, logs, metrics | JAX-Titan |
+
+diffusers' example training scripts are not used.
 
 ## Running it
 
@@ -53,7 +50,8 @@ python -m jax_titan.trainer.train --model=diffusers:FluxTransformer2DModel \
 
 `--resolution` is the image side in pixels, of which the denoiser sees
 `(resolution / 16)^2` latent tokens, and `--text_tokens` the text tokens of a
-sample (512 with the guidance embedding, 256 without).
+sample (512 with the guidance embedding, 256 without). `--model_overrides`
+takes config fields as JSON, and `"dtype"` for the compute dtype.
 
 ## What is supported
 
