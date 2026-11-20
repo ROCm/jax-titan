@@ -127,6 +127,11 @@ def parse_args(argv=None):
       "latent tokens.",
   )
   parser.add_argument(
+      "--frames", type=int, default=81,
+      help="Video models: frames of a sample, of side --resolution; Wan sees "
+      "(frames - 1) / 4 + 1 latent frames of (resolution / 16)^2 tokens each.",
+  )
+  parser.add_argument(
       "--text_tokens", type=int, default=0,
       help="Image models: text tokens per sample; default 512 for flux-dev and "
       "256 for flux-schnell and Ideogram 4. A cache of samples (--data) sets its own.",

@@ -1,5 +1,5 @@
-"""Trainer layouts for models from MaxText, MaxDiffusion and transformers, for
-Ideogram 4 and for Command A+.
+"""Trainer layouts for models from MaxText, MaxDiffusion, transformers and
+diffusers, for Ideogram 4 and for Command A+.
 
 `--model=maxtext:<name>` trains a MaxText model config (e.g.
 `maxtext:llama3.1-8b` or `maxtext:qwen3-8b`) on the token data, and
@@ -23,10 +23,11 @@ optimizer state. Of MaxText's models, Llama 2 and 3 have pipeline stages;
 every other one, and every one under `--parallel=fsdp`, trains as one stage,
 MaxText's `Transformer` called whole. `--model=transformers:<name>` trains a
 decoder-only causal language model of Hugging Face transformers, a directory
-with a `config.json`, a model type or a model on the Hub. It runs through
-torchax (`models/adapters/torch_bridge.py`) as one stage, with `--parallel=dp`
-or `fsdp`, and rematerializes through the library's own gradient-checkpointing
-switch.
+with a `config.json`, a model type or a model on the Hub, and
+`--model=diffusers:<name>` a denoiser of diffusers on synthetic batches. Both
+run through torchax (`models/adapters/torch_bridge.py`) as one stage, with
+`--parallel=dp` or `fsdp`, and rematerialize through the library's own
+gradient-checkpointing switch.
 
 The layouts here take a staged model, any object with `init(seed)` and
 `abstract(seed)`, the parameters of each stage and their shapes, and
@@ -57,7 +58,7 @@ import os
 
 from jax_titan.trainer.layout import EVAL_STEPS, Layout, Workload, abstract, placement
 
-PROVIDERS = ("maxtext", "maxdiffusion", "transformers")
+PROVIDERS = ("maxtext", "maxdiffusion", "transformers", "diffusers")
 # JAX-Titan's own models that train through these layouts.
 MODELS = ("ideogram4", "command-a-plus")
 
@@ -496,14 +497,68 @@ def _transformers(args, name, devices, make_optimizer):
   return layout, work
 
 
-def _maxdiffusion(args, flavor, devices, optimizer):
+def _batch_specs(batches):
+  """The specs of a family's batches (`jax_titan.data.diffusion`): inputs and target."""
   import jax  # pylint: disable=g-import-not-at-top
   import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
-  import numpy as np  # pylint: disable=g-import-not-at-top
   from jax_titan import mpmd as jt_mpmd  # pylint: disable=g-import-not-at-top
-  from jax_titan.models.adapters import maxdiffusion as md  # pylint: disable=g-import-not-at-top
 
   P = jax.sharding.PartitionSpec  # pylint: disable=invalid-name
+  x, target = batches.next_batch(0)
+
+  def spec(name, a):
+    return (jax.ShapeDtypeStruct(a.shape, jnp.float32),
+            P() if name in batches.constants else P(None, jt_mpmd.DATA_AXIS))
+
+  return {k: spec(k, v) for k, v in x.items()}, spec("", target)
+
+
+def _flux_batches(args, *, in_channels, joint_attention_dim, pooled_projection_dim,
+                  guidance_embeds):
+  """FLUX.1's batches at `--resolution` and `--text_tokens`, and its text tokens."""
+  from jax_titan.data import diffusion  # pylint: disable=g-import-not-at-top
+
+  text_tokens = args.text_tokens or (512 if guidance_embeds else 256)
+  batches = diffusion.flux(
+      args.seed, (args.microbatches, args.microbatch_size), image_side=args.resolution // 16,
+      text_tokens=text_tokens, in_channels=in_channels, joint_attention_dim=joint_attention_dim,
+      pooled_projection_dim=pooled_projection_dim, guidance_embeds=guidance_embeds)
+  return batches, text_tokens
+
+
+def _diffusers(args, name, devices, make_optimizer):
+  import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+  from jax_titan.models.adapters import diffusers as hfd  # pylint: disable=g-import-not-at-top
+
+  _one_stage(args)
+  overrides = {k: tuple(v) if isinstance(v, list) else v for k, v in _overrides(args).items()}
+  dtype = jnp.dtype(overrides.pop("dtype", "bfloat16"))
+  cfg = hfd.config(name, **overrides)
+  if cfg["_class_name"] not in hfd.FAMILIES:
+    raise NotImplementedError(
+        f"{args.model} is diffusers' {cfg['_class_name']}, which was not compared with PyTorch "
+        f"through torchax: {', '.join(hfd.FAMILIES)}")
+  model = hfd.denoiser(cfg, seed=args.seed, dtype=dtype, remat=args.remat)
+  c = model.module.config
+  batches, _ = _flux_batches(
+      args, in_channels=c.in_channels, joint_attention_dim=c.joint_attention_dim,
+      pooled_projection_dim=c.pooled_projection_dim, guidance_embeds=c.guidance_embeds)
+  inputs, targets = _batch_specs(batches)
+  layout = _spmd_layout(args, _data_mesh(devices), model, make_optimizer(model.decays),
+                        inputs, targets, lambda batch: batch)
+  work = Workload(
+      num_params=_num_params(model.abstract(args.seed)),
+      tokens_per_step=args.microbatches * args.microbatch_size * batches.tokens,
+      flops_per_step=None,
+      next_batch=batches.next_batch,
+  )
+  return layout, work
+
+
+def _maxdiffusion(args, flavor, devices, optimizer):
+  import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+  from jax_titan.data import diffusion  # pylint: disable=g-import-not-at-top
+  from jax_titan.models.adapters import maxdiffusion as md  # pylint: disable=g-import-not-at-top
 
   kwargs = {
       "dtype": jnp.bfloat16,
@@ -513,66 +568,52 @@ def _maxdiffusion(args, flavor, devices, optimizer):
   }
   for k in ("dtype", "weights_dtype"):
     kwargs[k] = jnp.dtype(kwargs[k])
+  samples = args.microbatches * args.microbatch_size
+  if flavor in md.WAN:
+    # Wan 2.1 has no pipeline stages: MaxDiffusion's `WanModel` called whole.
+    _one_stage(args)
+    cfg = {**md.WAN[flavor], **kwargs}
+    mesh = _data_mesh(devices)
+    model = md.whole_wan(mesh, fsdp=args.parallel == "fsdp", **cfg)
+    batches = diffusion.wan(
+        args.seed, (args.microbatches, args.microbatch_size),
+        frames=(args.frames - 1) // 4 + 1, height=args.resolution // 8, width=args.resolution // 8,
+        patch=cfg["patch_size"], text_tokens=args.text_tokens or 512,
+        in_channels=cfg["in_channels"], text_dim=cfg["text_dim"])
+    inputs, targets = _batch_specs(batches)
+    layout = _spmd_layout(args, mesh, model, optimizer, inputs, targets, lambda batch: batch)
+    work = Workload(
+        num_params=_num_params(model.abstract(args.seed)),
+        tokens_per_step=samples * batches.tokens,
+        flops_per_step=None,
+        next_batch=batches.next_batch,
+    )
+    return layout, work
+
+  if args.parallel == "fsdp" and args.num_stages != 1:
+    raise NotImplementedError(f"{args.model} with --parallel=fsdp is one stage: --num_stages=1")
   flux = md.transformer(flavor, **kwargs)
-
-  def make_mesh(d):
-    return jax.sharding.Mesh(
-        np.asarray(d).reshape(len(d), 1), (jt_mpmd.DATA_AXIS, jt_mpmd.TENSOR_AXIS))
-
-  model = md.Model(flux, num_stages=args.num_stages, blocks=_stage_layers(args),
-                   attention=_routed_attention())
-
-  side = args.resolution // 16
-  image_tokens = side * side
-  text_tokens = args.text_tokens or (512 if flux.guidance_embeds else 256)
-  img_ids, txt_ids = md.position_ids(side, text_tokens)
-  mb, num_mb = args.microbatch_size, args.microbatches
-  b = (num_mb, mb)
-  latent_shape = b + (image_tokens, flux.in_channels)
-  f32 = jnp.float32
-  batched = P(None, jt_mpmd.DATA_AXIS)
-  inputs = {
-      "img": (jax.ShapeDtypeStruct(latent_shape, f32), batched),
-      "txt": (jax.ShapeDtypeStruct(b + (text_tokens, flux.joint_attention_dim), f32), batched),
-      "pooled": (jax.ShapeDtypeStruct(b + (flux.pooled_projection_dim,), f32), batched),
-      "timestep": (jax.ShapeDtypeStruct(b, f32), batched),
-      "img_ids": (jax.ShapeDtypeStruct((num_mb,) + img_ids.shape, f32), P()),
-      "txt_ids": (jax.ShapeDtypeStruct((num_mb,) + txt_ids.shape, f32), P()),
-  }
-  if flux.guidance_embeds:
-    inputs["guidance"] = (jax.ShapeDtypeStruct(b, f32), batched)
-  targets = (jax.ShapeDtypeStruct(latent_shape, f32), batched)
-
-  def next_batch(step):
-    """Noised random latents, random text embeddings, and velocity targets."""
-    rng = np.random.default_rng((args.seed, step))
-    latents = rng.standard_normal(latent_shape, np.float32)
-    noise = rng.standard_normal(latent_shape, np.float32)
-    t = rng.uniform(size=b).astype(np.float32)
-    x = {
-        "img": (1 - t[..., None, None]) * latents + t[..., None, None] * noise,
-        "txt": rng.standard_normal(b + (text_tokens, flux.joint_attention_dim), np.float32),
-        "pooled": rng.standard_normal(b + (flux.pooled_projection_dim,), np.float32),
-        "timestep": t,
-        "img_ids": np.broadcast_to(img_ids, (num_mb,) + img_ids.shape),
-        "txt_ids": np.broadcast_to(txt_ids, (num_mb,) + txt_ids.shape),
-    }
-    if flux.guidance_embeds:
-      x["guidance"] = np.full(b, 3.5, np.float32)
-    return x, noise - latents
-
+  stages = md.Model(flux, num_stages=args.num_stages, blocks=_stage_layers(args),
+                    attention=_routed_attention())
+  # Under fsdp MaxDiffusion's `FluxTransformer2DModel` called whole, else its stages.
+  model = stages
+  if args.parallel == "fsdp":
+    model = md.whole_flux(flux, _data_mesh(devices), fsdp=True, attention=_routed_attention())
+  batches, text_tokens = _flux_batches(
+      args, in_channels=flux.in_channels, joint_attention_dim=flux.joint_attention_dim,
+      pooled_projection_dim=flux.pooled_projection_dim, guidance_embeds=flux.guidance_embeds)
+  inputs, targets = _batch_specs(batches)
   if args.parallel == "mpmd":
-    layout = _mpmd_layout(args, _topology(args, devices, make_mesh), model, optimizer,
+    layout = _mpmd_layout(args, _topology(args, devices, _data_mesh), model, optimizer,
                           inputs, targets, lambda batch: batch)
   else:
-    layout = _spmd_layout(args, make_mesh(devices), model, optimizer, inputs, targets,
+    layout = _spmd_layout(args, _data_mesh(devices), model, optimizer, inputs, targets,
                           lambda batch: batch)
-  samples = num_mb * mb
   work = Workload(
       num_params=_num_params(model.abstract(args.seed)),
-      tokens_per_step=samples * (image_tokens + text_tokens),
-      flops_per_step=model.flops_per_sample(image_tokens, text_tokens) * samples,
-      next_batch=next_batch,
+      tokens_per_step=samples * batches.tokens,
+      flops_per_step=stages.flops_per_sample(batches.tokens - text_tokens, text_tokens) * samples,
+      next_batch=batches.next_batch,
   )
   return layout, work
 
@@ -833,7 +874,8 @@ def build(args, devices, make_optimizer) -> tuple[Layout, Workload]:
   provider, _, name = args.model.partition(":")
   native = args.model in MODELS
   ideogram = args.model == "ideogram4" or (provider == "maxdiffusion" and name == "ideogram4")
-  fsdp = native or ideogram or provider in ("maxtext", "transformers")
+  bridged = provider in ("transformers", "diffusers")
+  fsdp = native or ideogram or bridged or provider in ("maxtext", "maxdiffusion")
   if args.stage_fsdp or args.tensor_parallel != 1 or (args.parallel == "fsdp" and not fsdp):
     raise NotImplementedError(
         f"{args.model} takes neither --stage_fsdp nor --tensor_parallel"
@@ -844,7 +886,8 @@ def build(args, devices, make_optimizer) -> tuple[Layout, Workload]:
     raise NotImplementedError(
         "--init_from loads parameters of maxtext: and transformers: models, ideogram4 and "
         "command-a-plus")
-  if provider == "maxdiffusion" and not ideogram and args.data not in ("", "synthetic"):
+  synthetic_only = provider == "diffusers" or (provider == "maxdiffusion" and not ideogram)
+  if synthetic_only and args.data not in ("", "synthetic"):
     raise NotImplementedError(f"{args.model} trains on synthetic batches only")
   if args.parallel != "mpmd" and (args.microbatches * args.microbatch_size) % len(devices):
     raise ValueError(
@@ -853,6 +896,8 @@ def build(args, devices, make_optimizer) -> tuple[Layout, Workload]:
     )
   if provider == "transformers":
     return _transformers(args, name, devices, make_optimizer)
+  if provider == "diffusers":
+    return _diffusers(args, name, devices, make_optimizer)
   optimizer = make_optimizer()
   if provider == "maxtext":
     return _maxtext(args, name, devices, optimizer)
