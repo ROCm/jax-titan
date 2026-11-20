@@ -59,13 +59,14 @@ class Workload:
   Token models train on token windows below `vocab_size`. Other models give
   `next_batch(step)`, a host batch for `put_batch`, synthetic or from `data`,
   and a validation batch for steps from `EVAL_STEPS` on.
-  `flops_per_step` counts model FLOPs (for MFU); `hardware_flops_per_step` adds
-  what rematerialization recomputes (for HFU), when known.
+  `flops_per_step` counts model FLOPs (for MFU), None for a model nobody has
+  a count for; `hardware_flops_per_step` adds what rematerialization
+  recomputes (for HFU), when known.
   """
 
   num_params: int
   tokens_per_step: int
-  flops_per_step: float
+  flops_per_step: float | None
   vocab_size: int | None = None
   next_batch: Callable[[int], Any] | None = None
   data: str = "synthetic"

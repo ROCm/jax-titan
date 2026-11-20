@@ -552,19 +552,23 @@ def main(argv=None):
       0.0, args.lr, args.warmup_steps, max(args.steps, args.warmup_steps + 1),
       end_value=args.lr * 0.1,
   )
-  # Each step clips by the global gradient norm (--max_grad_norm) before this.
-  optimizer = optax.adamw(lr, b1=0.9, b2=0.95, eps=1e-8, weight_decay=0.1, mask=_decay_mask)
+  def make_optimizer(decays=None):
+    """AdamW; `decays(path, leaf)` says which parameters take weight decay."""
+    mask = _decay_mask if decays is None else (
+        lambda params: jax.tree_util.tree_map_with_path(decays, params))
+    # Each step clips by the global gradient norm (--max_grad_norm) before this.
+    return optax.adamw(lr, b1=0.9, b2=0.95, eps=1e-8, weight_decay=0.1, mask=mask)
 
   mb, num_mb, seq = args.microbatch_size, args.microbatches, args.seq_len
   if staged:
-    layout, work = adapters.build(args, devices, optimizer)
+    layout, work = adapters.build(args, devices, make_optimizer)
   else:
     if args.init_from:
       raise NotImplementedError(
           "--init_from loads parameters of maxtext: models, ideogram4 and command-a-plus")
     cfg = llama.FLAVORS[args.model]
     build = _build_mpmd if args.parallel == "mpmd" else _build_spmd
-    layout = build(args, cfg, devices, optimizer)
+    layout = build(args, cfg, devices, make_optimizer())
     from jax_titan.observability import flops as flops_lib  # pylint: disable=g-import-not-at-top
 
     tokens = num_mb * mb * seq
@@ -739,12 +743,13 @@ def main(argv=None):
           "step_time_s": dt,
           "tokens_per_s": tokens_per_step / dt,
           "tokens_per_s_per_gpu": tokens_per_step / dt / len(devices),
-          "mfu": flops_per_step / dt / peak_flops,
+          **({"mfu": flops_per_step / dt / peak_flops} if flops_per_step else {}),
           "time": time.time(),
       }
       print(
           f"step {step:4d} | loss {loss:8.4f} | grad norm {grad_norm:8.3f} | {dt * 1e3:8.1f} ms | "
-          f"{record['tokens_per_s']:10.0f} tok/s | MFU {100 * record['mfu']:5.1f}%",
+          f"{record['tokens_per_s']:10.0f} tok/s"
+          + (f" | MFU {100 * record['mfu']:5.1f}%" if flops_per_step else ""),
           flush=True,
       )
       log.write(record)

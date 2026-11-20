@@ -60,7 +60,7 @@ def series(path, window: int = summarize.ROLLING_STEPS) -> dict:
       chunk = s[i - window:i]
       seconds = sum(r["step_time_s"] for r in chunk)
       rolling.append((minutes(chunk[-1]["time"]),
-                      sum(r["mfu"] * r["step_time_s"] for r in chunk) / seconds))
+                      sum(r.get("mfu", _NAN) * r["step_time_s"] for r in chunk) / seconds))
   power = []
   power_file = path / "power.jsonl" if path.is_dir() else None
   if power_file and power_file.exists():
@@ -83,7 +83,7 @@ def series(path, window: int = summarize.ROLLING_STEPS) -> dict:
       "name": path.name if path.is_dir() else path.stem,
       "time": [minutes(r["time"]) for r in steps if "time" in r],
       "step": [r["step"] for r in steps if "time" in r],
-      "mfu": [r["mfu"] for r in steps if "time" in r],
+      "mfu": [r.get("mfu", _NAN) for r in steps if "time" in r],
       "step_time": [r["step_time_s"] for r in steps if "time" in r],
       "loss": [r["loss"] for r in steps],
       "loss_tokens": [(r["step"] + 1) * tokens for r in steps],

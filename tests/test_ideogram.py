@@ -444,7 +444,7 @@ def test_resume_on_a_cache_is_exact(toy, tmp_path):
 
 def _workload(*flags):
   args = train.parse_args(FLAGS + ["--parallel=dp", *flags])
-  return adapters.build(args, jax.devices(), optax.sgd(0.0))[1]
+  return adapters.build(args, jax.devices(), lambda decays=None: optax.sgd(0.0))[1]
 
 
 def test_validation_draws_the_held_out_images_and_training_the_others(toy):
