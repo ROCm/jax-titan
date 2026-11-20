@@ -89,7 +89,7 @@ def _losses(tmp_path, *flags):
   result = subprocess.run(
       [sys.executable, "-m", "jax_titan.trainer.train", "--model=transformers:llama",
        "--model_overrides=" + json.dumps({**SMALL, "dtype": "float32"}), "--data=synthetic",
-       "--seq_len=32", "--num_stages=1", "--microbatches=1", "--microbatch_size=8", "--steps=4",
+       "--seq_len=32", "--microbatches=1", "--microbatch_size=8", "--steps=4",
        "--warmup_steps=1", f"--log_file={log}", *flags],
       # os.environ, not the process environment: see conftest's ROCPROFILER note.
       capture_output=True, text=True, check=False, cwd=REPO, env=dict(os.environ),
@@ -126,11 +126,11 @@ def test_refuses_what_was_not_compared_with_pytorch():
   from jax_titan.trainer import train  # pylint: disable=g-import-not-at-top
 
   def build(*flags):
-    args = train.parse_args(["--data=synthetic", "--num_stages=1", "--parallel=dp", *flags])
+    args = train.parse_args(["--data=synthetic", "--parallel=dp", *flags])
     return adapters.build(args, [None], lambda decays=None: optax.sgd(0.0))
 
   # HRM's gradient is wrong through torchax without an error: its forward leans on no_grad.
   with pytest.raises(NotImplementedError, match="not compared with PyTorch"):
     build("--model=transformers:hrm_text")
-  with pytest.raises(NotImplementedError, match="one stage"):
+  with pytest.raises(NotImplementedError, match="no pipeline"):
     build("--model=transformers:llama", "--num_stages=2")

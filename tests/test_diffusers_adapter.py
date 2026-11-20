@@ -70,8 +70,8 @@ def _losses(tmp_path, *flags):
   result = subprocess.run(
       [sys.executable, "-m", "jax_titan.trainer.train", "--model=diffusers:FluxTransformer2DModel",
        "--model_overrides=" + json.dumps({**SMALL, "dtype": "float32"}), "--resolution=64",
-       "--text_tokens=8", "--num_stages=1", "--microbatches=1", "--microbatch_size=8",
-       "--steps=4", "--warmup_steps=1", f"--log_file={log}", *flags],
+       "--text_tokens=8", "--microbatches=1", "--microbatch_size=8", "--steps=4",
+       "--warmup_steps=1", f"--log_file={log}", *flags],
       # os.environ, not the process environment: see conftest's ROCPROFILER note.
       capture_output=True, text=True, check=False, cwd=REPO, env=dict(os.environ),
   )
@@ -91,7 +91,6 @@ def test_refuses_what_was_not_compared_with_pytorch():
   from jax_titan.trainer import adapters  # pylint: disable=g-import-not-at-top
   from jax_titan.trainer import train  # pylint: disable=g-import-not-at-top
 
-  args = train.parse_args(["--model=diffusers:UNet2DConditionModel", "--num_stages=1",
-                           "--parallel=dp"])
+  args = train.parse_args(["--model=diffusers:UNet2DConditionModel", "--parallel=dp"])
   with pytest.raises(NotImplementedError, match="not compared with PyTorch"):
     adapters.build(args, [None], lambda decays=None: optax.sgd(0.0))

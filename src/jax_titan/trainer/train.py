@@ -3,9 +3,9 @@
   python -m jax_titan.trainer.train --model=llama3.1-8b --num_stages=2
 
 `--model` is a JAX-Titan Llama flavor, `ideogram4`, `command-a-plus`, or a
-model of another repository, which trains as one stage: `maxtext:<name>`,
-`maxdiffusion:<name>`, `transformers:<name>` or `diffusers:<name>` (see
-`jax_titan.trainer.adapters` and docs/adapters).
+model of another repository, which takes `--parallel=dp` or `fsdp`:
+`maxtext:<name>`, `maxdiffusion:<name>`, `transformers:<name>` or
+`diffusers:<name>` (see `jax_titan.trainer.adapters` and docs/adapters).
 
 `--parallel=dp` and `--parallel=fsdp` train the same model on the same batches
 without the pipeline, as one `jax.jit` program over all devices.
@@ -40,7 +40,7 @@ def parse_args(argv=None):
   parser.add_argument(
       "--model", default="llama3.1-8b",
       help="A Llama flavor (llama3.1-8b, llama3-test), ideogram4, command-a-plus, or a model "
-      "of another repository as one stage, with --parallel=dp or fsdp and --num_stages=1: "
+      "of another repository, with --parallel=dp or fsdp: "
       "maxtext:<MaxText model name>, maxdiffusion:flux-dev, maxdiffusion:flux-schnell or "
       "maxdiffusion:wan2.1-t2v-1.3b, transformers:<directory or model type>, "
       "diffusers:<denoiser class or directory>. maxdiffusion:ideogram4 is the pipeline of "
@@ -65,9 +65,9 @@ def parse_args(argv=None):
       "repository takes dp or fsdp only.",
   )
   parser.add_argument(
-      "--num_stages", type=int, default=2,
-      help="Pipeline stages. dp and fsdp start from the same weights as the "
-      "pipeline with this many stages.",
+      "--num_stages", type=int, default=None,
+      help="Pipeline stages, 2 by default. dp and fsdp start from the same weights as the "
+      "pipeline with this many stages. A model of another repository takes none.",
   )
   parser.add_argument(
       "--schedule", default="ZERO_BUBBLE_H1",
@@ -238,7 +238,10 @@ def parse_args(argv=None):
   )
   parser.add_argument("--platform", default="", help="'cpu' runs on 8 CPU devices.")
   parser.add_argument("--seed", type=int, default=0)
-  return parser.parse_args(argv)
+  args = parser.parse_args(argv)
+  if args.num_stages is None:
+    args.num_stages = adapters.default_num_stages(args.model)
+  return args
 
 
 def _decay_mask(params):
