@@ -60,7 +60,7 @@ def config(model_name: str, **overrides):
   Defaults suit JAX-Titan: no dropout, XLA dot-product attention, no
   checkpointing or distributed setup by MaxText, the text tower alone, and
   for a mixture of experts the dense matmul over every expert, the fastest of
-  MaxText's three forms for Qwen3-30B-A3B on MI350X (docs/pipelines.md). These
+  MaxText's three forms for Qwen3-30B-A3B on MI350X (docs/adapters/maxtext.md). These
   and `overrides` win over the model's YAML.
   """
   kwargs = {

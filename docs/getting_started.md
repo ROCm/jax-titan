@@ -257,7 +257,7 @@ HIP_VISIBLE_DEVICES=0,1,2,3 python -m jax_titan.models.command_a_generate --chec
 Ideogram 4 or Command A+ config settings, for example
 `'{"base_num_decoder_layers": 4}'` for a 4-layer MaxText model. MaxText's
 `mistral-7b` config takes `'{"rope_max_timescale": 10000}'` to match the
-published Mistral 7B v0.1 weights ([pipelines.md](pipelines.md#maxtext-models-as-one-stage-2026-11-19-8x-mi350x)).
+published Mistral 7B v0.1 weights ([adapters/maxtext.md](adapters/maxtext.md)).
 For Ideogram 4
 it also takes `dtype` and, for JAX-Titan's own model, `timestep_mean` and
 `timestep_std`; for Command A+, `dtype`, `image_tiles` and `freeze`
