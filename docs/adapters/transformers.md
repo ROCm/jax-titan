@@ -115,20 +115,19 @@ compiled step would draw the same numbers at every step.
 
 ## How it is verified
 
-The tests are `tests/test_transformers_adapter.py`, on GPUs at a small size
-in fp32. The runs are under [Runs](#runs).
+The unit tests are in `tests/test_transformers_adapter.py`.
 
 | What is checked | By | Size | Result |
 |---|---|---|---|
-| Each model type of the list gives PyTorch's loss and gradients, over two traces | One comparison, CPU | Small | Loss within 1e-5, gradients within 1e-3 |
-| Seven model types give PyTorch's loss and gradients, over two traces: `llama`, `mistral`, `qwen3`, `gemma3_text`, `phi3` with its long RoPE factors, `qwen3_moe` in the dense form and `gpt2` | Test, GPU | Small | Loss within 1e-5, gradients within 1e-3 |
-| Norms take no weight decay, and nothing else is exempt | Test, GPU | Small | Passes |
-| The trainer starts at the model's loss | Test, GPU | Small | Within 1e-5 |
-| FSDP trains as data parallelism does | Test, 2 GPUs | Small | Losses of 4 steps within 1e-4 |
-| A model type outside the list is refused, and so is a pipeline | Test, GPU | Small | Passes |
-| The published weights give PyTorch's loss, for four models | Runs | Real | Within 2.0e-5 in fp32, the mixture of experts included |
-| A run resumes from the checkpoint of step 3 and validates: Qwen3-0.6B from its published weights, under FSDP on 2 GPUs in fp32 | Run | Real | The uninterrupted run's losses of steps 3 to 5 exactly, and its validation loss after them within 2e-8 |
-| Every model trains | Runs | Real | The loss falls from 11.2-12.8 to 7.2-8.0 in 40 steps |
+| Each model type of the list gives PyTorch's loss and gradients, over two traces | One comparison | Small | Loss within 1e-5, gradients within 1e-3 |
+| Seven model types give PyTorch's loss and gradients, over two traces: `llama`, `mistral`, `qwen3`, `gemma3_text`, `phi3` with its long RoPE factors, `qwen3_moe` in the dense form and `gpt2` | Unit test | Small | Loss within 1e-5, gradients within 1e-3 |
+| Norms take no weight decay, and nothing else is exempt | Unit test | Small | Passes |
+| The trainer starts at the model's loss | Unit test | Small | Within 1e-5 |
+| FSDP on 2 GPUs trains as data parallelism does | Unit test | Small | Losses of 4 steps within 1e-4 |
+| A model type outside the list is refused, and so is a pipeline | Unit test | Small | Passes |
+| The published weights give PyTorch's loss, for four models | [Experiment](#published-weights) | Real | Within 2.0e-5 in fp32, the mixture of experts included |
+| A run resumes from its checkpoint and validates | [Experiment](#checkpoints) | Real | The uninterrupted run's losses exactly, its validation loss within 2e-8 |
+| Every model trains | [Experiment](#training-from-random-weights) | Real | The loss falls from 11.2-12.8 to 7.2-8.0 in 40 steps |
 
 `VERIFIED` is the outcome of one comparison with PyTorch, made on 2026-11-19
 with transformers 5.23.0, torch 2.10.0 and torchax 0.0.13, on CPU in fp32. For
@@ -147,18 +146,24 @@ again when one of the three versions moves.
 
 Not checked:
 
-- **The gradients at real size.** The runs compare the loss.
+- **The gradients at real size.** The experiments compare the loss.
 
-## Runs
+## Experiments
 
-On 8x MI350X, 2026-11-19 to 20.
+These are runs of the trainer on the adapter's models, launched by hand on
+GPUs. They are not part of the test suite, and neither the scripts that
+launched them nor the script of the comparison with PyTorch are in the
+repository. They ran on 8x MI350X on 2026-11-19 and 20.
 
-Published weights: each model's weights from the Hugging Face Hub in a local
-directory, named by `--model=transformers:` and `--init_from`, in fp32. The
-loss is the trainer's at step 0, on the batch it draws from WikiText-103's
-validation split in the model's own tokens, 8 sequences of 1,024 tokens. The
-reference is the loss of transformers' model, run by PyTorch on CPU, on the
-same batch. One MI350X; Qwen3-30B-A3B with FSDP on 8.
+### Published weights
+
+Each model starts from its published weights, and its loss is compared with
+PyTorch's. The weights come from the Hugging Face Hub in a local directory,
+named by `--model=transformers:` and `--init_from`, in fp32. The loss is the
+trainer's at step 0, on the batch it draws from WikiText-103's validation
+split in the model's own tokens, 8 sequences of 1,024 tokens. The reference is
+the loss of transformers' model, run by PyTorch on CPU, on the same batch. One
+MI350X; Qwen3-30B-A3B with FSDP on 8.
 
 | Published weights | Parameters | GPUs | PyTorch | Through the adapter | Difference | Peak HBM per GPU |
 |---|---|---|---|---|---|---|
@@ -167,11 +172,16 @@ same batch. One MI350X; Qwen3-30B-A3B with FSDP on 8.
 | `mistralai/Mistral-7B-v0.1` | 7.24B | 1 | 1.889283 | 1.889288 | 5.0e-06 | 111 GiB |
 | `Qwen/Qwen3-30B-A3B-Thinking-2507` | 30.53B | 8 | 2.107349 | 2.107363 | 1.4e-05 | 114 GiB |
 
-Training from random weights, each model's config from the same directory,
-in bf16 with fp32 parameters: 4 sequences of 2,048 tokens per GPU, 40 steps of
-AdamW at the trainer's defaults with rematerialization, on WikiText-103 in
-the model's own tokens. One run each; tokens/s per GPU is the median over
-steps 5-39.
+- **The published weights give PyTorch's loss** within 2.0e-5, the mixture
+  of experts included.
+
+### Training from random weights
+
+Each model trains from random weights, with its config from the same
+directory, in bf16 with fp32 parameters: 4 sequences of 2,048 tokens per GPU,
+40 steps of AdamW at the trainer's defaults with rematerialization, on
+WikiText-103 in the model's own tokens. One run each; tokens/s per GPU is the
+median over steps 5-39.
 
 | Config | Layout | GPUs | Tokens per step | Tokens/s per GPU | Peak HBM per GPU | Loss, step 0 | Steps 35-39 |
 |---|---|---|---|---|---|---|---|
@@ -183,8 +193,6 @@ steps 5-39.
 | `mistralai/Mistral-7B-v0.1` | fsdp | 8 | 65,536 | 11,971 | 35 GiB | 11.19 | 7.23 |
 | `Qwen/Qwen3-30B-A3B-Thinking-2507` | fsdp | 8 | 65,536 | 3,607 | 131 GiB | 12.38 | 7.15 |
 
-- **The published weights give PyTorch's loss** within 2.0e-5, the mixture
-  of experts included.
 - **Every model trains**: the loss falls from 11.2-12.8 to 7.2-8.0 in 40
   steps.
 - **Qwen3-30B-A3B runs through torchax on 8 GPUs** in the dense form of its
@@ -192,8 +200,11 @@ steps 5-39.
 - **These are single runs of 40 steps**, enough to see that a model runs,
   fits and learns, not a measurement of throughput.
 
-The script of the comparison with PyTorch and the scripts that launched these
-runs are not in the repository.
+### Checkpoints
+
+Qwen3-0.6B from its published weights, under FSDP on 2 GPUs in fp32, restores
+the checkpoint of step 3 and gives the uninterrupted run's losses of steps 3
+to 5 exactly, and its validation loss after them within 2e-8.
 
 ## Known issues
 
@@ -208,4 +219,4 @@ runs are not in the repository.
   again; Qwen3-30B-A3B was run with an empty cache directory.
 - **No fast mixture of experts.** The dense form computes every expert; this
   stack has no fast kernel for the routed forms
-  ([maxtext.md](maxtext.md#runs)).
+  ([maxtext.md](maxtext.md#mixture-of-experts)).
