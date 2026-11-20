@@ -3,8 +3,10 @@
 #
 # Both jobs install the JAX built from source. The CPU job adds MaxText and
 # MaxDiffusion and runs every test but those marked gpu; the GPU job adds the
-# ROCm plugin and MaxText and runs the gpu tests that need one GPU. Both take
-# the versions of their other packages from .github/ci-constraints.txt.
+# ROCm plugin, MaxText, MaxDiffusion, and transformers and diffusers with
+# torchax and PyTorch's CPU build, and runs the gpu tests that need one GPU.
+# Both take the versions of their other packages from
+# .github/ci-constraints.txt.
 
 name: CI
 
@@ -95,11 +97,22 @@ jobs:
               "https://github.com/$GITHUB_REPOSITORY/releases/download/$WHEELS/$(basename "${file//+/%2B}")"
           done < .github/ci-wheels.sha256
           sha256sum --check .github/ci-wheels.sha256
+      - name: Check out MaxDiffusion
+        run: |
+          commit=$(sed -n 's/^PINNED_COMMIT = "\(.*\)"$/\1/p' src/jax_titan/models/adapters/maxdiffusion.py)
+          git init --quiet "$RUNNER_TEMP/maxdiffusion"
+          cd "$RUNNER_TEMP/maxdiffusion"
+          git fetch --quiet --depth 1 https://github.com/AI-Hypercomputer/maxdiffusion "${commit:?}"
+          git checkout --quiet FETCH_HEAD
+          git apply "$GITHUB_WORKSPACE"/third_party/patches/maxdiffusion-*.patch
       - name: Install JAX-Titan
         # --system-site-packages: the container's ROCm is a set of Python packages.
+        # --no-deps: MaxDiffusion's own requirements include PyTorch and TensorFlow.
         run: |
           python3 -m venv --system-site-packages venv
-          venv/bin/python -m pip install wheels/*.whl -e ".[test,maxtext]" -c .github/ci-constraints.txt
+          venv/bin/python -m pip install wheels/*.whl -e ".[test,maxtext,maxdiffusion,transformers,diffusers]" \
+            -c .github/ci-constraints.txt --extra-index-url https://download.pytorch.org/whl/cpu
+          venv/bin/python -m pip install --no-deps -e "$RUNNER_TEMP/maxdiffusion"
       - name: Show installed versions
         run: venv/bin/python -m pip freeze
       - name: Run tests
