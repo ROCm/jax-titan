@@ -4,8 +4,8 @@
   python -m jax_titan.planning.budget --model=maxtext:llama3.1-70b --tokens=15e12 \
       --gpu=MI300X,MI325X,MI355X,MI455X --gpus=2048
   python -m jax_titan.planning.budget --model=hf:config.json --days=30 --gpu=MI325X --gpus=1024
-  python -m jax_titan.planning.budget --model=maxtext:llama3.1-8b --tokens=2e12 --gpu=MI355X \
-      --gpus=512 --from_run=runs/maxtext-llama3.1-8b
+  python -m jax_titan.planning.budget --model=llama3.1-8b --tokens=2e12 --gpu=MI355X \
+      --gpus=512 --from_run=docs/results/2026-11-07/llama3.1-8b_pp2_run-dir
 
 `--model` is a JAX-Titan Llama flavor, `maxtext:<name>` or `hf:<config.json>`, dense or
 mixture-of-experts. Give the tokens to train (`--tokens`, or `--dataset_tokens` and
@@ -20,7 +20,7 @@ a comma-separated list gets a table with a row per GPU. It reports:
   JAX-Titan run measured (`--from_run`: its achieved FLOP/s on the same GPU type, its MFU
   carried over to other types), stretched by ETTR for checkpoints, restarts and lost work:
   `--ettr`, or projected for this many GPUs from a checkpoint cost, a restart cost and a
-  failure rate (defaults: the MaxText Llama 3.1 8B recipe, and Llama 3's 419 unexpected
+  failure rate (defaults: a 1,000-step run of Llama 3.1 8B, and Llama 3's 419 unexpected
   interruptions in 54 days on 16,384 GPUs);
 - GPU-hours, energy at the GPUs' board power times `--power_fraction` and `--pue` (the
   GPU boundary; a run's power.jsonl gives the measured fraction), and cost;
@@ -49,9 +49,9 @@ from jax_titan.planning import models
 from jax_titan.planning import scaling
 
 DAY = 86400.0
-# Measured with JAX-Titan on Llama 3.1 8B (docs/planning.md): the recipe's steady checkpoint
-# cost and restart cost including the first save, and peak HBM over the analytic floor of
-# JAX-Titan's own pipeline (1.96-2.01; the MaxText adapter's 2.83).
+# Measured with JAX-Titan on Llama 3.1 8B (docs/planning.md): a 1,000-step run's steady
+# checkpoint cost and restart cost including the first save, and peak HBM over the analytic
+# floor of JAX-Titan's own pipeline (1.96-2.01).
 RECIPE_W_CP_S = 2.4
 RECIPE_RESTART_S = 175.0
 MEASURED_MEMORY_OVERHEAD = 2.0
@@ -167,8 +167,10 @@ def from_run(run_dir: str) -> dict:
   from jax_titan.observability import summarize  # pylint: disable=g-import-not-at-top
 
   run = summarize.run_metrics(run_dir)
-  out = {"run": run_dir, "device_kind": run.get("device_kind"),
-         "mfu": run.get("mfu_sustained") or run["mfu"]}
+  mfu = run.get("mfu_sustained") or run.get("mfu")
+  if mfu is None:
+    raise ValueError(f"{run_dir} has no MFU: no FLOP count, or no steady steps")
+  out = {"run": run_dir, "device_kind": run.get("device_kind"), "mfu": mfu}
   devices = run.get("devices") or 1
   if run.get("peak_flops_per_s"):
     peak_per_gpu = run["peak_flops_per_s"] / devices

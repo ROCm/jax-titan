@@ -45,7 +45,7 @@ def test_bridged_flux_gives_pytorchs_loss_and_gradient():
 
   eager = copy.deepcopy(model.module)
   eager.disable_gradient_checkpointing()
-  _, names = hfd.FAMILIES["FluxTransformer2DModel"]
+  names = hfd.FAMILIES["FluxTransformer2DModel"]
   pred = eager(**{names[k]: torch.from_numpy(np.array(v)) for k, v in x.items()})[0]
   loss = torch.mean((torch.from_numpy(target) - pred) ** 2)
   loss.backward()
@@ -77,6 +77,25 @@ def _losses(tmp_path, *flags):
   )
   assert result.returncode == 0, result.stdout[-2000:] + result.stderr[-4000:]
   return [r["loss"] for r in records.steps(records.read(log))]
+
+
+@pytest.mark.gpu
+def test_trainer_starts_at_the_models_loss(tmp_path):
+  import jax  # pylint: disable=g-import-not-at-top
+  import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+  from jax_titan.data import diffusion  # pylint: disable=g-import-not-at-top
+  from jax_titan.models.adapters import diffusers as hfd  # pylint: disable=g-import-not-at-top
+
+  losses = _losses(tmp_path, "--parallel=dp")
+  model = hfd.denoiser(hfd.config("FluxTransformer2DModel", **SMALL), seed=0, dtype=jnp.float32)
+  # The trainer's weights and its first synthetic batch, both of seed 0.
+  batches = diffusion.flux(
+      0, (1, 8), image_side=4, text_tokens=8, in_channels=16, joint_attention_dim=32,
+      pooled_projection_dim=32, guidance_embeds=True)
+  x, target = batches.next_batch(0)
+  (fn,) = model.stage_fns()
+  loss = jax.jit(fn)(*model.init(), {k: v[0] for k, v in x.items()}, target[0])
+  np.testing.assert_allclose(losses[0], loss, rtol=1e-5)
 
 
 @pytest.mark.gpu(2)
