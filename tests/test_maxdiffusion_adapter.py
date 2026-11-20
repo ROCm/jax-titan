@@ -94,6 +94,7 @@ def test_whole_wan_gives_wanmodels_output():
   from flax.linen import partitioning as nn_partitioning  # pylint: disable=g-import-not-at-top
   import jax  # pylint: disable=g-import-not-at-top
   import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+  from jax_titan import parallel  # pylint: disable=g-import-not-at-top
   from jax_titan.data import diffusion  # pylint: disable=g-import-not-at-top
   from jax_titan.models.adapters import maxdiffusion as md  # pylint: disable=g-import-not-at-top
   from maxdiffusion.models.wan.transformers.transformer_wan import WanModel  # pylint: disable=g-import-not-at-top
@@ -113,6 +114,11 @@ def test_whole_wan_gives_wanmodels_output():
     pred = model(hidden_states=x["latents"], timestep=x["timestep"],
                  encoder_hidden_states=x["txt"], deterministic=True)
   np.testing.assert_allclose(loss, jnp.mean((target - pred) ** 2), rtol=1e-5)
+  specs = parallel.tree_specs(params, whole.logical_axes, {"data": 2}, fsdp=True)
+  for path, spec in jax.tree_util.tree_flatten_with_path(specs)[0]:
+    assert "data" in spec
+    if path[0].key == "blocks":
+      assert spec[0] is None
 
 
 def _losses(tmp_path, model, overrides, *flags):
