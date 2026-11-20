@@ -282,23 +282,28 @@ within 8e-8.
 
 ## JAX-Titan's own Llama against the adapter
 
-The adapter is the reference for `jax_titan.models.llama`: MaxText's Llama
-and JAX-Titan's are two implementations of one model. `llama_config` gives a
-MaxText Llama's sizes as a config of JAX-Titan's model, and `llama_params`
-maps its weights: the layer axis first, MaxText's `1/sqrt(head_dim)` taken
-back out of the query projection, and, for Llama 3.1's RoPE, the query and
-key features of each head reordered from adjacent pairs to split halves.
+This section compares JAX-Titan's native Llama (`--model=llama3.1-8b`) with
+the adapter's Llama (`--model=maxtext:llama3.1-8b`): from the same weights the
+two give the same loss and the same gradients. The adapter is the reference.
 
-From the same weights the two give the same loss and the same gradients:
+MaxText's Llama and JAX-Titan's are two implementations of one model.
+`llama_config` gives a MaxText Llama's sizes as a config of JAX-Titan's model,
+and `llama_params` maps its weights: the layer axis first, MaxText's
+`1/sqrt(head_dim)` taken back out of the query projection, and, for Llama
+3.1's RoPE, the query and key features of each head reordered from adjacent
+pairs to split halves.
 
-- **At a small size**, in the tests above: within 1e-5 for the loss and 1e-3
-  for the gradients, in fp32 on a GPU, for `llama3.1-8b` and `llama3-8b`.
-- **At real size**, from Meta's Llama 3.1 8B weights on one MI350X, on the
-  batch of the published-weights table above (8 sequences of 1,024 tokens):
-  in fp32 JAX-Titan's Llama gives a loss of 1.959045 and the adapter
-  1.959046, 3.6e-7 apart, where PyTorch gives 1.959044. In bf16 they give
-  1.958346 and 1.958825, 4.8e-4 apart, where PyTorch's own bf16 gives
-  1.958628. At this size the loss was compared, not the gradients.
+At a small size, a unit test compares the two for `llama3.1-8b` and
+`llama3-8b` in fp32: the loss is within 1e-5 and the gradients within 1e-3.
+
+At real size, from Meta's Llama 3.1 8B weights on one MI350X, on the batch of
+[Published weights](#published-weights) (8 sequences of 1,024 tokens), the
+loss was compared, not the gradients:
+
+| Compute | JAX-Titan's Llama | Adapter | Difference | PyTorch |
+|---|---|---|---|---|
+| fp32 | 1.959045 | 1.959046 | 3.6e-7 | 1.959044 |
+| bf16 | 1.958346 | 1.958825 | 4.8e-4 | 1.958628 |
 
 The script of the real-size comparison is not in the repository.
 
