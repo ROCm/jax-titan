@@ -1,5 +1,5 @@
 """Trainer layouts for models from MaxText, MaxDiffusion, transformers and
-diffusers, for Ideogram 4 and for Command A+.
+diffusers, for Ideogram 4, for Command A+ and for FLUX.1.
 
 A model of another repository trains as one stage, the repository's model
 called whole, with `--parallel=dp` or `fsdp`:
@@ -26,7 +26,9 @@ a mask, which the providers decline, and the branch's model runs its own
 attention. `--model=command-a-plus` trains JAX-Titan's Command A+
 (`jax_titan.models.command_a`) on token windows or on a cache of conversations
 (`jax_titan.data.command_a`), as one stage or, with its embedding frozen, as a
-pipeline. For these, `--parallel=dp` runs the same stages, weights and batches
+pipeline. `--model=flux-dev` and `flux-schnell` train JAX-Titan's own FLUX.1
+(`jax_titan.models.flux`) on the synthetic batches of the two FLUX.1 adapters,
+as one stage. For these, `--parallel=dp` runs the same stages, weights and batches
 as one data-parallel `jax.jit` program, the no-pipeline reference, and
 `--parallel=fsdp` also shards parameters and optimizer state.
 
@@ -60,16 +62,17 @@ import os
 from jax_titan.trainer.layout import EVAL_STEPS, Layout, Workload, abstract, placement
 
 PROVIDERS = ("maxtext", "maxdiffusion", "transformers", "diffusers")
+FLUX = ("flux-dev", "flux-schnell")
 # JAX-Titan's own models that train through these layouts.
-MODELS = ("ideogram4", "command-a-plus")
+MODELS = ("ideogram4", "command-a-plus") + FLUX
 
 
 def default_num_stages(model: str) -> int:
   """`--num_stages` where it is not given: 2, and 1 for a model of another
-  repository, which is called whole."""
+  repository, which is called whole, and for FLUX.1, which has no pipeline."""
   provider, _, name = model.partition(":")
   whole = provider in PROVIDERS and (provider, name) != ("maxdiffusion", "ideogram4")
-  return 1 if whole else 2
+  return 1 if whole or model in FLUX else 2
 
 
 def _overrides(args) -> dict:
@@ -575,6 +578,41 @@ def _maxdiffusion(args, flavor, devices, optimizer):
   return layout, work
 
 
+def _flux(args, devices, optimizer):
+  """JAX-Titan's FLUX.1 on the batches of `_flux_batches`. Besides config
+  fields, `--model_overrides` takes `dtype`."""
+  import jax  # pylint: disable=g-import-not-at-top
+  import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+  from jax_titan import mpmd as jt_mpmd  # pylint: disable=g-import-not-at-top
+  from jax_titan.models import flux  # pylint: disable=g-import-not-at-top
+
+  _one_stage(args, ops=True)
+  overrides = {k: tuple(v) if isinstance(v, list) else v for k, v in _overrides(args).items()}
+  dtype = jnp.dtype(overrides.pop("dtype", "bfloat16"))
+  cfg = dataclasses.replace(flux.FLAVORS[args.model], **overrides)
+  mesh = _data_mesh(devices)
+  constrain = None
+  if args.parallel == "fsdp":
+    # Keeps the batch sharded, so FSDP gathers the weights and not the activations.
+    constrain = functools.partial(
+        jax.lax.with_sharding_constraint,
+        shardings=jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(jt_mpmd.DATA_AXIS)))
+  model = flux.Model(cfg, dtype=dtype, remat=args.remat, constrain=constrain)
+  batches, text_tokens = _flux_batches(
+      args, in_channels=cfg.in_channels, joint_attention_dim=cfg.joint_attention_dim,
+      pooled_projection_dim=cfg.pooled_projection_dim, guidance_embeds=cfg.guidance_embeds)
+  inputs, targets = _batch_specs(batches)
+  layout = _spmd_layout(args, mesh, model, optimizer, inputs, targets, lambda batch: batch)
+  samples = args.microbatches * args.microbatch_size
+  work = Workload(
+      num_params=_num_params(model.abstract(args.seed)),
+      tokens_per_step=samples * batches.tokens,
+      flops_per_step=samples * cfg.flops_per_sample(batches.tokens - text_tokens, text_tokens),
+      next_batch=batches.next_batch,
+  )
+  return layout, work
+
+
 def _ideogram(args, devices, optimizer, native: bool):
   """Ideogram 4, JAX-Titan's own (`native`) or from MaxDiffusion's Ideogram branch.
 
@@ -835,11 +873,13 @@ def build(args, devices, make_optimizer) -> tuple[Layout, Workload]:
     raise NotImplementedError(f"{args.model} takes neither --stage_fsdp nor --tensor_parallel")
   if args.parallel == "mpmd" and args.reduce_grads != "microbatch":
     raise NotImplementedError(f"{args.model} reduces gradients per microbatch only")
-  if args.init_from and provider not in ("maxtext", "transformers") and not native:
+  if args.init_from and provider not in ("maxtext", "transformers") and (
+      not native or args.model in FLUX):
     raise NotImplementedError(
         "--init_from loads parameters of maxtext: and transformers: models, ideogram4 and "
         "command-a-plus")
-  synthetic_only = provider == "diffusers" or (provider == "maxdiffusion" and not ideogram)
+  synthetic_only = (provider == "diffusers" or (provider == "maxdiffusion" and not ideogram)
+                    or args.model in FLUX)
   if synthetic_only and args.data not in ("", "synthetic"):
     raise NotImplementedError(f"{args.model} trains on synthetic batches only")
   if args.parallel != "mpmd" and (args.microbatches * args.microbatch_size) % len(devices):
@@ -858,6 +898,8 @@ def build(args, devices, make_optimizer) -> tuple[Layout, Workload]:
     return _ideogram(args, devices, optimizer, native)
   if args.model == "command-a-plus":
     return _command_a(args, devices, optimizer)
+  if args.model in FLUX:
+    return _flux(args, devices, optimizer)
   if provider == "maxdiffusion":
     return _maxdiffusion(args, name, devices, optimizer)
   raise ValueError(f"unknown model provider {provider!r}; known: {', '.join(PROVIDERS)}")

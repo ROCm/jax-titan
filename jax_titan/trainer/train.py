@@ -2,8 +2,9 @@
 
   python -m jax_titan.trainer.train --model=llama3.1-8b --num_stages=2
 
-`--model` is a JAX-Titan Llama flavor, `ideogram4`, `command-a-plus`, or a
-model of another repository, which takes `--parallel=dp` or `fsdp`:
+`--model` is a JAX-Titan Llama flavor, `ideogram4`, `command-a-plus`, FLUX.1
+(`flux-dev`, `flux-schnell`), or a model of another repository; FLUX.1 and the
+models of other repositories take `--parallel=dp` or `fsdp`:
 `maxtext:<name>`, `maxdiffusion:<name>`, `transformers:<name>` or
 `diffusers:<name>` (see `jax_titan.trainer.adapters` and docs/adapters).
 
@@ -39,8 +40,8 @@ def parse_args(argv=None):
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument(
       "--model", default="llama3.1-8b",
-      help="A Llama flavor (llama3.1-8b, llama3-test), ideogram4, command-a-plus, or a model "
-      "of another repository, with --parallel=dp or fsdp: "
+      help="A Llama flavor (llama3.1-8b, llama3-test), ideogram4, command-a-plus, or, with "
+      "--parallel=dp or fsdp, flux-dev, flux-schnell or a model of another repository: "
       "maxtext:<MaxText model name>, maxdiffusion:flux-dev, maxdiffusion:flux-schnell or "
       "maxdiffusion:wan2.1-t2v-1.3b, transformers:<directory or model type>, "
       "diffusers:<denoiser class or directory>. maxdiffusion:ideogram4 is the pipeline of "
@@ -48,8 +49,8 @@ def parse_args(argv=None):
   )
   parser.add_argument(
       "--model_overrides", default="",
-      help="JSON object of model config overrides for ideogram4, command-a-plus and for "
-      "the models of other repositories, e.g. '{\"base_num_decoder_layers\": 4}'.",
+      help="JSON object of model config overrides for ideogram4, command-a-plus, FLUX.1 and "
+      "for the models of other repositories, e.g. '{\"base_num_decoder_layers\": 4}'.",
   )
   parser.add_argument(
       "--ops", default="",
