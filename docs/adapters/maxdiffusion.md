@@ -150,7 +150,7 @@ validation loss after them.
 JAX-Titan's native FLUX.1 (`--model=flux-dev` and `flux-schnell`) is written
 after diffusers' FLUX.1, from which this adapter's FLUX.1 differs in two places
 ([Known issues](#known-issues)), so the two are not compared from the same
-weights; `--model_overrides='{"theta": 10000}'` removes the first. Trained
+weights; `--model_overrides='{"theta": 10000}'` removes the RoPE base's. Trained
 alike from random weights, with the same arguments `$ARGS` for both, they are
 compared as in the example of
 [native_comparison.md](native_comparison.md#example-flux1-dev), where this

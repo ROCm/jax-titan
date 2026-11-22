@@ -67,7 +67,7 @@ python3 jax_titan/observability/gemms.py runs/a.hlo --run_dir runs/a --merge [--
 # plots extra (matplotlib); the trainer draws <run_dir>/figures/ itself when it is there.
 python -m jax_titan.observability.plot runs/a runs/b --out figures
 
-# One network in two implementations trained alike, the reference first: the loss per
+# One network in two or more implementations trained alike, the reference first: the loss per
 # window of steps, the validation loss and tokens/s per GPU; repeats of a configuration
 # are grouped (docs/adapters/native_comparison.md).
 python -m jax_titan.observability.compare runs/native_r1 runs/native_r2 runs/adapter_r1 \
