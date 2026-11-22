@@ -87,7 +87,7 @@ XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" timeout -s KILL 1800 python -m jax_titan.t
 
 # JAX-Titan's own FLUX.1 on the batches of the two FLUX.1 adapters, no pipeline.
 ... --model=flux-dev --parallel=fsdp --microbatches=1 --microbatch_size=8 \
-  --resolution=512 ...
+  --resolution=512 --lr=1e-5 ...
 
 # JAX-Titan's own Ideogram 4, on synthetic batches (docs/recipes/ideogram4.md).
 ... --model=ideogram4 --parallel=fsdp --num_stages=1 --microbatches=1 \
@@ -168,7 +168,8 @@ a language model on token files of its own tokenizer (`--data` and
   against the calibrated ceiling too (`--ceilings`, from
   `python -m jax_titan.observability.ceilings`).
 - To set an adapter against JAX-Titan's own model of the same network, train
-  both with the same arguments but `--model`, three runs each, and read them
+  both with the same arguments but `--model` (and the `--model_overrides` that
+  make the networks the same), three runs each, and read them
   with `python -m jax_titan.observability.compare REFERENCE RUN ...`
   (`docs/adapters/native_comparison.md`): it groups the repeats and prints the
   loss per window of steps, the validation loss and tokens/s per GPU against

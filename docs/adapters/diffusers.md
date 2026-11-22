@@ -134,10 +134,18 @@ validation loss after them.
 
 JAX-Titan's native FLUX.1 (`--model=flux-dev` and `flux-schnell`) is written
 after this adapter's model, `FluxTransformer2DModel`: from the same weights
-the two give the same prediction, loss and gradients
+the two give the same prediction, loss and gradients in fp32
 ([native_comparison.md](native_comparison.md#jax-titans-flux1)). Trained alike
-from random weights, they are compared in the example of
-[native_comparison.md](native_comparison.md#example-flux1-dev).
+from random weights, with the same arguments `$ARGS` for both, they are
+compared as in the example of
+[native_comparison.md](native_comparison.md#example-flux1-dev):
+
+```bash
+python -m jax_titan.trainer.train --model=flux-dev $ARGS --run_dir=runs/native
+python -m jax_titan.trainer.train --model=diffusers:FluxTransformer2DModel \
+  --model_overrides='{"guidance_embeds": true}' $ARGS --run_dir=runs/adapter
+python -m jax_titan.observability.compare runs/native runs/adapter
+```
 
 ## Known issues
 

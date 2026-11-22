@@ -46,14 +46,14 @@ This is the target design; [What works](#what-works) lists what runs today.
   while a model is traced, never in a training step.
 - FLUX.1 (dev and schnell) as JAX-Titan's own model on `jax_titan.ops`,
   written after diffusers' `FluxTransformer2DModel` and matching it in
-  prediction, loss and gradients from the same weights; `--model=flux-dev`
-  trains it under `--parallel=dp` or `fsdp` on the synthetic batches of the
-  two FLUX.1 adapters.
+  prediction, loss and gradients from the same weights in fp32;
+  `--model=flux-dev` trains it under `--parallel=dp` or `fsdp` on the
+  synthetic batches of the two FLUX.1 adapters.
 - A comparison of an adapter with JAX-Titan's own model of the same network,
   Llama 3.1 8B or FLUX.1, trained alike
   (`python -m jax_titan.observability.compare`): the loss per window of steps
-  and the validation loss against the reference, with the variation from
-  step to step and between repeated runs for scale, and tokens/s per GPU
+  and the validation loss against the reference, with the variation between
+  repeated runs for scale, and tokens/s per GPU
   ([docs/adapters/native_comparison.md](docs/adapters/native_comparison.md)).
 - Ideogram 4 as JAX-Titan's own model on `jax_titan.ops`, written after
   diffusers' transformer and training example and matching diffusers' model;
@@ -184,7 +184,7 @@ JAX-Titan on AMD's SPUR cluster.
 | `jax_titan/planning` | Training budget planner and performance model: model shapes, GPU specs, memory, RCCL and MORI collectives, step time, time left |
 | `jax_titan/tuning` | hipBLASLt kernel selection for the GEMMs a program runs on ROCm: capture, sweep, override file and its checks; new kernels with TensileLite |
 | `examples/` | MPMD spike, parity checks, an example caption for Ideogram 4 and example conversations for Command A+ |
-| `tests/` | CPU tests: schedules and layouts against `jax.jit`, checkpoint resume, MaxText, MaxDiffusion, Ideogram 4 and Command A+ models |
+| `tests/` | CPU tests: schedules and layouts against `jax.jit`, checkpoint resume, MaxText, MaxDiffusion, Ideogram 4, Command A+ and FLUX.1 models, the comparison of runs |
 | `scripts/` | Container, build, environment, GPU-availability and post-run cleanup scripts |
 | `.cursor/skills/`, `.claude/skills/` | Agent skills for Cursor and Claude Code (identical copies): coding rules, upstream debugging, and running and cleaning up training jobs |
 | `third_party/patches/` | jaxlib, Shardy and MaxDiffusion patches |

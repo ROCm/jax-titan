@@ -30,8 +30,9 @@ links to the page that documents it.
    Command A+, published or fine-tuned.
 5. **Clean up.** `scripts/cleanup_after_train.sh` shows what it would stop and
    remove; `--yes` applies it.
-6. **Read the run.** `observability.summarize`, `profile`, `plot` and `ettr`;
-   `observability.gemms` lists the GEMMs of a run dumped with `--xla_dump_to`.
+6. **Read the run.** `observability.summarize`, `profile`, `plot`, `compare`
+   and `ettr`; `observability.gemms` lists the GEMMs of a run dumped with
+   `--xla_dump_to`.
    A measured run makes the next plan more accurate through
    `planning.budget --from_run` and `planning.step --calibrate`.
 
@@ -101,7 +102,7 @@ how to update the packages they install.
 | `observability.summarize RUN` | Step-time percentiles, MFU and HFU, startup and checkpoint costs; across runs, repeats and scaling. `--gate0 REFERENCE RUN` compares losses against a reference run |
 | `observability.profile TRACE_DIR` | Each GPU's compute, exposed collective, copy and idle shares from a `jax.profiler` trace |
 | `observability.plot RUN` | Figures of MFU, step time, loss, gradient norm and power over the run |
-| `observability.compare REFERENCE RUN ...` | One network in two implementations, such as JAX-Titan's own model and an adapter's, trained alike: the loss per window of steps and the validation loss against the reference's, with the variation from step to step and between repeats for scale, and tokens/s per GPU; `--figure` draws the loss curves ([adapters/native_comparison.md](adapters/native_comparison.md)) |
+| `observability.compare REFERENCE RUN ...` | One network in two implementations, such as JAX-Titan's own model and an adapter's, trained alike: the loss per window of steps and the validation loss against the reference's, with the variation between repeats for scale, and tokens/s per GPU; `--figure` draws the loss curves ([adapters/native_comparison.md](adapters/native_comparison.md)) |
 | `observability.ettr RUN` | ETTR, and the checkpoint interval and ETTR projected to more nodes |
 | `observability.collectives DIR` | RCCL Inspector completion times by operation and message size |
 | `observability.gemms DUMP` | Every GEMM the compiled program runs, from an XLA HLO dump of any program: M, N, K, batch, dtypes, operand layouts, library (hipBLASLt, rocBLAS, Triton) and kernel configuration, with launches per run, or per training step with `--run_dir`. Standard library only: `python3 jax_titan/observability/gemms.py DUMP` runs without JAX or an install ([metrics.md](metrics.md#gemms-in-the-compiled-program)) |
