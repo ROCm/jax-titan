@@ -46,7 +46,7 @@ def test_sets_each_configuration_against_the_reference(tmp_path):
   runs = [
       _write(tmp_path / "a1.jsonl", ref, run_dir="a1", validation=[(6, 5.2)]),
       _write(tmp_path / "a2.jsonl", [x + 0.01 for x in ref], step_s=1.25, run_dir="a2",
-             validation=[(6, 5.22)], attempts=2),
+             validation=[(6, 5.22)], hbm=(31.0,) * 8, attempts=2),
       _write(tmp_path / "b.jsonl", [x + 0.5 for x in ref], step_s=2.0, run_dir="b",
              validation=[(6, 5.7)], hbm=[56.1] + [23.0] * 7, model="maxtext:llama3.1-8b"),
   ]
@@ -69,32 +69,47 @@ def test_sets_each_configuration_against_the_reference(tmp_path):
   assert "| `maxtext:llama3.1-8b` | 8.8333 (+0.4950) | 6.0000 (+0.4950) |" in text
   assert "| Repeats differ by up to | 0.0100 | 0.0100 |" in text
   assert "| Repeats differ by up to | 0.0200 |" in text
-  assert "| `llama3.1-8b` (reference) | 8 | 2 | 900 | 22.2% | 1.000 | 30.0 |" in text
+  # The run with the highest peak, and a range only where that run's GPUs differ.
+  assert "| `llama3.1-8b` (reference) | 8 | 2 | 900 | 22.2% | 1.000 | 31.0 |" in text
   assert "| `maxtext:llama3.1-8b` | 8 | 1 | 500 | - | 0.556 | 23.0 to 56.1 |" in text
   if PLOTS:
     compare.figure(report, tmp_path / "two.png")
     assert (tmp_path / "two.png").stat().st_size > 0
+  out = tmp_path / "named.json"
+  compare.main([*map(str, runs), "--window=3", "--names=native,adapter", f"--json={out}"])
+  assert [c["name"] for c in json.loads(out.read_text())["configurations"]] == [
+      "native", "adapter"]
 
 
 def test_counts_a_window_only_where_a_run_has_all_of_it(tmp_path):
   ref = [10.0, 8.0, 7.0, 6.0, 5.5, 5.0]
-  runs = [_write(tmp_path / "a1.jsonl", ref, run_dir="a1"),
-          _write(tmp_path / "a2.jsonl", [x + 0.01 for x in ref[:4]], run_dir="a2")]
+  runs = [_write(tmp_path / "a1.jsonl", ref, run_dir="a1", validation=[(3, 7.0), (6, 5.2)]),
+          _write(tmp_path / "a2.jsonl", [x + 0.01 for x in ref[:4]], run_dir="a2",
+                 validation=[(3, 7.02)])]
   report = compare.compare(runs, window=3, skip=0)
   (a,) = report["configurations"]
   # The cut repeat has steps 0-3: it counts in the first window, not in the second.
   assert a["window_loss"] == pytest.approx([50.03 / 6, 16.5 / 3])
   assert a["repeats_differ"][0] == pytest.approx(0.01) and a["repeats_differ"][1] is None
+  assert a["validation"] == pytest.approx([7.01, 5.2])
   assert report["short_runs"] == [str(tmp_path / "a2.jsonl")]
-  assert f"Runs that end before step 5: `{tmp_path / 'a2.jsonl'}`." in compare.markdown(report)
+  assert compare.markdown(report).endswith(
+      f"Runs that end before step 5: `{tmp_path / 'a2.jsonl'}`.\n")
+  # The figure's means are the tables': full windows only, over the repeats that have them.
+  means = compare.centred_means([{s: x for s, x in enumerate(ref)},
+                                 {s: x + 0.01 for s, x in enumerate(ref[:4])}], window=3)
+  assert means == pytest.approx({1: 50.03 / 6, 2: (21 + 21.03) / 6, 3: 18.5 / 3, 4: 16.5 / 3})
 
 
 def test_names_what_else_differs(tmp_path):
   ref = [3.0, 2.0, 1.5, 1.2]
   runs = [_write(tmp_path / "dp.jsonl", ref, parallel="dp"),
           _write(tmp_path / "fsdp.jsonl", ref, parallel="fsdp", lr=1e-4),
-          _write(tmp_path / "dp4.jsonl", ref, parallel="dp", devices=4)]
+          _write(tmp_path / "dp4.jsonl", ref, parallel="dp", devices=4),
+          # A rehearsed failure and another step timeout are the same training: a repeat.
+          _write(tmp_path / "dp_again.jsonl", ref, parallel="dp", fail_at_step=3, step_timeout=0)]
   report = compare.compare(runs, window=2, skip=0)
+  assert len(report["configurations"][0]["runs"]) == 2
   assert [c["name"] for c in report["configurations"]] == [
       "lr=0.0003 num_devices=8 parallel=dp", "lr=0.0001 num_devices=8 parallel=fsdp",
       "lr=0.0003 num_devices=4 parallel=dp"]
@@ -109,9 +124,15 @@ def test_names_what_else_differs(tmp_path):
 
 def test_refuses_a_log_whose_attempts_trained_otherwise(tmp_path):
   log = _write(tmp_path / "run.jsonl", [3.0, 2.0])
-  with open(log, "a") as f:
-    f.write(json.dumps({"event": "start", "time": 0.0, "main_start": 0.0, "num_devices": 8,
-                        "args": ARGS | {"lr": 1e-3, "log_file": str(log)}}) + "\n")
+
+  def relaunch(**args):
+    with open(log, "a") as f:
+      f.write(json.dumps({"event": "start", "time": 0.0, "main_start": 0.0, "num_devices": 8,
+                          "args": ARGS | {"log_file": str(log)} | args}) + "\n")
+
+  relaunch(step_timeout=0)
+  compare.load(log)
+  relaunch(lr=1e-3)
   with pytest.raises(ValueError, match="attempts that differ in lr"):
     compare.load(log)
 

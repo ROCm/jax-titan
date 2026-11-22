@@ -5,9 +5,9 @@ JAX-Titan's native model and an adapter's: their loss curves and their speed.
       [--skip 5] [--names A,B] [--figure loss.svg] [--json OUT]
 
 Each RUN is a trainer `--run_dir` or log file, the first the reference. Runs
-whose trainer arguments and GPU count are the same, but for where they write,
-are repeats of one configuration and are reported together. It prints, as
-Markdown tables:
+whose trainer arguments and GPU count are the same, but for where they write
+and how they are watched, are repeats of one configuration and are reported
+together. It prints, as Markdown tables:
 
 - the trainer arguments, and the GPU counts, in which the configurations
   differ: two models compared on the same training differ in `--model` alone;
@@ -23,10 +23,10 @@ A run counts in a window only with every step of it, a configuration's value
 is the mean of the repeats that have it, and the output names the runs that
 end before the reference. With `--figure`, it also draws each configuration's
 loss, the mean of its repeats, against the step, with its mean over the
-window around each step and that mean's difference to the reference's (needs
-matplotlib, the `plots` extra). It judges nothing: models that start from
-other random weights part at first, and the tables give the numbers to judge
-their curves by.
+window around each step (`centred_means`) and that mean's difference to the
+reference's (needs matplotlib, the `plots` extra). It judges nothing: models
+that start from other random weights part at first, and the tables give the
+numbers to judge their curves by.
 """
 
 import argparse
@@ -37,13 +37,15 @@ import statistics
 from jax_titan.observability import records as rec
 from jax_titan.observability import summarize
 
-# Trainer arguments that say where a run writes, which repeats differ in.
-_OUTPUTS = ("run_dir", "log_file", "checkpoint_dir", "profile_dir", "save_params")
+# Trainer arguments that change neither a training step nor its speed: where a run
+# writes, how it is watched, a rehearsed failure, and the peak its MFU is taken against.
+_ASIDE = ("run_dir", "log_file", "checkpoint_dir", "profile_dir", "save_params", "step_timeout",
+          "power_sample_s", "fail_at_step", "peak_tflops_per_device")
 
 
 def _training(start: dict) -> dict:
-  """What sets a run's training apart: its arguments but the outputs, and its GPU count."""
-  args = {k: v for k, v in start["args"].items() if k not in _OUTPUTS}
+  """What sets a run's training apart: its arguments but `_ASIDE`, and its GPU count."""
+  args = {k: v for k, v in start["args"].items() if k not in _ASIDE}
   return args | {"num_devices": start.get("num_devices")}
 
 
@@ -52,15 +54,14 @@ def load(path, skip: int = 5) -> dict:
   step, and `summarize`'s metrics.
 
   Raises ValueError for a log whose attempts trained otherwise, since their
-  steps would mix two trainings under one name; a resumed rehearsal of a
-  failure (`--fail_at_step`) is the same training.
+  steps would mix two trainings under one name.
   """
   path = pathlib.Path(path)
   records = rec.read(summarize._logs(path)[0])  # pylint: disable=protected-access
   starts = rec.events(records, "start")
   if not starts:
     raise ValueError(f"{path} has no start record, so its trainer arguments are unknown")
-  training = [{k: v for k, v in _training(s).items() if k != "fail_at_step"} for s in starts]
+  training = [_training(s) for s in starts]
   changed = sorted({k for t in training[1:] for k in t.keys() | training[0].keys()
                     if t.get(k) != training[0].get(k)})
   if changed:
@@ -108,6 +109,20 @@ def _mean(loss: dict, lo: int, hi: int) -> float | None:
 
 def _spread(values: list) -> float | None:
   return max(values) - min(values) if len(values) > 1 else None
+
+
+def centred_means(losses: list[dict], window: int) -> dict:
+  """The mean loss over the `window` steps around each step, the mean over the
+  repeats (`losses`, step to loss) that have every one of those steps; steps
+  whose window reaches past the runs are left out."""
+  steps, half = sorted(set().union(*losses)), window // 2
+  out = {}
+  for s in steps:
+    lo = s - half
+    means = [m for m in (_mean(loss, lo, lo + window) for loss in losses) if m is not None]
+    if lo >= 0 and means:
+      out[s] = statistics.fmean(means)
+  return out
 
 
 def compare(paths: list, window: int = 50, skip: int = 5, names: list | None = None) -> dict:
@@ -181,9 +196,6 @@ def markdown(report: dict) -> str:
   lines = [f"Reference: `{ref['name']}`." + ("" if len(configs) == 1 else (
       " The configurations differ in `--model` alone." if not differs else
       f" The configurations {also}differ in " + ", ".join(map(_argument, differs)) + ":"))]
-  if report["short_runs"]:
-    lines.append(f"\nRuns that end before step {report['last_step']}: "
-                 + ", ".join(f"`{r}`" for r in report["short_runs"]) + ".")
 
   def table(title, columns, rows):
     lines.extend(["", f"| {title} | " + " | ".join(columns) + " |",
@@ -224,6 +236,9 @@ def markdown(report: dict) -> str:
         _fmt(speed / base if speed and base else None, ".3f"), _hbm(c["peak_hbm_gib"])]))
   table("Speed", ["GPUs", "Runs", "Tokens/s per GPU", "Spread over runs", "Ratio to reference",
                   "Peak HBM per GPU (GiB)"], rows)
+  if report["short_runs"]:
+    lines.append(f"\nRuns that end before step {report['last_step']}: "
+                 + ", ".join(f"`{r}`" for r in report["short_runs"]) + ".")
   return "\n".join(lines) + "\n"
 
 
@@ -242,21 +257,14 @@ def figure(report: dict, path) -> None:
   else:
     fig, loss_ax = plt.subplots(figsize=(10, 4.5), constrained_layout=True)
 
-  def of_runs(losses: list) -> dict:
-    steps = sorted(set().union(*losses))
-    return {s: statistics.fmean(loss[s] for loss in losses if s in loss) for s in steps}
-
-  def centred(loss: dict) -> dict:
-    steps, half = sorted(loss), window // 2
-    return {s: statistics.fmean(loss[t] for t in steps[max(0, i - half):i - half + window])
-            for i, s in enumerate(steps)}
-
   means, colors = [], []
   for c, losses in zip(configs, report["_loss"]):
-    loss = of_runs(losses)
-    line, = loss_ax.plot(list(loss), list(loss.values()), linewidth=0.5, alpha=0.35)
+    steps = sorted(set().union(*losses))
+    line, = loss_ax.plot(
+        steps, [statistics.fmean(loss[s] for loss in losses if s in loss) for s in steps],
+        linewidth=0.5, alpha=0.35)
     colors.append(line.get_color())
-    means.append(centred(loss))
+    means.append(centred_means(losses, window))
     loss_ax.plot(list(means[-1]), list(means[-1].values()), color=colors[-1], linewidth=1.5,
                  label=c["name"])
   loss_ax.set(ylabel="training loss",
