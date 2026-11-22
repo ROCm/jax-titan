@@ -1,33 +1,36 @@
-"""Compares training runs of one model in two implementations, such as JAX-Titan's
-native model and an adapter's: their loss curves and their speed.
+"""Compares training runs of one network in two or more implementations, such as
+JAX-Titan's native model and an adapter's: their loss curves and their speed.
 
   python -m jax_titan.observability.compare REFERENCE RUN [RUN ...] [--window 50]
       [--skip 5] [--names A,B] [--figure loss.svg] [--json OUT]
 
 Each RUN is a trainer `--run_dir` or log file, the first the reference. Runs
-whose trainer arguments are the same but for where they write are repeats of
-one configuration and are reported together. It prints, as Markdown tables:
+whose trainer arguments and GPU count are the same, but for where they write,
+are repeats of one configuration and are reported together. It prints, as
+Markdown tables:
 
-- the trainer arguments in which the configurations differ: two models
-  compared on the same training differ in `--model` alone;
+- the trainer arguments, and the GPU counts, in which the configurations
+  differ: two models compared on the same training differ in `--model` alone;
 - the mean training loss over each window of `--window` steps and the
-  validation losses, each with its difference to the reference; for scale,
-  how much the reference's loss varies from one step to the next, and how
-  much the repeats of a configuration differ;
+  validation losses, each with its difference to the reference and, for
+  scale, how much the repeats of a configuration differ;
 - tokens/s per GPU, the median over steady steps (as `summarize` takes it)
   and over the repeats, with the repeats' spread and the ratio to the
-  reference, and peak HBM per GPU, as a range where the GPUs differ.
+  reference, and the highest peak HBM per GPU of a run, as a range where its
+  GPUs differ.
 
-With `--figure`, it also draws each configuration's loss against the step,
-its mean over the window and the difference of that mean to the
-reference's (needs matplotlib, the `plots` extra). It judges nothing: models
-that start from other random weights part at first, and the tables give the
-numbers to judge their curves by.
+A run counts in a window only with every step of it, a configuration's value
+is the mean of the repeats that have it, and the output names the runs that
+end before the reference. With `--figure`, it also draws each configuration's
+loss, the mean of its repeats, against the step, with its mean over the
+window around each step and that mean's difference to the reference's (needs
+matplotlib, the `plots` extra). It judges nothing: models that start from
+other random weights part at first, and the tables give the numbers to judge
+their curves by.
 """
 
 import argparse
 import json
-import math
 import pathlib
 import statistics
 
@@ -38,18 +41,33 @@ from jax_titan.observability import summarize
 _OUTPUTS = ("run_dir", "log_file", "checkpoint_dir", "profile_dir", "save_params")
 
 
+def _training(start: dict) -> dict:
+  """What sets a run's training apart: its arguments but the outputs, and its GPU count."""
+  args = {k: v for k, v in start["args"].items() if k not in _OUTPUTS}
+  return args | {"num_devices": start.get("num_devices")}
+
+
 def load(path, skip: int = 5) -> dict:
-  """One run: its trainer arguments, its loss by step and validation loss by
-  step, and `summarize`'s metrics."""
+  """One run: its training (`_training`), its loss by step and validation loss by
+  step, and `summarize`'s metrics.
+
+  Raises ValueError for a log whose attempts trained otherwise, since their
+  steps would mix two trainings under one name; a resumed rehearsal of a
+  failure (`--fail_at_step`) is the same training.
+  """
   path = pathlib.Path(path)
   records = rec.read(summarize._logs(path)[0])  # pylint: disable=protected-access
-  start = next(iter(rec.events(records, "start")), None)
-  if start is None:
+  starts = rec.events(records, "start")
+  if not starts:
     raise ValueError(f"{path} has no start record, so its trainer arguments are unknown")
-  args = {k: v for k, v in start["args"].items() if k not in _OUTPUTS}
+  training = [{k: v for k, v in _training(s).items() if k != "fail_at_step"} for s in starts]
+  changed = sorted({k for t in training[1:] for k in t.keys() | training[0].keys()
+                    if t.get(k) != training[0].get(k)})
+  if changed:
+    raise ValueError(f"{path} holds attempts that differ in {', '.join(changed)}")
   return {
       "run": str(path),
-      "args": args,
+      "args": _training(starts[0]),
       "loss": {r["step"]: r["loss"] for r in rec.steps(records)},
       "validation": {e["step"]: e["loss"] for e in rec.events(records, "eval")},
       "metrics": summarize.run_metrics(path, skip=skip),
@@ -57,9 +75,9 @@ def load(path, skip: int = 5) -> dict:
 
 
 def configurations(runs: list[dict]) -> list[dict]:
-  """Runs grouped by their trainer arguments, the reference's configuration first,
-  each named by its `--model` or, where models repeat, by the arguments that
-  set it apart."""
+  """Runs grouped by their training, the reference's configuration first, each
+  named by its `--model` or, where models repeat, by the arguments that set it
+  apart."""
   groups = {}
   for r in runs:
     groups.setdefault(json.dumps(r["args"], sort_keys=True), []).append(r)
@@ -82,16 +100,14 @@ def _windows(loss: dict, window: int) -> list[tuple[int, int]]:
 
 
 def _mean(loss: dict, lo: int, hi: int) -> float | None:
-  values = [loss[s] for s in range(lo, hi) if s in loss]
-  return statistics.fmean(values) if values else None
+  """The mean loss of steps lo to hi - 1, or None for a run that lacks one of them."""
+  if any(s not in loss for s in range(lo, hi)):
+    return None
+  return statistics.fmean(loss[s] for s in range(lo, hi))
 
 
-def _step_to_step(loss: dict, lo: int, hi: int) -> float | None:
-  """How much the loss of a step varies around the curve: the deviation of the
-  differences of neighbouring steps over sqrt(2), which the curve's own slope
-  hardly reaches."""
-  diffs = [loss[s + 1] - loss[s] for s in range(lo, hi - 1) if s in loss and s + 1 in loss]
-  return statistics.pstdev(diffs) / math.sqrt(2) if len(diffs) > 1 else None
+def _spread(values: list) -> float | None:
+  return max(values) - min(values) if len(values) > 1 else None
 
 
 def compare(paths: list, window: int = 50, skip: int = 5, names: list | None = None) -> dict:
@@ -104,32 +120,34 @@ def compare(paths: list, window: int = 50, skip: int = 5, names: list | None = N
       raise ValueError(f"{len(names)} names for {len(configs)} configurations")
     for c, name in zip(configs, names):
       c["name"] = name
-  reference = configs[0]
-  windows = _windows(reference["runs"][0]["loss"], window)
-  eval_steps = sorted(reference["runs"][0]["validation"])
+  first = configs[0]["runs"][0]
+  windows = _windows(first["loss"], window)
+  eval_steps = sorted(first["validation"])
+  last = windows[-1][1] - 1 if windows else 0
   for c in configs:
     runs = c["runs"]
-    means = [[_mean(r["loss"], lo, hi) for r in runs] for lo, hi in windows]
-    c["window_loss"] = [statistics.fmean(m) if None not in m else None for m in means]
-    c["repeats_differ"] = [max(m) - min(m) if len(m) > 1 and None not in m else None
-                           for m in means]
-    vals = [[r["validation"].get(s) for r in runs] for s in eval_steps]
-    c["validation"] = [statistics.fmean(v) if None not in v else None for v in vals]
+    means = [[m for m in (_mean(r["loss"], lo, hi) for r in runs) if m is not None]
+             for lo, hi in windows]
+    c["window_loss"] = [statistics.fmean(m) if m else None for m in means]
+    c["repeats_differ"] = [_spread(m) for m in means]
+    vals = [[r["validation"][s] for r in runs if s in r["validation"]] for s in eval_steps]
+    c["validation"] = [statistics.fmean(v) if v else None for v in vals]
+    c["validation_repeats_differ"] = [_spread(v) for v in vals]
     speeds = [r["metrics"].get("tokens_per_s_per_gpu") for r in runs]
     speeds = [s for s in speeds if s]
     c["tokens_per_s_per_gpu"] = statistics.median(speeds) if speeds else None
-    c["speed_spread"] = ((max(speeds) - min(speeds)) / statistics.median(speeds)
+    c["speed_spread"] = (_spread(speeds) / statistics.median(speeds)
                          if len(speeds) > 1 else None)
     hbm = [r["metrics"]["peak_hbm_gib"] for r in runs if r["metrics"].get("peak_hbm_gib")]
-    c["peak_hbm_gib"] = {"min": min(h["min"] for h in hbm),
-                         "max": max(h["max"] for h in hbm)} if hbm else None
-    c["devices"] = runs[0]["metrics"].get("devices")
-  first = reference["runs"][0]["loss"]
+    c["peak_hbm_gib"] = max(hbm, key=lambda h: h["max"]) if hbm else None
   return {
       "window": window,
+      "skip": skip,
       "windows": windows,
       "eval_steps": eval_steps,
-      "step_to_step": [_step_to_step(first, lo, hi) for lo, hi in windows],
+      "last_step": last,
+      "short_runs": [r["run"] for c in configs for r in c["runs"]
+                     if not r["loss"] or max(r["loss"]) < last],
       "configurations": [
           {k: v for k, v in c.items() if k != "runs"} | {"runs": [r["run"] for r in c["runs"]]}
           for c in configs],
@@ -142,7 +160,7 @@ def _fmt(x, spec: str) -> str:
 
 
 def _hbm(peak: dict | None) -> str:
-  """The peak HBM of the GPUs, or its range where the GPUs differ by 1 GiB or more."""
+  """A run's peak HBM per GPU, or its range where the GPUs differ by 1 GiB or more."""
   if peak is None:
     return "-"
   if peak["max"] - peak["min"] < 1:
@@ -150,14 +168,22 @@ def _hbm(peak: dict | None) -> str:
   return f"{peak['min']:.1f} to {peak['max']:.1f}"
 
 
+def _argument(key: str) -> str:
+  return "GPUs" if key == "num_devices" else f"`--{key}`"
+
+
 def markdown(report: dict) -> str:
   """The report as Markdown tables."""
   configs = report["configurations"]
   ref = configs[0]
   differs = sorted({k for c in configs for k in c["differs"] if k != "model"})
+  also = "also " if any("model" in c["differs"] for c in configs) else ""
   lines = [f"Reference: `{ref['name']}`." + ("" if len(configs) == 1 else (
       " The configurations differ in `--model` alone." if not differs else
-      " The configurations also differ in " + ", ".join(f"`--{k}`" for k in differs) + ":"))]
+      f" The configurations {also}differ in " + ", ".join(map(_argument, differs)) + ":"))]
+  if report["short_runs"]:
+    lines.append(f"\nRuns that end before step {report['last_step']}: "
+                 + ", ".join(f"`{r}`" for r in report["short_runs"]) + ".")
 
   def table(title, columns, rows):
     lines.extend(["", f"| {title} | " + " | ".join(columns) + " |",
@@ -171,26 +197,29 @@ def markdown(report: dict) -> str:
     return [_fmt(v, ".4f") + ("" if c is ref or v is None or b is None else f" ({v - b:+.4f})")
             for v, b in zip(c[key], ref[key])]
 
+  def repeats(key, n):
+    values = [max((c[key][i] for c in configs if c[key][i] is not None), default=None)
+              for i in range(n)]
+    return [("Repeats differ by up to", [_fmt(v, ".4f") for v in values])] if any(
+        v is not None for v in values) else []
+
   if differs:
-    table("Configuration", [f"`--{k}`" for k in differs],
+    table("Configuration", [_argument(k) for k in differs],
           [(named(c), [f"`{json.dumps(c['differs'].get(k))}`" for k in differs])
            for c in configs])
   columns = [f"{lo}-{hi - 1}" for lo, hi in report["windows"]]
-  rows = [(named(c), against_reference(c, "window_loss")) for c in configs]
-  rows.append(("Step to step, reference", [_fmt(v, ".4f") for v in report["step_to_step"]]))
-  repeats = [max((c["repeats_differ"][i] for c in configs if c["repeats_differ"][i] is not None),
-                 default=None) for i in range(len(columns))]
-  if any(r is not None for r in repeats):
-    rows.append(("Repeats differ by up to", [_fmt(v, ".4f") for v in repeats]))
-  table("Training loss, mean over steps", columns, rows)
+  table("Training loss, mean over steps", columns,
+        [(named(c), against_reference(c, "window_loss")) for c in configs]
+        + repeats("repeats_differ", len(columns)))
   if report["eval_steps"]:
     table("Validation loss, after step", [str(s) for s in report["eval_steps"]],
-          [(named(c), against_reference(c, "validation")) for c in configs])
+          [(named(c), against_reference(c, "validation")) for c in configs]
+          + repeats("validation_repeats_differ", len(report["eval_steps"])))
   rows = []
   for c in configs:
     speed, base, spread = c["tokens_per_s_per_gpu"], ref["tokens_per_s_per_gpu"], c["speed_spread"]
     rows.append((named(c), [
-        str(c["devices"]), str(len(c["runs"])), _fmt(speed, ",.0f"),
+        str(c["args"]["num_devices"]), str(len(c["runs"])), _fmt(speed, ",.0f"),
         "-" if spread is None else f"{100 * spread:.1f}%",
         _fmt(speed / base if speed and base else None, ".3f"), _hbm(c["peak_hbm_gib"])]))
   table("Speed", ["GPUs", "Runs", "Tokens/s per GPU", "Spread over runs", "Ratio to reference",
@@ -199,8 +228,9 @@ def markdown(report: dict) -> str:
 
 
 def figure(report: dict, path) -> None:
-  """Each configuration's loss against the step with its mean over the window
-  around each step, and the difference of that mean to the reference's."""
+  """Each configuration's loss, the mean of its repeats, against the step, with
+  its mean over the window around each step, and the difference of that mean
+  to the reference's."""
   from jax_titan.observability import plot  # pylint: disable=g-import-not-at-top
 
   plt = plot._pyplot()  # pylint: disable=protected-access
@@ -212,23 +242,26 @@ def figure(report: dict, path) -> None:
   else:
     fig, loss_ax = plt.subplots(figsize=(10, 4.5), constrained_layout=True)
 
+  def of_runs(losses: list) -> dict:
+    steps = sorted(set().union(*losses))
+    return {s: statistics.fmean(loss[s] for loss in losses if s in loss) for s in steps}
+
   def centred(loss: dict) -> dict:
-    steps = sorted(loss)
-    half = window // 2
-    return {s: statistics.fmean(loss[t] for t in steps[max(0, i - half):i + half + 1])
+    steps, half = sorted(loss), window // 2
+    return {s: statistics.fmean(loss[t] for t in steps[max(0, i - half):i - half + window])
             for i, s in enumerate(steps)}
 
   means, colors = [], []
   for c, losses in zip(configs, report["_loss"]):
-    first = losses[0]
-    line, = loss_ax.plot(sorted(first), [first[s] for s in sorted(first)], linewidth=0.5,
-                         alpha=0.35)
+    loss = of_runs(losses)
+    line, = loss_ax.plot(list(loss), list(loss.values()), linewidth=0.5, alpha=0.35)
     colors.append(line.get_color())
-    means.append(centred(first))
+    means.append(centred(loss))
     loss_ax.plot(list(means[-1]), list(means[-1].values()), color=colors[-1], linewidth=1.5,
                  label=c["name"])
   loss_ax.set(ylabel="training loss",
-              title=f"Training loss of each step, and its mean over the {window} steps around it")
+              title=f"Training loss, the mean of the repeats, and its mean over the {window} "
+              "steps around each step")
   loss_ax.legend(fontsize=8)
   if len(configs) > 1:
     for c, mean, color in list(zip(configs, means, colors))[1:]:
@@ -261,12 +294,12 @@ def main(argv=None):
   report = compare(args.runs, window=args.window, skip=args.skip,
                    names=args.names.split(",") if args.names else None)
   print(markdown(report), end="")
-  if args.figure:
-    figure(report, args.figure)
-    print(f"\nwrote {args.figure}")
   if args.json:
     out = {k: v for k, v in report.items() if not k.startswith("_")}
     pathlib.Path(args.json).write_text(json.dumps(out, indent=1) + "\n")
+  if args.figure:
+    figure(report, args.figure)
+    print(f"\nwrote {args.figure}")
   return 0
 
 
