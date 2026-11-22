@@ -28,8 +28,8 @@ from jax_titan import ops
 
 @dataclasses.dataclass(frozen=True)
 class FluxConfig:
-  """The fields of diffusers' `FluxTransformer2DModel` config that FLUX.1 sets; the defaults
-  are FLUX.1's."""
+  """The fields of diffusers' `FluxTransformer2DModel` config but `patch_size` and
+  `out_channels`, which FLUX.1 leaves at 1 and at `in_channels`; the defaults are FLUX.1's."""
 
   in_channels: int = 64
   num_layers: int = 19

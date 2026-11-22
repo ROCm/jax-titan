@@ -158,7 +158,8 @@ def test_every_parameter_is_sharded_and_only_norms_do_not_decay():
 
 
 def test_initializes_as_pytorch_initializes_diffusers():
-  params = jax.device_get(flux.init_params(flux.FluxConfig(**CONFIG), jax.random.key(0)))
+  cfg = flux.FluxConfig(**CONFIG, guidance_embeds=True)
+  params = jax.device_get(flux.init_params(cfg, jax.random.key(0)))
   leaves = {tuple(k.key for k in path): leaf
             for path, leaf in jax.tree_util.tree_flatten_with_path(params)[0]}
   scaled = {"weights": [], "biases": []}
