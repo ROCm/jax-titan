@@ -130,6 +130,15 @@ A small FLUX.1, under FSDP on 2 GPUs in fp32, restores the checkpoint of step
 3 and gives the uninterrupted run's losses of steps 3 to 5 exactly, and its
 validation loss after them.
 
+## JAX-Titan's own FLUX.1 against the adapter
+
+JAX-Titan's native FLUX.1 (`--model=flux-dev` and `flux-schnell`) is written
+after this adapter's model, `FluxTransformer2DModel`: from the same weights
+the two give the same prediction, loss and gradients
+([native_comparison.md](native_comparison.md#jax-titans-flux1)). Trained alike
+from random weights, they are compared in the example of
+[native_comparison.md](native_comparison.md#example-flux1-dev).
+
 ## Known issues
 
 - **A start from the compilation cache was not checked for the denoiser**:

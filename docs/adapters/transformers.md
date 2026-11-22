@@ -205,6 +205,16 @@ Qwen3-0.6B from its published weights, under FSDP on 2 GPUs in fp32, restores
 the checkpoint of step 3 and gives the uninterrupted run's losses of steps 3
 to 5 exactly, and its validation loss after them within 2e-8.
 
+## JAX-Titan's own Llama against the adapter
+
+JAX-Titan's native Llama (`--model=llama3.1-8b`) is the network of Llama 3.1
+8B's `config.json`. Trained alike from random weights, it is compared with
+this adapter's Llama in the example of
+[native_comparison.md](native_comparison.md#example-llama-31-8b). From the
+same weights, it gives MaxText's loss and gradients
+([maxtext.md](maxtext.md#jax-titans-own-llama-against-the-adapter)), as this
+adapter gives PyTorch's ([Published weights](#published-weights)).
+
 ## Known issues
 
 - **A slow start from the compilation cache.** JAX-Titan's environment keeps

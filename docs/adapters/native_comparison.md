@@ -1,0 +1,270 @@
+# Comparing an adapter with JAX-Titan's own model
+
+An adapter trains another repository's network with JAX-Titan's trainer.
+Where JAX-Titan has its own model of the same network, the two can be trained
+alike: the same trainer, optimizer, batches and layout, with only `--model`
+changed, so that what differs is the network's implementation and its
+operators. `python -m jax_titan.observability.compare` reads such runs and
+sets each against a reference: the loss, the validation loss and the speed.
+
+## Models
+
+JAX-Titan has its own model of these adapters' networks:
+
+| JAX-Titan's own model | The same network through an adapter |
+|---|---|
+| `llama3.1-8b` | `maxtext:llama3.1-8b`; `transformers:<directory>` with Llama 3.1 8B's `config.json` |
+| `flux-dev` | `maxdiffusion:flux-dev`; `diffusers:FluxTransformer2DModel` with `{"guidance_embeds": true}` |
+| `flux-schnell` | `maxdiffusion:flux-schnell`; `diffusers:FluxTransformer2DModel` |
+
+The adapters' other models, Qwen3, Gemma 3, Mistral and Wan 2.1 among them,
+have no JAX-Titan model yet. The tool reads any runs, so a JAX-Titan model
+added later is compared the same way and adds a row here.
+
+## JAX-Titan's FLUX.1
+
+### The model
+
+`models/flux.py` is FLUX.1's denoiser written for JAX-Titan, after diffusers'
+`FluxTransformer2DModel` 0.43.0. `--model=flux-dev` has the published
+FLUX.1-dev's sizes and guidance embedding, 11.90B parameters, and
+`flux-schnell` FLUX.1-schnell's, 11.89B; `--model_overrides` takes config
+fields and `"dtype"`. Its random weights are drawn as PyTorch draws those of
+diffusers' model: weights and biases uniform within 1/sqrt(fan-in) of zero,
+norm weights one. It trains from random weights under `--parallel=dp` or
+`fsdp`, on the synthetic batches the two FLUX.1 adapters take
+(`jax_titan.data.diffusion`), with checkpoints, validation and
+rematerialization. It has no pipeline, reads no published weights and draws
+no pictures. Its attention, the norms of its queries and keys, its rotary
+embedding and its GEMMs go through `jax_titan.ops`; only the `native`
+providers were run.
+
+### How it is verified
+
+The unit tests are in `tests/test_flux.py`.
+
+| What is checked | By | Size | Result |
+|---|---|---|---|
+| Prediction, loss and gradients equal diffusers' model from the same weights, with and without the guidance embedding | Unit test | Small, fp32 | Within 1e-5, gradients within 1e-3 |
+| FLUX.1-dev's parameter count is diffusers' model's, 11,901,408,320 | Unit test | Real | Equal |
+| FSDP shards every parameter, and never along the block axis | Unit test | Real | Yes |
+| FSDP gives data parallelism's losses and validation loss | Unit test | Small | Within 1e-5 |
+| A resumed run repeats the uninterrupted one | Unit test | Small | Exactly |
+| Prediction and loss equal diffusers' model from the same weights | [Experiment](#flux1-dev-from-the-same-weights-as-diffusers) | Real, fp32 | Loss within 1.6e-8, prediction within 7.7e-6 |
+| FSDP on 8 GPUs gives data parallelism's losses on one | [Experiment](#fsdp-against-data-parallelism-at-real-size) | Real, fp32 | Within 1.2e-7 over 10 steps |
+
+### FLUX.1-dev from the same weights as diffusers
+
+Both models predict one sample from the same random weights at FLUX.1-dev's
+size: diffusers' `FluxTransformer2DModel` with the guidance embedding, 11.90B
+parameters initialized by PyTorch under `torch.manual_seed(0)`, and
+JAX-Titan's FLUX.1 with those weights. The sample is the trainer's first
+synthetic one at 512 x 512 pixels, 1,024 image tokens and 512 text tokens.
+Both compute in fp32, diffusers in PyTorch 2.10.0 on CPU and JAX-Titan's model
+on one MI350X, on 2026-11-21. The losses are 2.3219905 and 2.3219905, 1.6e-8
+apart relative to their value; the predictions, of up to 2.62, differ by at
+most 7.7e-6 and by 1.4e-6 on average. Gradients are compared in the unit
+tests only, and the script of this comparison is not in the repository.
+
+### FSDP against data parallelism at real size
+
+JAX-Titan's FLUX.1-dev trains 10 steps from the same random weights under
+`--parallel=dp` on one MI350X and under `--parallel=fsdp` on 8, on the same 8
+samples of 512 x 512 pixels a step, in fp32 with `--lr=1e-5`, on 2026-11-22.
+The losses of the 10 steps differ by at most 1.2e-7 of their value and the
+gradient norms by 1.1e-7. The peak HBM per GPU is 186.8 GiB under data
+parallelism and 25.5 GiB under FSDP, except on the first GPU, 56.1 GiB: the
+model's random weights are drawn there and then sharded, as JAX-Titan's
+Ideogram 4 and Command A+ draw theirs.
+
+## Running a comparison
+
+Train each model with the same arguments, `--seed` among them, so that every
+run takes the same batches, and change only `--model`, with the
+`--model_overrides` that make the networks the same. Give each run its own
+`--run_dir`, and run each model three times for its speed, in turns, so that a
+slow spell of the node falls on all of them. Then read the runs, the
+reference first:
+
+```bash
+python -m jax_titan.observability.compare runs/native_r1 runs/native_r2 runs/native_r3 \
+  runs/adapter_r1 runs/adapter_r2 runs/adapter_r3 --figure loss.png
+```
+
+Runs whose arguments are the same but for where they write are repeats of one
+configuration. The tool prints, as Markdown tables:
+
+- **Training loss**: the mean over each window of `--window` steps, 50 by
+  default, with each configuration's difference to the reference. Two rows
+  give the scale: how much the reference's loss varies from one step to the
+  next, and how much the repeats of a configuration differ.
+- **Validation loss**: after every validation pass (`--eval_every`), on the
+  same held-out batches for every configuration.
+- **Speed**: tokens/s per GPU, the median over each run's steady steps (all
+  but its first 5) and over the repeats, their spread, the ratio to the
+  reference, and the peak HBM per GPU, as a range where the GPUs differ.
+
+When the configurations differ in more than `--model`, a table of the other
+arguments comes first. `--names` names the configurations, `--figure` draws
+each one's loss with its mean over the window and the difference of that
+mean to the reference's, and `--json` writes every number.
+
+The tool judges nothing. Models that start from other random weights part at
+first, and the later windows tell whether they train alike. Two runs of one
+configuration part as well, because a training run on GPUs is not bitwise
+reproducible, so a difference no larger than the repeats' is no difference;
+the same holds for the validation loss. The spread of tokens/s per GPU over
+the repeats is the precision of the speed.
+
+## Example: Llama 3.1 8B
+
+JAX-Titan's Llama against MaxText's and transformers' Llama 3.1 8B, from
+random weights on WikiText-103 in Llama 3's tokens, with FSDP over 8x
+MI350X: 32 sequences of 2,048 tokens a step, 300 steps of AdamW at the
+trainer's defaults, validation every 50 steps on 4 held-out batches, and
+three runs of each model in turns, on 2026-11-21. `$MODELS/llama3.1-8b` is a
+directory with Llama 3.1 8B's `config.json`, the only file the
+transformers adapter reads from it here.
+
+```bash
+ARGS="--parallel=fsdp --microbatches=1 --microbatch_size=32 --seq_len=2048 --steps=300 --eval_every=50"
+for r in 1 2 3; do
+  python -m jax_titan.trainer.train --model=llama3.1-8b $ARGS --run_dir=runs/native_r$r
+  python -m jax_titan.trainer.train --model=maxtext:llama3.1-8b $ARGS --run_dir=runs/maxtext_r$r
+  python -m jax_titan.trainer.train --model=transformers:$MODELS/llama3.1-8b $ARGS \
+    --run_dir=runs/transformers_r$r
+done
+python -m jax_titan.observability.compare runs/native_r{1,2,3} runs/maxtext_r{1,2,3} \
+  runs/transformers_r{1,2,3} --names=native,maxtext,transformers --figure=llama.png
+```
+
+The comparison prints:
+
+> Reference: `native`. The configurations also differ in `--num_stages`:
+
+| Configuration | `--num_stages` |
+|---|---|
+| `native` (reference) | `2` |
+| `maxtext` | `1` |
+| `transformers` | `1` |
+
+| Training loss, mean over steps | 0-49 | 50-99 | 100-149 | 150-199 | 200-249 | 250-299 |
+|---|---|---|---|---|---|---|
+| `native` (reference) | 9.3346 | 7.0255 | 6.3657 | 6.0030 | 5.7396 | 5.5883 |
+| `maxtext` | 8.4809 (-0.8537) | 6.7063 (-0.3191) | 6.2172 (-0.1485) | 5.9443 (-0.0588) | 5.7569 (+0.0173) | 5.6482 (+0.0599) |
+| `transformers` | 9.8937 (+0.5591) | 6.8813 (-0.1442) | 6.2954 (-0.0703) | 5.9701 (-0.0329) | 5.7277 (-0.0119) | 5.5877 (-0.0007) |
+| Step to step, reference | 0.3581 | 0.0718 | 0.0713 | 0.0621 | 0.0603 | 0.0518 |
+| Repeats differ by up to | 0.2723 | 0.1100 | 0.0656 | 0.0346 | 0.0420 | 0.0404 |
+
+| Validation loss, after step | 50 | 100 | 150 | 200 | 250 | 300 |
+|---|---|---|---|---|---|---|
+| `native` (reference) | 7.3720 | 6.5990 | 6.1210 | 5.8422 | 5.6236 | 5.4877 |
+| `maxtext` | 6.9816 (-0.3903) | 6.4027 (-0.1963) | 6.0057 (-0.1153) | 5.8272 (-0.0150) | 5.6631 (+0.0395) | 5.5623 (+0.0746) |
+| `transformers` | 7.3049 (-0.0670) | 6.4931 (-0.1059) | 6.0676 (-0.0533) | 5.8229 (-0.0192) | 5.6191 (-0.0044) | 5.4913 (+0.0036) |
+
+| Speed | GPUs | Runs | Tokens/s per GPU | Spread over runs | Ratio to reference | Peak HBM per GPU (GiB) |
+|---|---|---|---|---|---|---|
+| `native` (reference) | 8 | 3 | 8,432 | 0.2% | 1.000 | 26.3 |
+| `maxtext` | 8 | 3 | 9,712 | 0.2% | 1.152 | 28.2 |
+| `transformers` | 8 | 3 | 11,122 | 0.0% | 1.319 | 36.4 to 39.1 |
+
+<p align="center">
+  <img src="../images/compare_llama3.1-8b.png" width="880" alt="Training loss over 300 steps of JAX-Titan's Llama and of MaxText's and transformers' Llama 3.1 8B, with each one's mean over 50 steps, and the difference of the adapters' means to JAX-Titan's">
+</p>
+
+- **The three start apart.** Each draws its random weights its own way: the
+  first losses are 12.58, 12.30 and 12.56, and the adapters' means over the
+  first 50 steps lie 0.85 below and 0.56 above the native model's.
+- **transformers' Llama trains like JAX-Titan's.** From step 150 on its means
+  are within 0.033 of the native model's, less than the repeats of one
+  configuration differ, and its validation loss after 300 steps is 0.004
+  above.
+- **MaxText's Llama is below at first and above at the end:** by 0.060 over
+  steps 250-299 and by 0.075 in validation, more than the repeats differ
+  (0.040). The two give the same loss and gradients from the same weights
+  ([maxtext.md](maxtext.md#jax-titans-own-llama-against-the-adapter)); here
+  they start from different ones.
+- **`--num_stages` is the native Llama's default, 2**, that of a pipeline
+  model; under `--parallel=fsdp` its stages run as one program, and their
+  number only decides how its random weights are drawn.
+- **JAX-Titan's Llama is the slowest of the three:** transformers' Llama,
+  traced through torchax, runs at 1.32 times its tokens/s per GPU and
+  MaxText's at 1.15. They peak at 36.4 to 39.1 and at 28.2 GiB per GPU, where
+  JAX-Titan's Llama peaks at 26.3.
+
+## Example: FLUX.1-dev
+
+JAX-Titan's FLUX.1-dev against MaxDiffusion's and diffusers' FLUX.1, from
+random weights on the synthetic batches of the two FLUX.1 adapters, with FSDP
+over 8x MI350X: 8 samples of 512 x 512 pixels a step, 1,024 image tokens and
+512 text tokens each, 300 steps of AdamW with `--lr=1e-5`, validation every
+50 steps on 4 held-out batches, and three runs of each model, on 2026-11-21
+and 22.
+
+```bash
+ARGS="--parallel=fsdp --microbatches=1 --microbatch_size=8 --resolution=512 --steps=300 --lr=1e-5 --eval_every=50"
+for r in 1 2 3; do
+  python -m jax_titan.trainer.train --model=flux-dev $ARGS --run_dir=runs/native_r$r
+  python -m jax_titan.trainer.train --model=maxdiffusion:flux-dev $ARGS --run_dir=runs/maxdiffusion_r$r
+  python -m jax_titan.trainer.train --model=diffusers:FluxTransformer2DModel \
+    --model_overrides='{"guidance_embeds": true}' $ARGS --run_dir=runs/diffusers_r$r
+done
+python -m jax_titan.observability.compare runs/native_r{1,2,3} runs/maxdiffusion_r{1,2,3} \
+  runs/diffusers_r{1,2,3} --names=native,maxdiffusion,diffusers --figure=flux.png
+```
+
+The comparison prints:
+
+> Reference: `native`. The configurations also differ in `--model_overrides`:
+
+| Configuration | `--model_overrides` |
+|---|---|
+| `native` (reference) | `""` |
+| `maxdiffusion` | `""` |
+| `diffusers` | `"{\"guidance_embeds\": true}"` |
+
+| Training loss, mean over steps | 0-49 | 50-99 | 100-149 | 150-199 | 200-249 | 250-299 |
+|---|---|---|---|---|---|---|
+| `native` (reference) | 1.9086 | 1.6043 | 1.5702 | 1.5828 | 1.6115 | 1.5812 |
+| `maxdiffusion` | 2.8732 (+0.9646) | 2.2840 (+0.6797) | 2.1830 (+0.6128) | 2.1310 (+0.5483) | 2.1014 (+0.4899) | 2.0821 (+0.5009) |
+| `diffusers` | 1.8979 (-0.0107) | 1.6029 (-0.0014) | 1.5694 (-0.0008) | 1.5826 (-0.0002) | 1.6115 (+0.0000) | 1.5812 (-0.0000) |
+| Step to step, reference | 0.0525 | 0.1080 | 0.1106 | 0.1137 | 0.1145 | 0.0978 |
+| Repeats differ by up to | 0.0001 | 0.0001 | 0.0000 | 0.0000 | 0.0000 | 0.0000 |
+
+| Validation loss, after step | 50 | 100 | 150 | 200 | 250 | 300 |
+|---|---|---|---|---|---|---|
+| `native` (reference) | 1.6654 | 1.6433 | 1.6363 | 1.6319 | 1.6296 | 1.6278 |
+| `maxdiffusion` | 2.4247 (+0.7594) | 2.2453 (+0.6020) | 2.1670 (+0.5307) | 2.1257 (+0.4938) | 2.1007 (+0.4711) | 2.0876 (+0.4598) |
+| `diffusers` | 1.6654 (+0.0001) | 1.6404 (-0.0029) | 1.6359 (-0.0004) | 1.6325 (+0.0006) | 1.6291 (-0.0004) | 1.6276 (-0.0002) |
+
+| Speed | GPUs | Runs | Tokens/s per GPU | Spread over runs | Ratio to reference | Peak HBM per GPU (GiB) |
+|---|---|---|---|---|---|---|
+| `native` (reference) | 8 | 3 | 3,289 | 0.5% | 1.000 | 23.0 to 56.1 |
+| `maxdiffusion` | 8 | 3 | 3,341 | 0.4% | 1.016 | 23.7 |
+| `diffusers` | 8 | 3 | 3,137 | 0.5% | 0.954 | 38.4 |
+
+<p align="center">
+  <img src="../images/compare_flux-dev.png" width="880" alt="Training loss over 300 steps of JAX-Titan's FLUX.1-dev and of MaxDiffusion's and diffusers' FLUX.1, with each one's mean over 50 steps, and the difference of the adapters' means to JAX-Titan's; JAX-Titan's and diffusers' lines lie on one another">
+</p>
+
+On these batches the loss has a floor: a sample noised at `s` cannot score
+below `1 / ((1 - s)^2 + s^2)`, which averages 1.54 to 1.59 over the windows of
+50 steps and is 1.6082 on the 4 validation batches.
+
+- **JAX-Titan's FLUX.1 trains like diffusers'.** After the first 50 steps
+  their means are within 0.0014, below the step-to-step variation, and their
+  validation losses within 0.003. Both end 0.02 above the floor.
+- **MaxDiffusion's FLUX.1 ends 0.50 above them**, and 0.46 in validation.
+  It draws the weights of its blocks with flax's `lecun_normal`, variance
+  1/fan-in, and zero biases, where diffusers' model and JAX-Titan's take
+  PyTorch's default, a third of that variance with random biases.
+  Initialized MaxDiffusion's way instead, one run of JAX-Titan's FLUX.1
+  followed MaxDiffusion's loss within 0.01 over the 300 steps.
+- **The overrides give diffusers' model FLUX.1-dev's guidance embedding**,
+  which `flux-dev` and `maxdiffusion:flux-dev` have by name.
+- **The repeats agree to 1e-4**: these runs repeat themselves on the GPUs far
+  more closely than the Llama runs above.
+- **The three run at about the same speed**: MaxDiffusion's at 1.016 times
+  JAX-Titan's tokens/s per GPU and diffusers' at 0.954. JAX-Titan's model
+  peaks at 56.1 GiB on its first GPU, where its random weights are drawn
+  before they are sharded, and at 23.0 GiB on the others.

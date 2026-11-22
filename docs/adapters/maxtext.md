@@ -286,6 +286,8 @@ within 8e-8.
 This section compares JAX-Titan's native Llama (`--model=llama3.1-8b`) with
 the adapter's Llama (`--model=maxtext:llama3.1-8b`): from the same weights the
 two give the same loss and the same gradients. The adapter is the reference.
+Trained alike from random weights, the two are compared in the example of
+[native_comparison.md](native_comparison.md#example-llama-31-8b).
 
 MaxText's Llama and JAX-Titan's are two implementations of one model.
 `llama_config` gives a MaxText Llama's sizes as a config of JAX-Titan's model,
