@@ -82,15 +82,18 @@ def init_params(cfg: FluxConfig, key: jax.Array) -> dict:
   """Returns fp32 parameters of the whole model, each kind of block stacked along a
   layer axis.
 
-  Weights are normal with variance 1 / fan-in, biases zero and norm weights one.
+  Weights and biases are uniform within 1 / sqrt(fan-in) of zero, as PyTorch
+  initializes the Linear layers of diffusers' model, and norm weights are one.
   """
   e, d, c = cfg.emb_dim, cfg.attention_head_dim, cfg.in_channels
   keys = iter(jax.random.split(key, 64))
 
   def linear(*shape):
     """A [..., fan_in, fan_out] weight `w` and its bias `b`."""
-    w = shape[-2] ** -0.5 * jax.random.normal(next(keys), shape, jnp.float32)
-    return w, jnp.zeros(shape[:-2] + shape[-1:], jnp.float32)
+    bound = shape[-2] ** -0.5
+    w = jax.random.uniform(next(keys), shape, jnp.float32, -bound, bound)
+    b = jax.random.uniform(next(keys), shape[:-2] + shape[-1:], jnp.float32, -bound, bound)
+    return w, b
 
   def mlp(fan_in):
     (w1, b1), (w2, b2) = linear(fan_in, e), linear(e, e)

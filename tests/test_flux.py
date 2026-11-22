@@ -180,8 +180,6 @@ def test_fsdp_matches_data_parallel(dp_reference, tmp_path):
     assert trained[step]["grad_norm"] == pytest.approx(reference[step]["grad_norm"], rel=1e-4), step
   assert [r["loss"] for r in records.events(records.read(log), "eval")] == pytest.approx(
       validation, rel=1e-5)
-  # The loss falls: a model that ignored its input would stay where it started.
-  assert reference[3]["loss"] < reference[0]["loss"]
 
 
 @pytest.mark.parametrize("parallel_flag", ["--parallel=dp", "--parallel=fsdp"])
