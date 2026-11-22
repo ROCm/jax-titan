@@ -95,6 +95,12 @@ for a later comparison: do not import from it or edit it.
   never by the batch-norm statistics stored with the autoencoder. Published
   weights are read by `models/pretrained.py` without PyTorch; torch, diffusers
   and transformers appear in tests only, as references.
+- **FLUX.1:** `models/flux.py` is JAX-Titan's own model, written after
+  diffusers' `FluxTransformer2DModel`, as one stage for `--parallel=dp` and
+  `fsdp` on the batches of `data/diffusion.py` (`--model=flux-dev`,
+  `flux-schnell`). Its queries and keys keep each head's features in split
+  halves, the layout of `ops.rope`, where diffusers interleaves the pairs, so
+  diffusers' weights map onto it with that permutation (`tests/test_flux.py`).
 - **Command A+:** `models/command_a.py` is JAX-Titan's own model, written
   after transformers' `cohere2_moe` and `cohere2_vision`: the sparse
   mixture-of-experts language model, the SigLIP vision tower and the
@@ -186,6 +192,11 @@ for a later comparison: do not import from it or edit it.
   (skipped without `torch`). `tests/ideogram_checkpoint.py` writes a
   checkpoint in diffusers' layout at toy size, from which the cache of
   samples, training on it and generation run on CPU.
+- `tests/test_flux.py` checks `models/flux.py` against diffusers' model at
+  the same weights in prediction, loss and gradients, on GPUs (dev and
+  schnell), and FSDP against data parallelism and resume on CPU.
+  `tests/test_compare.py` checks `observability/compare.py` on runs it writes
+  and on the trainer's own records.
 - `tests/test_command_a.py` checks `models/command_a.py` against
   transformers' model in logits, loss and gradients, and the checkpoint
   layout both ways (skipped without `torch` and a `transformers` with

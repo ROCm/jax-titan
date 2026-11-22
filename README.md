@@ -44,6 +44,17 @@ This is the target design; [What works](#what-works) lists what runs today.
   FLUX.1's denoiser of diffusers, `--model=diffusers:<name>`
   ([docs/adapters/diffusers.md](docs/adapters/diffusers.md)). PyTorch runs
   while a model is traced, never in a training step.
+- FLUX.1 (dev and schnell) as JAX-Titan's own model on `jax_titan.ops`,
+  written after diffusers' `FluxTransformer2DModel` and matching it in
+  prediction, loss and gradients from the same weights; `--model=flux-dev`
+  trains it under `--parallel=dp` or `fsdp` on the synthetic batches of the
+  two FLUX.1 adapters.
+- A comparison of an adapter with JAX-Titan's own model of the same network,
+  Llama 3.1 8B or FLUX.1, trained alike
+  (`python -m jax_titan.observability.compare`): the loss per window of steps
+  and the validation loss against the reference, with the variation from
+  step to step and between repeated runs for scale, and tokens/s per GPU
+  ([docs/adapters/native_comparison.md](docs/adapters/native_comparison.md)).
 - Ideogram 4 as JAX-Titan's own model on `jax_titan.ops`, written after
   diffusers' transformer and training example and matching diffusers' model;
   `--model=ideogram4` trains it on synthetic batches as a pipeline, with data
@@ -154,7 +165,8 @@ container, the from-source JAX build and the Python environment.
 skills by the stage of a training job they serve.
 [docs/adapters](docs/adapters) has one page per model repository whose models
 train here: what comes from the repository and what from JAX-Titan, how to
-run a model, and how the adapter is verified.
+run a model, and how the adapter is verified; and how to compare an adapter
+with JAX-Titan's own model of the same network.
 [docs/amd-jax-train-runbook](docs/amd-jax-train-runbook) covers running
 JAX-Titan on AMD's SPUR cluster.
 
@@ -164,11 +176,11 @@ JAX-Titan on AMD's SPUR cluster.
 |---|---|
 | `jax_titan/mpmd` | Topology, Shardy MPMD config and pipelined train steps |
 | `jax_titan/parallel` | DP, FSDP and TP shardings from logical parameter axes |
-| `jax_titan/models` | Llama 3 and Ideogram 4, with parameters grouped by pipeline stage; Ideogram 4's text encoder, autoencoder, published-weights reader and generation; Command A+ with its vision tower and generation; and the models of MaxText, MaxDiffusion, transformers and diffusers, each called whole, with the stages of MaxDiffusion's Ideogram branch (`adapters/`) |
+| `jax_titan/models` | Llama 3 and Ideogram 4, with parameters grouped by pipeline stage; FLUX.1's denoiser; Ideogram 4's text encoder, autoencoder, published-weights reader and generation; Command A+ with its vision tower and generation; and the models of MaxText, MaxDiffusion, transformers and diffusers, each called whole, with the stages of MaxDiffusion's Ideogram branch (`adapters/`) |
 | `jax_titan/ops` | Semantic operators: per-op provider policy, native JAX, ROCm TE, JAX-AITER and JAX-Triton (Triton and Gluon) providers, and the conformance harness |
 | `jax_titan/data` | Llama 3's tokenizer and a published model's, and pretokenized text sampling; the cache of Ideogram 4's image tokens and text features; Command A+'s chat template, tokenizer and image tiles, and its cache of conversations |
 | `jax_titan/trainer` | Training entry point (`python -m jax_titan.trainer.train`) and Orbax checkpoints |
-| `jax_titan/observability` | Run records, metrics, figures, ETTR, ceilings, FLOPs model and per-GPU busy and idle time from profiler traces |
+| `jax_titan/observability` | Run records, metrics, figures, comparisons of runs, ETTR, ceilings, FLOPs model and per-GPU busy and idle time from profiler traces |
 | `jax_titan/planning` | Training budget planner and performance model: model shapes, GPU specs, memory, RCCL and MORI collectives, step time, time left |
 | `jax_titan/tuning` | hipBLASLt kernel selection for the GEMMs a program runs on ROCm: capture, sweep, override file and its checks; new kernels with TensileLite |
 | `examples/` | MPMD spike, parity checks, an example caption for Ideogram 4 and example conversations for Command A+ |

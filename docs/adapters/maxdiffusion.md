@@ -145,6 +145,16 @@ A small Wan 2.1, under FSDP on 2 GPUs in fp32, restores the checkpoint of step
 3 and gives the uninterrupted run's losses of steps 3 to 5 exactly, and its
 validation loss after them.
 
+## JAX-Titan's own FLUX.1 against the adapter
+
+JAX-Titan's native FLUX.1 (`--model=flux-dev` and `flux-schnell`) is written
+after diffusers' FLUX.1, from which this adapter's FLUX.1 differs in two places
+([Known issues](#known-issues)), so the two are not compared from the same
+weights. Trained alike from random weights, they are compared in the example
+of [native_comparison.md](native_comparison.md#example-flux1-dev), where this
+adapter's FLUX.1, whose layers MaxDiffusion initializes otherwise, ends 0.5
+above JAX-Titan's. Wan 2.1 has no native model.
+
 ## Known issues
 
 - **FLUX.1's timestep embedding is computed in bf16.** MaxDiffusion computes

@@ -85,6 +85,10 @@ XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" timeout -s KILL 1800 python -m jax_titan.t
 ... --model=maxdiffusion:wan2.1-t2v-1.3b --parallel=fsdp --microbatches=1 \
   --microbatch_size=8 --resolution=480 --frames=17 --lr=1e-5 ...
 
+# JAX-Titan's own FLUX.1 on the batches of the two FLUX.1 adapters, no pipeline.
+... --model=flux-dev --parallel=fsdp --microbatches=1 --microbatch_size=8 \
+  --resolution=512 ...
+
 # JAX-Titan's own Ideogram 4, on synthetic batches (docs/recipes/ideogram4.md).
 ... --model=ideogram4 --parallel=fsdp --num_stages=1 --microbatches=1 \
   --microbatch_size=8 --lr=1e-5 ...
@@ -120,7 +124,8 @@ gradients reduced per microbatch (the default for them); `--stage_layers`
 counts their layers or blocks, and `--model_overrides` takes JSON config
 overrides. `command-a-plus` is one stage, or more with `"freeze": ["embed"]`
 among its overrides. Any other `maxtext:`, `maxdiffusion:`, `transformers:` or
-`diffusers:` model has no pipeline: it trains with `--parallel=dp` or `fsdp`,
+`diffusers:` model, and `flux-dev` and `flux-schnell`, has no pipeline: it
+trains with `--parallel=dp` or `fsdp`,
 a language model on token files of its own tokenizer (`--data` and
 `--eval_data` default to Llama 3's).
 
@@ -162,6 +167,12 @@ a language model on token files of its own tokenizer (`--data` and
   spread (`summarize` prints both and a regression threshold), and MFU
   against the calibrated ceiling too (`--ceilings`, from
   `python -m jax_titan.observability.ceilings`).
+- To set an adapter against JAX-Titan's own model of the same network, train
+  both with the same arguments but `--model`, three runs each, and read them
+  with `python -m jax_titan.observability.compare REFERENCE RUN ...`
+  (`docs/adapters/native_comparison.md`): it groups the repeats and prints the
+  loss per window of steps, the validation loss and tokens/s per GPU against
+  the reference.
 - Change one thing at a time. To A/B a code change, run the old variant from
   a `git worktree` with `JAX_TITAN_ROOT` exported.
 - `--steps` sets the cosine decay length, so compare loss curves only between

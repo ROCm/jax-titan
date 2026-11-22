@@ -67,14 +67,14 @@ processes, so read the dry run's list before `--yes`.
 
 Run each with `python -m jax_titan.<module>`, or `python <path>` for the
 examples. The planners, and the tools that read a finished run (`summarize`,
-`profile`, `plot`, `ettr`, `collectives`, `perfdb`, `gemms`), need no GPU.
+`profile`, `plot`, `compare`, `ettr`, `collectives`, `perfdb`, `gemms`), need no GPU.
 
 ### Correctness
 
 | Command | What it checks |
 |---|---|
-| `python -m pytest tests/` | On CPU with 8 devices: schedules and layouts against `jax.jit`, exact checkpoint resume, the MaxText and MaxDiffusion adapters (skipped without their extras), Ideogram 4 from a toy checkpoint to pictures and against diffusers' and transformers' models (those skipped without `torch`), Command A+ from a toy checkpoint through training to generated text and against transformers' model (skipped without `torch`), the planners, and the agent skills' two copies |
-| `python -m pytest tests/ --gpus=N` | On ROCm, only the tests marked `gpu` that need at most N GPUs: operator conformance of `native`, and of the XLA quantized GEMMs (FP8, MXFP8, MXFP4) at Llama 3.1 8B sizes, Command A+'s loss and gradient norm against those recorded on CPU, MaxText's models against MaxText's own loss function and against JAX-Titan's own Llama, MaxDiffusion's FLUX.1 and Wan 2.1 against MaxDiffusion's own modules, transformers' language models and diffusers' FLUX.1 against PyTorch's loss and gradients, and, with `--gpus=2`, the four adapters under FSDP against data parallelism |
+| `python -m pytest tests/` | On CPU with 8 devices: schedules and layouts against `jax.jit`, exact checkpoint resume, the MaxText and MaxDiffusion adapters (skipped without their extras), Ideogram 4 from a toy checkpoint to pictures and against diffusers' and transformers' models (those skipped without `torch`), Command A+ from a toy checkpoint through training to generated text and against transformers' model (skipped without `torch`), JAX-Titan's FLUX.1 under FSDP against data parallelism and resumed, the comparison of runs, the planners, and the agent skills' two copies |
+| `python -m pytest tests/ --gpus=N` | On ROCm, only the tests marked `gpu` that need at most N GPUs: operator conformance of `native`, and of the XLA quantized GEMMs (FP8, MXFP8, MXFP4) at Llama 3.1 8B sizes, Command A+'s loss and gradient norm against those recorded on CPU, MaxText's models against MaxText's own loss function and against JAX-Titan's own Llama, MaxDiffusion's FLUX.1 and Wan 2.1 against MaxDiffusion's own modules, transformers' language models and diffusers' FLUX.1 against PyTorch's loss and gradients, JAX-Titan's FLUX.1 against diffusers' model from the same weights, and, with `--gpus=2`, the four adapters and JAX-Titan's FLUX.1 under FSDP against data parallelism |
 | `python examples/<name>.py --platform=cpu` | A two-stage MLP step (`mpmd_two_mesh_spike.py`) and a pipeline step, each against one `jax.jit` program ([getting_started.md](getting_started.md#5-runs)) |
 | `ops.conformance` | Operator providers against native JAX: outputs and gradients on one GPU, under `jax.vmap`, sharded, inside `shard_map` and inside an MPMD step, and their timings ([getting_started.md](getting_started.md#5-runs)) |
 
@@ -101,6 +101,7 @@ how to update the packages they install.
 | `observability.summarize RUN` | Step-time percentiles, MFU and HFU, startup and checkpoint costs; across runs, repeats and scaling. `--gate0 REFERENCE RUN` compares losses against a reference run |
 | `observability.profile TRACE_DIR` | Each GPU's compute, exposed collective, copy and idle shares from a `jax.profiler` trace |
 | `observability.plot RUN` | Figures of MFU, step time, loss, gradient norm and power over the run |
+| `observability.compare REFERENCE RUN ...` | One network in two implementations, such as JAX-Titan's own model and an adapter's, trained alike: the loss per window of steps and the validation loss against the reference's, with the variation from step to step and between repeats for scale, and tokens/s per GPU; `--figure` draws the loss curves ([adapters/native_comparison.md](adapters/native_comparison.md)) |
 | `observability.ettr RUN` | ETTR, and the checkpoint interval and ETTR projected to more nodes |
 | `observability.collectives DIR` | RCCL Inspector completion times by operation and message size |
 | `observability.gemms DUMP` | Every GEMM the compiled program runs, from an XLA HLO dump of any program: M, N, K, batch, dtypes, operand layouts, library (hipBLASLt, rocBLAS, Triton) and kernel configuration, with launches per run, or per training step with `--run_dir`. Standard library only: `python3 jax_titan/observability/gemms.py DUMP` runs without JAX or an install ([metrics.md](metrics.md#gemms-in-the-compiled-program)) |
