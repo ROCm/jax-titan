@@ -194,7 +194,8 @@ for a later comparison: do not import from it or edit it.
   samples, training on it and generation run on CPU.
 - `tests/test_flux.py` checks `models/flux.py` against diffusers' model at
   the same weights in prediction, loss and gradients, on GPUs (dev and
-  schnell), and FSDP against data parallelism and resume on CPU.
+  schnell; skipped without the diffusers extra), and its initialization, FSDP
+  against data parallelism and resume on CPU.
   `tests/test_compare.py` checks `observability/compare.py` on runs it writes
   and on the trainer's own records.
 - `tests/test_command_a.py` checks `models/command_a.py` against

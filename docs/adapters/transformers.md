@@ -208,12 +208,18 @@ to 5 exactly, and its validation loss after them within 2e-8.
 ## JAX-Titan's own Llama against the adapter
 
 JAX-Titan's native Llama (`--model=llama3.1-8b`) is the network of Llama 3.1
-8B's `config.json`. Trained alike from random weights, it is compared with
-this adapter's Llama in the example of
-[native_comparison.md](native_comparison.md#example-llama-31-8b). From the
-same weights, it gives MaxText's loss and gradients
-([maxtext.md](maxtext.md#jax-titans-own-llama-against-the-adapter)), as this
-adapter gives PyTorch's ([Published weights](#published-weights)).
+8B's `config.json`. From the same weights, it gives MaxText's loss and
+gradients ([maxtext.md](maxtext.md#jax-titans-own-llama-against-the-adapter)),
+as this adapter gives PyTorch's ([How it is verified](#how-it-is-verified)).
+Trained alike from random weights, with the same arguments `$ARGS` for both,
+the two are compared as in the example of
+[native_comparison.md](native_comparison.md#example-llama-31-8b):
+
+```bash
+python -m jax_titan.trainer.train --model=llama3.1-8b $ARGS --run_dir=runs/native
+python -m jax_titan.trainer.train --model=transformers:$MODELS/llama3.1-8b $ARGS --run_dir=runs/adapter
+python -m jax_titan.observability.compare runs/native runs/adapter
+```
 
 ## Known issues
 

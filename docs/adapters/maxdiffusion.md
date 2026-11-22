@@ -150,10 +150,20 @@ validation loss after them.
 JAX-Titan's native FLUX.1 (`--model=flux-dev` and `flux-schnell`) is written
 after diffusers' FLUX.1, from which this adapter's FLUX.1 differs in two places
 ([Known issues](#known-issues)), so the two are not compared from the same
-weights. Trained alike from random weights, they are compared in the example
-of [native_comparison.md](native_comparison.md#example-flux1-dev), where this
+weights; `--model_overrides='{"theta": 10000}'` removes the first. Trained
+alike from random weights, with the same arguments `$ARGS` for both, they are
+compared as in the example of
+[native_comparison.md](native_comparison.md#example-flux1-dev), where this
 adapter's FLUX.1, whose layers MaxDiffusion initializes otherwise, ends 0.5
-above JAX-Titan's. Wan 2.1 has no native model.
+above JAX-Titan's:
+
+```bash
+python -m jax_titan.trainer.train --model=flux-dev $ARGS --run_dir=runs/native
+python -m jax_titan.trainer.train --model=maxdiffusion:flux-dev $ARGS --run_dir=runs/adapter
+python -m jax_titan.observability.compare runs/native runs/adapter
+```
+
+Wan 2.1 has no native model.
 
 ## Known issues
 
