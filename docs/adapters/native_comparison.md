@@ -56,12 +56,13 @@ The unit tests are in `tests/test_flux.py`.
 | FSDP shards every parameter, and never along the block axis | Unit test | Real | Yes |
 | FSDP gives data parallelism's losses and validation loss | Unit test | Small | Within 1e-5 |
 | A resumed run repeats the uninterrupted one | Unit test | Small | Exactly |
+| Weights and biases uniform within 1/sqrt(fan-in) of zero, norm weights one | Unit test | Small | Within the bound, with a uniform draw's spread to 5% |
 | Prediction and loss equal diffusers' model from the same weights | [Experiment](#flux1-dev-from-the-same-weights-as-diffusers) | Real, fp32 | Loss within 1.6e-8, prediction within 7.7e-6 |
 | FSDP on 8 GPUs gives data parallelism's losses on one | [Experiment](#fsdp-against-data-parallelism-at-real-size) | Real, fp32 | Within 1.2e-7 over 10 steps |
 
-Not checked: FLUX.1-schnell at real size; the model against diffusers' in
-bf16, where their timestep embeddings differ; providers of `jax_titan.ops`
-other than `native`.
+Not checked: FLUX.1-schnell's prediction and training at real size; the model
+against diffusers' in bf16, where their timestep embeddings differ; providers
+of `jax_titan.ops` other than `native`.
 
 ### FLUX.1-dev from the same weights as diffusers
 
@@ -277,15 +278,16 @@ the same weights above cover those.
 
 - **JAX-Titan's FLUX.1 trains like diffusers'.** Their means part by 0.011
   over the first 50 steps, where their different random weights tell, by
-  0.0014 over the next 50, and by 2e-4 or less from step 150, about as much
-  as the repeats differ. Their validation losses are within 0.003, and within
-  6e-4 from step 150. Both end 0.02 above the floor.
+  0.0014 over the next 50, and by 2e-4 or less from step 150, still a few
+  times what the repeats differ: what is left of their different starts.
+  Their validation losses are within 0.003, and within 6e-4 from step 150.
+  Both end 0.02 above the floor.
 - **MaxDiffusion's FLUX.1 ends 0.50 above them**, and 0.46 in validation.
   It draws the weights of its blocks with flax's `lecun_normal`, variance
   1/fan-in, and zero biases, where diffusers' model and JAX-Titan's take
   PyTorch's default, a third of that variance with random biases; it also
   keeps the RoPE base and the bf16 timestep embedding of [Models](#models).
-  Initialized MaxDiffusion's way instead, one run of JAX-Titan's FLUX.1, made
+  Initialized MaxDiffusion's way instead, two runs of JAX-Titan's FLUX.1, made
   before its initialization became diffusers', stayed below MaxDiffusion's
   means of 50 steps by 0.0045 to 0.0091, and below its validation losses by
   0.048 after 50 steps and 0.012 after 300: the initialization makes nearly
