@@ -62,13 +62,13 @@ def parse_args(argv=None):
       "--parallel", default="mpmd", choices=["mpmd", "dp", "fsdp"],
       help="mpmd: Shardy MPMD pipeline, data parallel inside each stage. "
       "dp, fsdp: no pipeline; one jax.jit program over all devices with "
-      "replicated or sharded parameters and optimizer state. A model of another "
-      "repository takes dp or fsdp only.",
+      "replicated or sharded parameters and optimizer state. FLUX.1 and a model of "
+      "another repository take dp or fsdp only.",
   )
   parser.add_argument(
       "--num_stages", type=int, default=None,
       help="Pipeline stages, 2 by default. dp and fsdp start from the same weights as the "
-      "pipeline with this many stages. A model of another repository takes none.",
+      "pipeline with this many stages. FLUX.1 and a model of another repository take none.",
   )
   parser.add_argument(
       "--schedule", default="ZERO_BUBBLE_H1",

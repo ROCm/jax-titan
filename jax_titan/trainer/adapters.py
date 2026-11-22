@@ -12,8 +12,8 @@ causal language model of Hugging Face transformers, a directory with a
 `--model=diffusers:<name>` a denoiser of diffusers on synthetic batches. The
 last two run through torchax (`models/adapters/torch_bridge.py`) and
 rematerialize through the library's own gradient-checkpointing switch.
-MaxText's and FLUX.1's attention is their own JAX implementation unless the
-ops policy names attention.
+MaxText's and MaxDiffusion's FLUX.1 attention is their own JAX
+implementation unless the ops policy names attention.
 
 `--model=ideogram4` trains JAX-Titan's own Ideogram 4
 (`jax_titan.models.ideogram`) on synthetic rectified-flow batches or on a

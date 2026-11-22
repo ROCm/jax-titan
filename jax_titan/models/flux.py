@@ -28,7 +28,8 @@ from jax_titan import ops
 
 @dataclasses.dataclass(frozen=True)
 class FluxConfig:
-  """The fields of diffusers' `FluxTransformer2DModel` config; the defaults are FLUX.1's."""
+  """The fields of diffusers' `FluxTransformer2DModel` config that FLUX.1 sets; the defaults
+  are FLUX.1's."""
 
   in_channels: int = 64
   num_layers: int = 19
@@ -148,7 +149,8 @@ def _embedder(p: dict, x: jax.Array) -> jax.Array:
 
 
 def _sinusoid(t: jax.Array, dtype) -> jax.Array:
-  """The embedding of a timestep or guidance in [0, 1], scaled by 1000: cos, then sin."""
+  """The embedding of a timestep in [0, 1] or of a guidance scale, times 1000, in fp32:
+  cos, then sin."""
   half = _FREQUENCIES // 2
   freqs = jnp.exp(-math.log(10000) * jnp.arange(half, dtype=jnp.float32) / half)
   angles = (1000 * t.astype(jnp.float32))[:, None] * freqs
