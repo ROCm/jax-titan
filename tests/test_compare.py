@@ -17,7 +17,7 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 ARGS = {"model": "llama3.1-8b", "parallel": "fsdp", "seed": 0, "steps": 6, "lr": 3e-4}
 
 
-def _write(path, losses, *, step_s=1.0, run_dir="", validation=(), **args):
+def _write(path, losses, *, step_s=1.0, run_dir="", validation=(), hbm=(30.0,) * 8, **args):
   """A trainer log of 8 GPUs at 8,000 tokens a step."""
   log = records.Log(str(path))
   log.event("start", main_start=0.0, jax_ready=0.0, num_devices=8, process_count=1,
@@ -28,7 +28,7 @@ def _write(path, losses, *, step_s=1.0, run_dir="", validation=(), **args):
                "tokens_per_s": 8000 / step_s, "tokens_per_s_per_gpu": 1000 / step_s,
                "time": float(step)})
     if step == 0:
-      log.event("memory", step=0, peak_hbm_gib=[30.0] * 8)
+      log.event("memory", step=0, peak_hbm_gib=list(hbm))
   for step, loss in validation:
     log.event("eval", step=step, loss=loss, seconds=1.0)
   log.close()
@@ -42,7 +42,7 @@ def test_sets_each_configuration_against_the_reference(tmp_path):
       _write(tmp_path / "a2.jsonl", [x + 0.01 for x in ref], step_s=1.25, run_dir="a2",
              validation=[(6, 5.22)]),
       _write(tmp_path / "b.jsonl", [x + 0.5 for x in ref], step_s=2.0, run_dir="b",
-             validation=[(6, 5.7)], model="maxtext:llama3.1-8b"),
+             validation=[(6, 5.7)], hbm=[56.1] + [23.0] * 7, model="maxtext:llama3.1-8b"),
   ]
   report = compare.compare(runs, window=3, skip=1)
   a, b = report["configurations"]
@@ -60,7 +60,8 @@ def test_sets_each_configuration_against_the_reference(tmp_path):
   text = compare.markdown(report)
   assert "differ in `--model` alone" in text
   assert "| `maxtext:llama3.1-8b` | 8.8333 (+0.4950) | 6.0000 (+0.4950) |" in text
-  assert "| `maxtext:llama3.1-8b` | 8 | 1 | 500 | - | 0.556 | 30.0 |" in text
+  assert "| `llama3.1-8b` (reference) | 8 | 2 | 900 | 22.2% | 1.000 | 30.0 |" in text
+  assert "| `maxtext:llama3.1-8b` | 8 | 1 | 500 | - | 0.556 | 23.0 to 56.1 |" in text
 
 
 def test_names_what_else_differs(tmp_path):

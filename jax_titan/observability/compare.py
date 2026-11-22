@@ -16,7 +16,7 @@ one configuration and are reported together. It prints, as Markdown tables:
   much the repeats of a configuration differ;
 - tokens/s per GPU, the median over steady steps (as `summarize` takes it)
   and over the repeats, with the repeats' spread and the ratio to the
-  reference, and peak HBM per GPU.
+  reference, and peak HBM per GPU, as a range where the GPUs differ.
 
 With `--figure`, it also draws each configuration's loss against the step,
 its mean over the window and the difference of that mean to the
@@ -120,8 +120,9 @@ def compare(paths: list, window: int = 50, skip: int = 5, names: list | None = N
     c["tokens_per_s_per_gpu"] = statistics.median(speeds) if speeds else None
     c["speed_spread"] = ((max(speeds) - min(speeds)) / statistics.median(speeds)
                          if len(speeds) > 1 else None)
-    hbm = [r["metrics"]["peak_hbm_gib"]["max"] for r in runs if r["metrics"].get("peak_hbm_gib")]
-    c["peak_hbm_gib"] = max(hbm) if hbm else None
+    hbm = [r["metrics"]["peak_hbm_gib"] for r in runs if r["metrics"].get("peak_hbm_gib")]
+    c["peak_hbm_gib"] = {"min": min(h["min"] for h in hbm),
+                         "max": max(h["max"] for h in hbm)} if hbm else None
     c["devices"] = runs[0]["metrics"].get("devices")
   first = reference["runs"][0]["loss"]
   return {
@@ -138,6 +139,15 @@ def compare(paths: list, window: int = 50, skip: int = 5, names: list | None = N
 
 def _fmt(x, spec: str) -> str:
   return "-" if x is None else format(x, spec)
+
+
+def _hbm(peak: dict | None) -> str:
+  """The peak HBM of the GPUs, or its range where the GPUs differ by 1 GiB or more."""
+  if peak is None:
+    return "-"
+  if peak["max"] - peak["min"] < 1:
+    return f"{peak['max']:.1f}"
+  return f"{peak['min']:.1f} to {peak['max']:.1f}"
 
 
 def markdown(report: dict) -> str:
@@ -182,7 +192,7 @@ def markdown(report: dict) -> str:
     rows.append((named(c), [
         str(c["devices"]), str(len(c["runs"])), _fmt(speed, ",.0f"),
         "-" if spread is None else f"{100 * spread:.1f}%",
-        _fmt(speed / base if speed and base else None, ".3f"), _fmt(c["peak_hbm_gib"], ".1f")]))
+        _fmt(speed / base if speed and base else None, ".3f"), _hbm(c["peak_hbm_gib"])]))
   table("Speed", ["GPUs", "Runs", "Tokens/s per GPU", "Spread over runs", "Ratio to reference",
                   "Peak HBM per GPU (GiB)"], rows)
   return "\n".join(lines) + "\n"
