@@ -1,5 +1,6 @@
 """FLUX.1 matches diffusers' model at the same weights, and trains alike under dp and FSDP."""
 
+import importlib.util
 import json
 import os
 import pathlib
@@ -94,6 +95,9 @@ def _from_diffusers(tensors: dict, cfg: flux.FluxConfig) -> dict:
 
 
 @pytest.mark.gpu
+@pytest.mark.skipif(
+    importlib.util.find_spec("torch") is None or importlib.util.find_spec("diffusers") is None,
+    reason="needs the diffusers extra")
 @pytest.mark.parametrize("guidance_embeds", [True, False], ids=["dev", "schnell"])
 def test_matches_diffusers(guidance_embeds):
   import torch  # pylint: disable=g-import-not-at-top
@@ -124,7 +128,6 @@ def test_matches_diffusers(guidance_embeds):
   loss = torch.mean((torch.from_numpy(target) - pred) ** 2)
   loss.backward()
   reference = _from_diffusers({n: p.grad for n, p in module.named_parameters()}, cfg)
-  scale = max(np.abs(g).max() for g in jax.tree.leaves(reference))
 
   model = flux.Model(cfg, dtype=jnp.float32)
   np.testing.assert_allclose(
@@ -134,7 +137,8 @@ def test_matches_diffusers(guidance_embeds):
   np.testing.assert_allclose(value, loss.item(), rtol=1e-5)
   for (path, grad), want in zip(jax.tree_util.tree_flatten_with_path(grads)[0],
                                 jax.tree.leaves(reference)):
-    np.testing.assert_allclose(grad, want, rtol=1e-3, atol=1e-4 * scale, err_msg=str(path))
+    np.testing.assert_allclose(grad, want, rtol=1e-3, atol=1e-4 * np.abs(want).max(),
+                               err_msg=str(path))
 
 
 def test_every_parameter_is_sharded_and_only_norms_do_not_decay():
@@ -153,6 +157,26 @@ def test_every_parameter_is_sharded_and_only_norms_do_not_decay():
   assert sum(x.size for x in jax.tree.leaves(dev)) == 11_901_408_320
 
 
+def test_initializes_as_pytorch_initializes_diffusers():
+  params = jax.device_get(flux.init_params(flux.FluxConfig(**CONFIG), jax.random.key(0)))
+  leaves = {tuple(k.key for k in path): leaf
+            for path, leaf in jax.tree_util.tree_flatten_with_path(params)[0]}
+  scaled = {"weights": [], "biases": []}
+  for path, leaf in leaves.items():
+    *parent, name = path
+    if name.endswith("_norm"):
+      np.testing.assert_array_equal(leaf, 1)
+      continue
+    # A bias takes the fan-in of its weight: b of w, bq of wq, mod_b of mod_w and so on.
+    weight = leaves[(*parent, name.replace("b", "w", 1))]
+    x = leaf * weight.shape[-2] ** 0.5
+    assert np.abs(x).max() <= 1, path
+    scaled["weights" if weight is leaf else "biases"].append(x.ravel())
+  # Uniform within 1/sqrt(fan-in) of zero: scaled by sqrt(fan-in), the spread of U(-1, 1).
+  for kind, values in scaled.items():
+    assert np.std(np.concatenate(values)) == pytest.approx(3 ** -0.5, rel=0.05), kind
+
+
 def _run(log, *flags):
   # os.environ, not the process environment: see conftest's ROCPROFILER note.
   result = subprocess.run(
@@ -163,23 +187,19 @@ def _run(log, *flags):
   return {r["step"]: r for r in records.steps(records.read(log))}, result.stdout
 
 
-@pytest.fixture(scope="module")
-def dp_reference(tmp_path_factory):
-  """The step records and the validation loss of the data-parallel run."""
-  log = tmp_path_factory.mktemp("dp") / "dp.jsonl"
-  steps, _ = _run(log, "--parallel=dp", "--eval_every=4", "--eval_batches=1")
-  return steps, [r["loss"] for r in records.events(records.read(log), "eval")]
+@pytest.mark.parametrize("flags", [[], ["--model=flux-schnell", "--no-remat"]],
+                         ids=["dev", "schnell-without-remat"])
+def test_fsdp_matches_data_parallel(flags, tmp_path):
+  def run(parallel):
+    log = tmp_path / f"{parallel}.jsonl"
+    steps, _ = _run(log, *flags, f"--parallel={parallel}", "--eval_every=4", "--eval_batches=1")
+    return steps, [r["loss"] for r in records.events(records.read(log), "eval")]
 
-
-def test_fsdp_matches_data_parallel(dp_reference, tmp_path):
-  reference, validation = dp_reference
-  log = tmp_path / "fsdp.jsonl"
-  trained, _ = _run(log, "--parallel=fsdp", "--eval_every=4", "--eval_batches=1")
+  (reference, validation), (trained, trained_validation) = run("dp"), run("fsdp")
   for step in range(4):
     assert trained[step]["loss"] == pytest.approx(reference[step]["loss"], rel=1e-5), step
     assert trained[step]["grad_norm"] == pytest.approx(reference[step]["grad_norm"], rel=1e-4), step
-  assert [r["loss"] for r in records.events(records.read(log), "eval")] == pytest.approx(
-      validation, rel=1e-5)
+  assert trained_validation == pytest.approx(validation, rel=1e-5)
 
 
 @pytest.mark.parametrize("parallel_flag", ["--parallel=dp", "--parallel=fsdp"])
