@@ -1,9 +1,9 @@
 # diffusers adapter
 
 `--model=diffusers:<name>` trains a denoiser of Hugging Face diffusers 0.43.0
-with JAX-Titan's trainer, under `--parallel=dp` or `fsdp`. The network is
+with JAX-Titan's trainer, under `--parallel=dp` or `fsdp`. The model is
 diffusers' and is written in PyTorch; the training is JAX-Titan's. The
-network does not run as PyTorch: torchax 0.0.13 executes the denoiser's
+model does not run as PyTorch: torchax 0.0.13 executes the denoiser's
 `forward` on JAX arrays while JAX traces it (`models/adapters/diffusers.py`;
 [transformers.md](transformers.md#models) says what that means for
 correctness).

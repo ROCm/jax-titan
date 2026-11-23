@@ -2,8 +2,8 @@
 
 `--model=transformers:<name>` trains a decoder-only causal language model of
 Hugging Face transformers 5.23.0 with JAX-Titan's trainer, under
-`--parallel=dp` or `fsdp`. The network is transformers' and is written in
-PyTorch; the training is JAX-Titan's. The network does not run as PyTorch:
+`--parallel=dp` or `fsdp`. The model is transformers' and is written in
+PyTorch; the training is JAX-Titan's. The model does not run as PyTorch:
 torchax 0.0.13 executes its `forward` on JAX arrays while JAX traces it, so
 PyTorch runs on the host during that trace and never during a step
 (`models/adapters/torch_bridge.py`, `models/adapters/transformers.py`).
@@ -34,9 +34,9 @@ Four of them were verified on GPUs at their real size:
 the Hugging Face Hub, or a model type of transformers with the library's
 default sizes (`llama`, `qwen3_moe`).
 
-The list exists because the network is translated, operator by operator, into
-a JAX function that `jax.grad` differentiates and XLA compiles, and a model
-can come out wrong without an error: PyTorch's autograd takes no part, so
+The list exists because a model is translated, operator by operator, into a
+JAX function that `jax.grad` differentiates and XLA compiles, and it can come
+out wrong without an error: PyTorch's autograd takes no part, so
 `torch.no_grad()`, `.data` and a custom `autograd.Function` in a model's
 `forward` neither stop nor shape the gradient. The adapter therefore takes
 only the model types whose loss and gradients it compared with PyTorch's own.
@@ -207,12 +207,13 @@ to 5 exactly, and its validation loss after them within 2e-8.
 
 ## JAX-Titan's own Llama against the adapter
 
-JAX-Titan's native Llama (`--model=llama3.1-8b`) is the network of Llama 3.1
-8B's `config.json`. From the same weights, it gives MaxText's loss and
-gradients ([maxtext.md](maxtext.md#jax-titans-own-llama-against-the-adapter)),
-as this adapter gives PyTorch's ([How it is verified](#how-it-is-verified)).
-Trained alike from random weights, with the same arguments `$ARGS` for both,
-the two are compared as in the example of
+JAX-Titan's native Llama (`--model=llama3.1-8b`) has the model structure that
+Llama 3.1 8B's `config.json` describes. From the same weights, it gives
+MaxText's loss and gradients
+([maxtext.md](maxtext.md#jax-titans-own-llama-against-the-adapter)), as this
+adapter gives PyTorch's ([How it is verified](#how-it-is-verified)). Trained
+alike from random weights, with the same arguments `$ARGS` for both, the two
+are compared as in the example of
 [native_comparison.md](native_comparison.md#llama-31-8b):
 
 ```bash

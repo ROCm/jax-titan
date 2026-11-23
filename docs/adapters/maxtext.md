@@ -1,7 +1,7 @@
 # MaxText adapter
 
 `--model=maxtext:<name>` trains a model config of MaxText 0.2.5 with JAX-Titan's
-trainer. The network is MaxText's and runs as MaxText wrote it; the training is
+trainer. The model is MaxText's and runs as MaxText wrote it; the training is
 JAX-Titan's. A model family needs no code in JAX-Titan: `WholeModel`
 (`models/adapters/maxtext.py`) calls MaxText's `Transformer` whole, under
 `--parallel=dp` or `fsdp`.

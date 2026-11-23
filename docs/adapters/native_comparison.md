@@ -1,8 +1,8 @@
 # Comparing an adapter with JAX-Titan's own model
 
-An adapter trains another repository's network with JAX-Titan's trainer.
-Where JAX-Titan has its own model of the same network, the two can be trained
-alike, with only `--model` changed, so that what differs is the network's
+An adapter trains another repository's model with JAX-Titan's trainer.
+Where JAX-Titan has its own model of the same structure, the two can be
+trained alike, with only `--model` changed, so that what differs is the
 implementation and its operators.
 `python -m jax_titan.observability.compare` reads the records of such runs and
 sets each against a reference: the loss, the validation loss and the speed. It
@@ -15,8 +15,8 @@ recorded.
 
 1. **Train each model** with the same arguments, `--seed` among them, so that
    every run takes the same batches. Change only `--model`, with the
-   `--model_overrides` that make the networks the same, and give each run its
-   own `--run_dir`.
+   `--model_overrides` that make the model structures the same, and give each
+   run its own `--run_dir`.
 2. **Compare the runs**, the reference first.
 
 ```bash

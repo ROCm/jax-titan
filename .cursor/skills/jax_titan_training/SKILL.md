@@ -167,9 +167,9 @@ a language model on token files of its own tokenizer (`--data` and
   spread (`summarize` prints both and a regression threshold), and MFU
   against the calibrated ceiling too (`--ceilings`, from
   `python -m jax_titan.observability.ceilings`).
-- To set an adapter against JAX-Titan's own model of the same network, train
+- To set an adapter against JAX-Titan's own model of the same structure, train
   both with the same arguments but `--model` (and the `--model_overrides` that
-  make the networks the same), three runs each, and read them
+  make the model structures the same), three runs each, and read them
   with `python -m jax_titan.observability.compare REFERENCE RUN ...`
   (`docs/adapters/native_comparison.md`): it groups the repeats and prints the
   loss per window of steps, the validation loss and tokens/s per GPU against

@@ -1,4 +1,4 @@
-"""Compares training runs of one network in two or more implementations, such as
+"""Compares training runs of one model structure in two or more implementations, such as
 JAX-Titan's native model and an adapter's: their loss curves and their speed.
 
   python -m jax_titan.observability.compare REFERENCE RUN [RUN ...] [--window 50]
