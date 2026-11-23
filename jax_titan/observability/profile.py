@@ -16,9 +16,12 @@ seconds per step; `--json` writes the result, which `summarize` reads as
 `--kernel_times` writes every compute kernel launch instead: its name, the
 `hlo_module` and `hlo_op` XLA's ROCm and CUDA collectors attach, its start and
 duration, and the fraction of it that a collective kernel on the same GPU
-overlapped. Collectives running alongside take CUs and memory bandwidth, so a
-GEMM that overlaps one usually runs slower. `gemms.py --times` joins the
-launches to the program's GEMM sites.
+overlapped; for an overlapped launch, also the fraction each collective's HLO
+op overlapped. A summary of each collective op follows: its kind, launches,
+median duration and the workgroups its kernel launches with, the CUs it takes.
+Collectives running alongside take CUs and memory bandwidth, so a GEMM that
+overlaps one usually runs slower. `gemms.py --times` joins the launches to the
+program's GEMM sites, and `--overlap` to the collectives beside them.
 """
 
 import argparse
@@ -26,11 +29,20 @@ import bisect
 import json
 import pathlib
 import re
+import statistics
 
 COLLECTIVE = re.compile(r"nccl|rccl|all.?reduce|all.?gather|reduce.?scatter|all.?to.?all|collective.?permute", re.I)
+# What a collective kernel runs, from its HLO op or else its name; RCCL's
+# generic kernel names none.
+KINDS = (("all-gather", re.compile(r"all.?gather", re.I)),
+         ("reduce-scatter", re.compile(r"reduce.?scatter", re.I)),
+         ("all-reduce", re.compile(r"all.?reduce", re.I)),
+         ("all-to-all", re.compile(r"all.?to.?all", re.I)),
+         ("collective-permute", re.compile(r"collective.?permute|send|recv", re.I)))
 # Runtime copies only: XLA's own copy fusions are compute kernels.
 COPY = re.compile(r"^Memcpy|^Memset|__amd_rocclr_(copy|fill)", re.I)
 DEVICE_PLANE = re.compile(r"/device:GPU:(\d+)")
+GRID = re.compile(r"\bgrid:(\d+),(\d+),(\d+)")
 
 
 def _merge(intervals):
@@ -85,8 +97,19 @@ def device_events(xplane: pathlib.Path):
   return events
 
 
+def collective_kind(hlo_op: str, kernel: str = "") -> str:
+  """all-gather, reduce-scatter, all-reduce, all-to-all or collective-permute
+  for a collective kernel; "" when neither its HLO op nor its name says."""
+  for text in (hlo_op, kernel):
+    for kind, pattern in KINDS:
+      if text and pattern.search(text):
+        return kind
+  return ""
+
+
 def kernel_events(xplane: pathlib.Path) -> dict[int, list[dict]]:
-  """{gpu id: [{name, start_ns, end_ns, hlo_module, hlo_op}]} from the GPU stream lines."""
+  """{gpu id: [{name, start_ns, end_ns, hlo_module, hlo_op, grid}]} from the GPU
+  stream lines; `grid` is the workgroups a kernel launches with."""
   from jax.profiler import ProfileData  # pylint: disable=g-import-not-at-top
 
   data = ProfileData.from_file(str(xplane))
@@ -104,6 +127,10 @@ def kernel_events(xplane: pathlib.Path) -> dict[int, list[dict]]:
         for name, value in e.stats:
           if name in ("hlo_module", "hlo_op"):
             stats[name] = str(value)
+          elif name == "kernel_details":
+            grid = GRID.search(str(value))
+            if grid:
+              stats["grid"] = int(grid.group(1)) * int(grid.group(2)) * int(grid.group(3))
         out.append({"name": e.name, "start_ns": e.start_ns, "end_ns": e.end_ns, **stats})
   return events
 
@@ -121,30 +148,67 @@ def _covered(start, end, merged, starts) -> int:
 
 
 def kernel_times(events: dict[int, list[dict]]) -> list[dict]:
-  """One record per compute kernel launch, with the share a collective overlapped."""
+  """One record per compute kernel launch, with the share collectives overlapped
+  and, when they did, the share each collective's HLO op (or kernel name)
+  overlapped. Collectives can overlap each other, so those can add up to more."""
   out = []
   for gpu, evs in sorted(events.items()):
-    comm = _merge([(e["start_ns"], e["end_ns"]) for e in evs if COLLECTIVE.search(e["name"])])
+    collectives = sorted((e for e in evs if COLLECTIVE.search(e["name"])), key=lambda e: e["start_ns"])
+    comm = _merge([(e["start_ns"], e["end_ns"]) for e in collectives])
     starts = [s for s, _ in comm]
+    collective_starts = [e["start_ns"] for e in collectives]
+    longest = max((e["end_ns"] - e["start_ns"] for e in collectives), default=0)
     for e in sorted(evs, key=lambda e: e["start_ns"]):
       if COLLECTIVE.search(e["name"]) or COPY.search(e["name"]):
         continue
       dur = e["end_ns"] - e["start_ns"]
       overlap = _covered(e["start_ns"], e["end_ns"], comm, starts) / dur if dur > 0 else 0.0
-      out.append({"gpu": gpu, "kernel": e["name"], "hlo_module": e.get("hlo_module", ""),
-                  "hlo_op": e.get("hlo_op", ""), "start_ns": e["start_ns"], "dur_ns": dur,
-                  "rccl_overlap": round(overlap, 4)})
+      record = {"gpu": gpu, "kernel": e["name"], "hlo_module": e.get("hlo_module", ""),
+                "hlo_op": e.get("hlo_op", ""), "start_ns": e["start_ns"], "dur_ns": dur,
+                "rccl_overlap": round(overlap, 4)}
+      if overlap > 0:
+        shared = {}
+        first = bisect.bisect_left(collective_starts, e["start_ns"] - longest)
+        for c in collectives[first:bisect.bisect_left(collective_starts, e["end_ns"])]:
+          ns = min(e["end_ns"], c["end_ns"]) - max(e["start_ns"], c["start_ns"])
+          if ns > 0:
+            op = c.get("hlo_op") or c["name"]
+            shared[op] = shared.get(op, 0) + ns
+        record["collectives"] = {op: round(ns / dur, 4) for op, ns in shared.items()}
+      out.append(record)
   return out
 
 
+def collective_launches(events: dict[int, list[dict]]) -> list[dict]:
+  """One record per collective HLO op (or kernel name, without one): its kind,
+  launches on all GPUs, the GPUs it ran on, its median duration and the
+  workgroups its kernel launched with."""
+  ops = {}
+  for gpu, evs in events.items():
+    for e in evs:
+      if not COLLECTIVE.search(e["name"]):
+        continue
+      op = e.get("hlo_op") or e["name"]
+      r = ops.setdefault((e.get("hlo_module", ""), op), {"kernel": e["name"], "ns": [], "gpus": set(), "grid": set()})
+      r["ns"].append(e["end_ns"] - e["start_ns"])
+      r["gpus"].add(gpu)
+      if e.get("grid"):
+        r["grid"].add(e["grid"])
+  return [{"hlo_module": module, "hlo_op": op, "kind": collective_kind(op, r["kernel"]),
+           "launches": len(r["ns"]), "gpus": len(r["gpus"]), "median_us": statistics.median(r["ns"]) / 1e3,
+           "grid": sorted(r["grid"])}
+          for (module, op), r in sorted(ops.items())]
+
+
 def write_kernel_times(trace_dir: str, steps: int, out_path, gpu: int = -1) -> dict:
-  """`kernel_times` of the newest trace; `gpu` keeps one device of a multi-GPU process."""
+  """`kernel_times` and `collective_launches` of the newest trace; `gpu` keeps
+  one device of a multi-GPU process."""
   xplane = newest_xplane(trace_dir)
   events = kernel_events(xplane)
   if gpu >= 0:
     events = {gpu: events.get(gpu, [])}
   out = {"xplane": str(xplane), "steps": steps or None, "gpus": sorted(events),
-         "launches": kernel_times(events)}
+         "launches": kernel_times(events), "collectives": collective_launches(events)}
   pathlib.Path(out_path).write_text(json.dumps(out) + "\n")
   return out
 
@@ -216,8 +280,8 @@ def main(argv=None):
   parser.add_argument("--steps", type=int, default=0, help="Steps in the trace.")
   parser.add_argument("--json", default="", help="Write the result here.")
   parser.add_argument("--kernel_times", default="",
-                      help="Write every compute kernel launch, with its HLO op and collective "
-                      "overlap, here (for gemms.py --times).")
+                      help="Write every compute kernel launch, with its HLO op and the collectives "
+                      "that overlapped it, and each collective op, here (for gemms.py --times).")
   parser.add_argument("--gpu", type=int, default=-1,
                       help="With --kernel_times, keep this device only (one process driving several).")
   args = parser.parse_args(argv)
@@ -226,8 +290,8 @@ def main(argv=None):
   if args.kernel_times:
     out = write_kernel_times(args.trace_dir, args.steps, args.kernel_times, args.gpu)
     named = sum(1 for k in out["launches"] if k["hlo_op"])
-    print(f"{len(out['launches'])} compute kernel launches, {named} with an HLO op, "
-          f"to {args.kernel_times}")
+    print(f"{len(out['launches'])} compute kernel launches, {named} with an HLO op, and "
+          f"{len(out['collectives'])} collective ops, to {args.kernel_times}")
     return 0
   if args.lines:
     import collections  # pylint: disable=g-import-not-at-top

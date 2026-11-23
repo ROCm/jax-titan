@@ -118,7 +118,10 @@ differences into milliseconds per step:
 
 - **selection** = t_default − t_best, isolated: what a tuning file recovers;
 - **contention** = t_now − t_clean: what collectives running alongside the
-  GEMM cost, from the in-step launches no collective overlapped;
+  GEMM cost, from the in-step launches no collective overlapped.
+  `observability/gemms.py --times KERNELS --overlap` names those collectives
+  per shape, and the ones the GEMM itself reads or writes: in a loop that
+  prefetches the next layer's weights they are usually different collectives;
 - **in-step other** = t_clean − t_default: the rest of the gap between the
   step and an isolated run (clocks, caches); it can be negative;
 - **ceiling** = t_best − t_bound: what no existing kernel recovers. The bound
