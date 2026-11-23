@@ -13,7 +13,9 @@ links to the page that documents it.
    `python -m jax_titan.data.ideogram` for images
    ([recipes/ideogram4.md](recipes/ideogram4.md)), or with
    `python -m jax_titan.data.command_a` for conversations
-   ([recipes/command_a_plus.md](recipes/command_a_plus.md)).
+   ([recipes/command_a_plus.md](recipes/command_a_plus.md)). MLPerf's
+   pretokenized C4 comes from `scripts/mlperf_download_c4.sh`
+   ([mlperf.md](mlperf.md#data)).
 2. **Check the node.** On the host, `scripts/preflight_dev.sh` shows disk
    space and who holds each GPU, and `scripts/gpus_free.sh` must print
    `free`. After a code change, run `python -m pytest tests/` first.
@@ -58,6 +60,7 @@ processes. The others need the container's TheRock libraries.
 | `setup_sources.sh` | login node or host | Creates the `jax`, `xla` and `shardy` trees in `${JAX_TITAN_ROOT}/src` at the tested revisions, as worktrees of sibling `../jax` and `../xla` checkouts when they exist, and applies the patches. Git only |
 | `slurm_submit.sh` | Slurm login node | Submits `slurm_job.sh` as a one-node, 8-GPU sbatch job with logs in `${JAX_TITAN_ROOT}/logs/slurm/`; trainer flags go after `--`; `-n` prints the sbatch line, `--setup-only` stops before training. Cluster settings (partition, QOS, scratch, GPU request) come from a file named by `JT_SITE_ENV`, kept outside the repository |
 | `slurm_job.sh` | compute node (sbatch) | Checks the node (docker, AMD GPUs, shared filesystem, free GPUs), starts the TheRock container, builds the wheels and the venv when missing, runs the trainer under a timeout, and on exit, also after SIGTERM, cleans up and removes the container |
+| `mlperf_download_c4.sh DIR` | host or container | Downloads MLPerf Training's pretokenized C4 for Llama 3.1 8B and GPT-OSS 20B (85 GB), resuming broken transfers, and checks the files against MLCommons' md5 sums ([mlperf.md](mlperf.md#data)) |
 
 `preflight_dev.sh` and `cleanup_after_train.sh` read `USER`, which
 `docker exec` does not set; export it first in a shell started that way. The
@@ -92,6 +95,13 @@ how to update the packages they install.
 | `models.ideogram_generate --checkpoint=CKPT --prompt=@FILE --out=PNG` | Draws pictures with Ideogram 4 from a checkpoint in diffusers' layout, with `--transformer` from fine-tuned parameters, on one GPU ([recipes/ideogram4.md](recipes/ideogram4.md#pictures-from-the-published-weights)) |
 | `data.command_a --checkpoint=CKPT --conversations=FILE --out=CACHE` | Caches conversations for fine-tuning Command A+: their token ids by the checkpoint's chat template and tokenizer, with the assistant's last turn marked as what the model learns, for the trainer's `--data=CACHE` ([recipes/command_a_plus.md](recipes/command_a_plus.md#fine-tuning-on-conversations)) |
 | `models.command_a_generate --checkpoint=CKPT --prompt=TEXT --image=FILE` | Answers a prompt, with pictures or without, with Command A+ from a checkpoint in the published layout, with `--params` the trained or fine-tuned parameters in place of the checkpoint's, its layers spread over the visible GPUs ([recipes/command_a_plus.md](recipes/command_a_plus.md#text-from-the-published-weights)) |
+
+### MLPerf
+
+| Command | What it does |
+|---|---|
+| `data.megatron info PREFIX` | Documents, tokens and samples per epoch of a Megatron indexed dataset (`PREFIX.bin`, `PREFIX.idx`) |
+| `data.megatron index PREFIX --num_samples N --seed S` | Builds and caches the order in which Megatron's `GPTDataset` reads the dataset for a seed, before a run; the trainer builds it itself when it is missing ([mlperf.md](mlperf.md#data)) |
 
 ### Measuring a run
 
