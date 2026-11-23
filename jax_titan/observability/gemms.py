@@ -5,7 +5,8 @@
       python -m jax_titan.trainer.train ... --steps=2 --run_dir=RUN
   python3 gemms.py DUMP [--run_dir RUN | --calls FILE] [--merge]
       [--module REGEX] [--sites] [--csv OUT] [--json OUT]
-      [--times KERNEL_TIMES --steps N [--overlap]]
+      [--times KERNEL_TIMES | --trace TRACE_DIR [--gpu N]]
+      [--steps N] [--overlap]
 
 This file uses only the Python standard library: run it directly, or copy it
 to any machine with Python 3.8 or later, for a dump of any XLA program; it
@@ -38,6 +39,10 @@ program: each site's kernel launches, joined by HLO module and op, with the
 median per launch and its bootstrap interval, the medians of launches no
 collective overlapped ("clean") and of those mostly overlapped, and the
 milliseconds per traced step (`--steps`). Sites are then ranked by time.
+`--trace` reads the trace itself instead: the newest `*.xplane.pb` under
+TRACE_DIR, decoded with the standard library, so a dump and a trace are all
+this file needs, without JAX. `profile.py` takes its kernel launches and
+collectives from here.
 
 `--overlap` adds one row per GEMM shape that collectives overlap: the
 launches a collective mostly overlapped, their median against the clean one,
@@ -54,6 +59,7 @@ another collective.
 from __future__ import annotations
 
 import argparse
+import bisect
 import csv
 import json
 import math
@@ -62,6 +68,7 @@ import pathlib
 import random
 import re
 import statistics
+import struct
 
 # Library GEMM custom calls and the ROCm library each runs; XLA keeps the
 # targets' cuBLAS-era names on ROCm.
@@ -976,6 +983,289 @@ def _median_ci(values, n=1000, seed=0):
   return meds[int(0.025 * n)], meds[int(0.975 * n) - 1]
 
 
+COLLECTIVE = re.compile(r"nccl|rccl|all.?reduce|all.?gather|reduce.?scatter|all.?to.?all|collective.?permute", re.I)
+# What a collective kernel runs, from its HLO op or else its name; RCCL's
+# generic kernel names none.
+KINDS = (("all-gather", re.compile(r"all.?gather", re.I)),
+         ("reduce-scatter", re.compile(r"reduce.?scatter", re.I)),
+         ("all-reduce", re.compile(r"all.?reduce", re.I)),
+         ("all-to-all", re.compile(r"all.?to.?all", re.I)),
+         ("collective-permute", re.compile(r"collective.?permute|send|recv", re.I)))
+# Runtime copies only: XLA's own copy fusions are compute kernels.
+COPY = re.compile(r"^Memcpy|^Memset|__amd_rocclr_(copy|fill)", re.I)
+DEVICE_PLANE = re.compile(r"/device:GPU:(\d+)")
+GRID = re.compile(r"\bgrid:(\d+),(\d+),(\d+)")
+
+
+def is_stream_line(name: str) -> bool:
+  """Whether a trace line holds a GPU stream's kernels and copies."""
+  return name.startswith("Stream") or "stream" in name.lower()
+
+
+def collective_kind(hlo_op: str, kernel: str = "") -> str:
+  """all-gather, reduce-scatter, all-reduce, all-to-all or collective-permute
+  for a collective kernel; "" when neither its HLO op nor its name says."""
+  for text in (hlo_op, kernel):
+    for kind, pattern in KINDS:
+      if text and pattern.search(text):
+        return kind
+  return ""
+
+
+def merge_intervals(intervals) -> list[list]:
+  """The union of [start, end) intervals, sorted and disjoint."""
+  out = []
+  for start, end in sorted(intervals):
+    if out and start <= out[-1][1]:
+      out[-1][1] = max(out[-1][1], end)
+    else:
+      out.append([start, end])
+  return out
+
+
+def _covered(start, end, merged, starts):
+  """Length of [start, end) inside the merged, sorted intervals."""
+  i = max(0, bisect.bisect_right(starts, start) - 1)
+  total = 0
+  while i < len(merged) and merged[i][0] < end:
+    lo, hi = max(start, merged[i][0]), min(end, merged[i][1])
+    if hi > lo:
+      total += hi - lo
+    i += 1
+  return total
+
+
+def compute_launches(events: dict) -> list[dict]:
+  """One record per compute kernel launch in `events` ({gpu id: [{name,
+  start_ns, end_ns, hlo_module, hlo_op, grid}]}), with the share collectives
+  overlapped and, when they did, the share each collective's HLO op (or kernel
+  name) overlapped. Collectives can overlap each other, so those can add up to
+  more."""
+  out = []
+  for gpu, evs in sorted(events.items()):
+    collectives = sorted((e for e in evs if COLLECTIVE.search(e["name"])), key=lambda e: e["start_ns"])
+    comm = merge_intervals([(e["start_ns"], e["end_ns"]) for e in collectives])
+    starts = [s for s, _ in comm]
+    collective_starts = [e["start_ns"] for e in collectives]
+    longest = max((e["end_ns"] - e["start_ns"] for e in collectives), default=0)
+    for e in sorted(evs, key=lambda e: e["start_ns"]):
+      if COLLECTIVE.search(e["name"]) or COPY.search(e["name"]):
+        continue
+      dur = e["end_ns"] - e["start_ns"]
+      overlap = _covered(e["start_ns"], e["end_ns"], comm, starts) / dur if dur > 0 else 0.0
+      record = {"gpu": gpu, "kernel": e["name"], "hlo_module": e.get("hlo_module", ""),
+                "hlo_op": e.get("hlo_op", ""), "start_ns": e["start_ns"], "dur_ns": dur,
+                "rccl_overlap": round(overlap, 4)}
+      if overlap > 0:
+        shared = {}
+        first = bisect.bisect_left(collective_starts, e["start_ns"] - longest)
+        for c in collectives[first:bisect.bisect_left(collective_starts, e["end_ns"])]:
+          ns = min(e["end_ns"], c["end_ns"]) - max(e["start_ns"], c["start_ns"])
+          if ns > 0:
+            op = c.get("hlo_op") or c["name"]
+            shared[op] = shared.get(op, 0) + ns
+        record["collectives"] = {op: round(ns / dur, 4) for op, ns in shared.items()}
+      out.append(record)
+  return out
+
+
+def collective_launches(events: dict) -> list[dict]:
+  """One record per collective HLO op (or kernel name, without one): its kind,
+  launches on all GPUs, the GPUs it ran on, its median duration, the
+  workgroups its kernel launched with, and its exposed time, which no compute
+  kernel overlapped (two collectives exposed at once both count it)."""
+  ops = {}
+  for gpu, evs in events.items():
+    compute = merge_intervals([(e["start_ns"], e["end_ns"]) for e in evs
+                               if not COLLECTIVE.search(e["name"]) and not COPY.search(e["name"])])
+    starts = [s for s, _ in compute]
+    for e in evs:
+      if not COLLECTIVE.search(e["name"]):
+        continue
+      op = e.get("hlo_op") or e["name"]
+      r = ops.setdefault((e.get("hlo_module", ""), op),
+                         {"kernel": e["name"], "ns": [], "exposed_ns": 0, "gpus": set(), "grid": set()})
+      dur = e["end_ns"] - e["start_ns"]
+      r["ns"].append(dur)
+      r["exposed_ns"] += dur - _covered(e["start_ns"], e["end_ns"], compute, starts)
+      r["gpus"].add(gpu)
+      if e.get("grid"):
+        r["grid"].add(e["grid"])
+  return [{"hlo_module": module, "hlo_op": op, "kind": collective_kind(op, r["kernel"]),
+           "launches": len(r["ns"]), "gpus": len(r["gpus"]), "median_us": statistics.median(r["ns"]) / 1e3,
+           "exposed_us": r["exposed_ns"] / 1e3, "grid": sorted(r["grid"])}
+          for (module, op), r in sorted(ops.items())]
+
+
+def _varint(buf, i):
+  shift = value = 0
+  while True:
+    byte = buf[i]
+    i += 1
+    value |= (byte & 0x7F) << shift
+    if byte < 0x80:
+      return value, i
+    shift += 7
+
+
+def _int64(value):
+  return value - (1 << 64) if value >= 1 << 63 else value
+
+
+def _fields(buf, start=0, end=None):
+  """(field number, value) of each field of a protobuf message in buf[start:end]:
+  an int for a varint, raw bytes for a fixed-size value, and a (start, end)
+  span of `buf` for a length-delimited one."""
+  i, end = start, len(buf) if end is None else end
+  while i < end:
+    key, i = _varint(buf, i)
+    wire = key & 7
+    if wire == 0:
+      value, i = _varint(buf, i)
+    elif wire == 1:
+      value, i = buf[i:i + 8], i + 8
+    elif wire == 2:
+      n, i = _varint(buf, i)
+      value, i = (i, i + n), i + n
+    elif wire == 5:
+      value, i = buf[i:i + 4], i + 4
+    else:
+      raise ValueError(f"protobuf wire type {wire} at byte {i}")
+    yield key >> 3, value
+
+
+def _text(buf, span):
+  return bytes(buf[span[0]:span[1]]).decode("utf-8", "replace")
+
+
+def _stat(buf, span):
+  """(metadata id, value, referenced metadata id) of an XStat."""
+  mid, value, ref = 0, None, None
+  for field, v in _fields(buf, *span):
+    if field == 1:
+      mid = v
+    elif field == 2:
+      value = struct.unpack("<d", v)[0]
+    elif field == 3:
+      value = v
+    elif field == 4:
+      value = _int64(v)
+    elif field == 5:
+      value = _text(buf, v)
+    elif field == 6:
+      value = bytes(buf[v[0]:v[1]])
+    elif field == 7:
+      ref = v
+  return mid, value, ref
+
+
+def xplane(path, plane: re.Pattern | None = None) -> list[dict]:
+  """The planes of a `jax.profiler` trace (`*.xplane.pb`, an XSpace),
+  decoded with the standard library: [{"name", "lines": [{"name", "events":
+  [{"name", "start_ns", "end_ns", "stats"}]}]}], with an event's stats and its
+  metadata's by name, and a reference value as the name it refers to. `plane`
+  keeps the planes whose name it matches."""
+  buf = memoryview(pathlib.Path(path).read_bytes())
+  out = []
+  for field, span in _fields(buf):
+    if field != 1:
+      continue
+    fields = list(_fields(buf, *span))
+    name = next((_text(buf, v) for f, v in fields if f == 2), "")
+    if plane and not plane.search(name):
+      continue
+    event_meta, stat_names = {}, {}
+    for f, v in fields:
+      if f not in (4, 5):
+        continue
+      entry = dict(_fields(buf, *v))  # a map entry: key 1, value 2
+      if 2 not in entry:
+        continue
+      meta = list(_fields(buf, *entry[2]))
+      meta_name = next((_text(buf, mv) for mf, mv in meta if mf == 2), "")
+      if f == 5:
+        stat_names[entry.get(1, 0)] = meta_name
+      else:
+        event_meta[entry.get(1, 0)] = (meta_name, [_stat(buf, mv) for mf, mv in meta if mf == 5])
+    lines = []
+    for f, v in fields:
+      if f != 3:
+        continue
+      line_name, base_ns, events = "", 0, []
+      for lf, lv in _fields(buf, *v):
+        if lf == 2:
+          line_name = _text(buf, lv)
+        elif lf == 3:
+          base_ns = _int64(lv)
+        elif lf == 4:
+          mid, offset_ps, duration_ps, stats = 0, 0, 0, []
+          for ef, ev in _fields(buf, *lv):
+            if ef == 1:
+              mid = ev
+            elif ef == 2:
+              offset_ps = _int64(ev)
+            elif ef == 3:
+              duration_ps = _int64(ev)
+            elif ef == 4:
+              stats.append(_stat(buf, ev))
+          event_name, meta_stats = event_meta.get(mid, ("", []))
+          named = {}
+          for smid, value, ref in meta_stats + stats:
+            named[stat_names.get(smid, "")] = stat_names.get(ref, "") if ref is not None else value
+          start = base_ns + offset_ps / 1000
+          events.append({"name": event_name, "start_ns": start, "end_ns": start + duration_ps / 1000,
+                         "stats": named})
+      lines.append({"name": line_name, "events": events})
+    out.append({"name": name, "lines": lines})
+  return out
+
+
+def trace_kernels(path) -> dict:
+  """{gpu id: [{name, start_ns, end_ns, hlo_module, hlo_op, grid}]} from the
+  GPU stream lines of an `*.xplane.pb` trace; `grid` is the workgroups a
+  kernel launches with."""
+  out = {}
+  for p in xplane(path, DEVICE_PLANE):
+    events = out.setdefault(int(DEVICE_PLANE.search(p["name"]).group(1)), [])
+    for line in p["lines"]:
+      if not is_stream_line(line["name"]):
+        continue
+      for e in line["events"]:
+        record = {"name": e["name"], "start_ns": e["start_ns"], "end_ns": e["end_ns"]}
+        for key in ("hlo_module", "hlo_op"):
+          if key in e["stats"]:
+            record[key] = str(e["stats"][key])
+        grid = GRID.search(str(e["stats"].get("kernel_details", "")))
+        if grid:
+          record["grid"] = int(grid.group(1)) * int(grid.group(2)) * int(grid.group(3))
+        events.append(record)
+  return out
+
+
+def newest_xplane(trace) -> pathlib.Path:
+  """`trace` when it is a file, else the newest `*.xplane.pb` under it."""
+  path = pathlib.Path(trace)
+  if path.is_file():
+    return path
+  files = sorted(path.rglob("*.xplane.pb"), key=lambda p: p.stat().st_mtime)
+  if not files:
+    raise FileNotFoundError(f"no *.xplane.pb under {trace}")
+  return files[-1]
+
+
+def trace_times(trace, steps: int = 0, gpu: int = -1) -> dict:
+  """What `profile.py --kernel_times` writes, read from the newest trace under
+  `trace` with the standard library: every compute kernel launch with the
+  collectives that overlapped it (`compute_launches`), and each collective op
+  (`collective_launches`). `gpu` keeps one device of a multi-GPU process."""
+  path = newest_xplane(trace)
+  events = trace_kernels(path)
+  if gpu >= 0:
+    events = {gpu: events.get(gpu, [])}
+  return {"xplane": str(path), "steps": steps or None, "gpus": sorted(events),
+          "launches": compute_launches(events), "collectives": collective_launches(events)}
+
+
 def _launches(sites: list[dict], kernel_times: dict):
   """{(module, kernel): (its sites, its launches)} for the kernels a trace
   launched, joined by HLO module and op; the kernels; the HLO ops traced."""
@@ -1198,14 +1488,21 @@ def main(argv=None):
   parser.add_argument("--times", default="",
                       help="profile.py --kernel_times output of a trace of this program: rank "
                       "sites by measured time.")
+  parser.add_argument("--trace", default="",
+                      help="A jax.profiler trace of this program, its directory or *.xplane.pb: "
+                      "read it here instead of --times, without JAX.")
+  parser.add_argument("--gpu", type=int, default=-1,
+                      help="With --trace, keep this device only (one process driving several).")
   parser.add_argument("--steps", type=int, default=0,
-                      help="Steps in that trace; default: the steps it records.")
+                      help="Steps in that trace; default: the steps --times records.")
   parser.add_argument("--overlap", action="store_true",
-                      help="With --times: the GEMM shapes collectives overlap, what that costs per "
-                      "step, the collectives beside them, and those each reads or writes.")
+                      help="With --times or --trace: the GEMM shapes collectives overlap, what that "
+                      "costs per step, the collectives beside them, and those each reads or writes.")
   args = parser.parse_args(argv)
-  if args.overlap and not args.times:
-    parser.error("--overlap needs --times")
+  if args.times and args.trace:
+    parser.error("give --times or --trace, not both")
+  if args.overlap and not (args.times or args.trace):
+    parser.error("--overlap needs --times or --trace")
   results = analyze(args.dump, args.module)
   if not results:
     print(f"no *after_optimizations.txt under {args.dump}; dump with "
@@ -1228,8 +1525,12 @@ def main(argv=None):
   without = len(results) - len(with_gemms)
   everything = [site for _, sites in with_gemms for site in sites]
   timing, overlaps = None, None
-  if args.times:
-    kernel_times = json.loads(pathlib.Path(args.times).read_text())
+  if args.times or args.trace:
+    if args.trace:
+      kernel_times = trace_times(args.trace, args.steps, args.gpu)
+      print(f"trace: {kernel_times['xplane']}")
+    else:
+      kernel_times = json.loads(pathlib.Path(args.times).read_text())
     timing = attach_times(everything, kernel_times, args.steps)
     coverage = f"{100 * timing['coverage']:.0f}%" if timing["coverage"] is not None else "n/a"
     print(f"times: {timing['kernels_matched']} of {timing['kernels']} GEMM kernels matched launches "
