@@ -6,8 +6,9 @@ what JAX-Titan implements of them.
 
 > **Status.** The contract of Llama 3.1 8B and GPT-OSS 20B is in
 > `jax_titan.mlperf.contract`; the trainer reads MLPerf's C4 in the
-> reference's order and trains with the reference's schedule and AdamW. No
-> compliant run exists yet.
+> reference's order, trains with the reference's schedule and AdamW, and
+> validates as the contract asks until it reaches the target. No compliant
+> run exists yet.
 
 ## The benchmarks
 
@@ -201,3 +202,24 @@ of the RCP at GBS 32:
   `jax.jit` step (`tests/test_mpmd_parity.py`). Each schedule takes one
   update per global batch from the gradients of all its microbatches, so no
   weight is stale.
+
+## Validation
+
+```bash
+--eval_every=384 --eval_samples=1024 --eval_batch_size=32 --target_eval_loss=3.3
+```
+
+- **Cadence.** `--eval_every` is in steps: `ceil(12288 / GBS)`, 384 at
+  GBS 32 (`Contract.eval_every_steps`).
+- **Set.** `--eval_samples` sequences, the same every pass: with a Megatron
+  `--eval_data`, the first 1,024 sequences of 8,193 tokens of the validation
+  file. `--eval_batch_size` batches them independently of the training batch
+  (a multiple of the data-parallel ranks that divides `--eval_samples`; a
+  pipeline takes only its step's batch).
+- **Metric.** The mean cross-entropy over every validation token, in nats:
+  the log perplexity the target is set in. A pass reads the parameters and
+  changes neither them nor the training data's order.
+- **Stop.** The run ends after the first validation at or below
+  `--target_eval_loss`. Each `eval` record holds `samples`, the training
+  sequences done, which MLLOG's `samples_count` takes; the `end` record says
+  whether the target was reached.

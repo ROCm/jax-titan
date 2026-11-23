@@ -12,6 +12,7 @@ import numpy as np
 import optax
 import pytest
 
+from jax_titan.data import megatron
 from jax_titan.models import llama
 from jax_titan.observability import records
 from jax_titan.trainer import schedules
@@ -242,3 +243,63 @@ def test_layouts_agree_under_mlperf_adamw(tmp_path):
   np.testing.assert_allclose(_losses(tmp_path, "--parallel=fsdp"), dp, rtol=1e-5)
   np.testing.assert_allclose(_losses(tmp_path, "--parallel=mpmd", "--num_stages=2",
                                      "--schedule=ONE_FWD_ONE_BWD"), dp, rtol=1e-3)
+
+
+def _megatron_data(tmp_path):
+  rng = np.random.default_rng(0)
+  docs = [rng.integers(0, 1000, n) for n in rng.integers(1, 300, 400)]
+  megatron.write(tmp_path / "train", docs)
+  megatron.write(tmp_path / "valid", docs[:60])
+  return [f"--data={tmp_path / 'train'}", f"--eval_data={tmp_path / 'valid'}"]
+
+
+def _train(tmp_path, name, *flags, check=True):
+  log = tmp_path / f"{name}.jsonl"
+  result = subprocess.run(
+      [sys.executable, "-m", "jax_titan.trainer.train", "--platform=cpu", "--model=llama3-test",
+       "--parallel=dp", "--seq_len=32", "--microbatches=2", "--microbatch_size=8",
+       "--warmup_steps=1", "--step_timeout=0", "--seed=3", f"--log_file={log}", *flags],
+      capture_output=True, text=True, check=False, cwd=REPO,
+      env={**__import__("os").environ, "JAX_TITAN_ROOT": str(tmp_path / "root")})
+  if check:
+    assert result.returncode == 0, result.stdout[-2000:] + result.stderr[-4000:]
+  return result, (records.read(log) if log.exists() else [])
+
+
+def test_validation_stops_at_the_target(tmp_path):
+  data = _megatron_data(tmp_path)
+  _, log = _train(tmp_path, "target", *data, "--steps=10", "--eval_every=2",
+                  "--eval_samples=24", "--eval_batch_size=8", "--target_eval_loss=100")
+  evals = records.events(log, "eval")
+  assert [(e["step"], e["samples"], e["eval_samples"]) for e in evals] == [(2, 32, 24)]
+  end = records.events(log, "end")[0]
+  assert end["target_reached"] and end["steps_done"] == 2 and end["status"] == "completed"
+  assert len(records.steps(log)) == 2
+  # Below any loss it reaches, the run trains every step and validates at the cadence.
+  _, log = _train(tmp_path, "miss", *data, "--steps=4", "--eval_every=2", "--eval_samples=16",
+                  "--target_eval_loss=0.001")
+  assert [e["step"] for e in records.events(log, "eval")] == [2, 4]
+  assert records.events(log, "end")[0]["target_reached"] is False
+
+
+def test_validation_loss_is_the_mean_over_tokens(tmp_path):
+  """With the weights fixed (--lr=0), the loss over the same 48 sequences does not depend
+  on how they are batched."""
+  data = _megatron_data(tmp_path)
+  losses = []
+  for size in (8, 16, 48):
+    _, log = _train(tmp_path, f"batch{size}", *data, "--steps=1", "--lr=0", "--eval_every=1",
+                    "--eval_samples=48", f"--eval_batch_size={size}")
+    losses.append(records.events(log, "eval")[0]["loss"])
+  np.testing.assert_allclose(losses[1:], [losses[0]] * 2, rtol=1e-5)
+
+
+@pytest.mark.parametrize("flags,message", [
+    (["--target_eval_loss=3.3"], "needs validation passes"),
+    (["--eval_every=1", "--eval_samples=20", "--eval_batch_size=8"], "not whole batches of 8"),
+    (["--eval_every=1", "--parallel=mpmd", "--eval_batch_size=8"],
+     "validates batches of one step's 16 sequences"),
+])
+def test_validation_flags_are_checked(tmp_path, flags, message):
+  result, _ = _train(tmp_path, "bad", "--data=synthetic", "--steps=1", *flags, check=False)
+  assert result.returncode != 0 and message in result.stderr
