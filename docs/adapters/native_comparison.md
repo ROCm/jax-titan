@@ -157,9 +157,8 @@ over 8x MI350X: 8 samples of 512 x 512 pixels a step, 1,024 image tokens and
 512 text tokens each, 300 steps of AdamW with `--lr=1e-5`, validation every
 50 steps on 4 held-out batches, and three runs of each model, with
 JAX-Titan's XLA flags for ROCm and the compilation cache off, on 2026-11-21
-and 22. [pipelines.md](../pipelines.md#flux1-2026-11-21-8x-mi350x) describes
-JAX-Titan's FLUX.1 and compares it with diffusers' model from the same
-weights.
+and 22. [recipes/flux.md](../recipes/flux.md) describes JAX-Titan's FLUX.1
+and compares it with diffusers' model from the same weights.
 
 ```bash
 export XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" JAX_ENABLE_COMPILATION_CACHE=false

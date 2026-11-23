@@ -238,7 +238,7 @@ XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" python -m jax_titan.trainer.train \
   --microbatches=1 --microbatch_size=8 --resolution=512 --steps=30 --lr=1e-5
 
 # JAX-Titan's own FLUX.1-dev (12B) on the same synthetic batches, with FSDP
-# over all GPUs and no pipeline (docs/pipelines.md).
+# over all GPUs and no pipeline; docs/recipes/flux.md has the recipe.
 XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" python -m jax_titan.trainer.train \
   --model=flux-dev --parallel=fsdp \
   --microbatches=1 --microbatch_size=8 --resolution=512 --steps=30 --lr=1e-5

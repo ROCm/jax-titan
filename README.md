@@ -49,7 +49,7 @@ This is the target design; [What works](#what-works) lists what runs today.
   prediction, loss and gradients from the same weights in fp32;
   `--model=flux-dev` trains it under `--parallel=dp` or `fsdp` on the
   synthetic batches of the two FLUX.1 adapters
-  ([docs/pipelines.md](docs/pipelines.md#flux1-2026-11-21-8x-mi350x)).
+  ([docs/recipes/flux.md](docs/recipes/flux.md)).
 - A comparison of an adapter with JAX-Titan's own model of the same network,
   trained alike (`python -m jax_titan.observability.compare`): the loss per
   window of steps and the validation loss against the reference, with the
