@@ -223,13 +223,13 @@ python -m jax_titan.observability.summarize --gate0 runs/dp runs/pp2 \
 
 # MaxText's Llama against JAX-Titan's own, trained alike: the same arguments
 # but --model, and then their losses and speed side by side
-# (docs/adapters/native_comparison.md).
+# (docs/adapters/comparison.md).
 ARGS="--parallel=fsdp --microbatches=1 --microbatch_size=32 --seq_len=2048 --steps=100"
 XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" python -m jax_titan.trainer.train \
-  --model=llama3.1-8b $ARGS --run_dir=runs/native
+  --model=llama3.1-8b $ARGS --run_dir=runs/jax-titan
 XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" python -m jax_titan.trainer.train \
   --model=maxtext:llama3.1-8b $ARGS --run_dir=runs/maxtext
-python -m jax_titan.observability.compare runs/native runs/maxtext
+python -m jax_titan.observability.compare runs/jax-titan runs/maxtext
 
 # MaxDiffusion's FLUX.1-dev (12B) on synthetic 512x512 batches: noised random
 # latents and text embeddings, with the flow-matching loss.

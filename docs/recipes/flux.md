@@ -56,7 +56,7 @@ comparison with diffusers' model from the same weights, below, covers those.
   validation loss is 1.6278, 0.02 above the floor. Three runs of the command
   give these numbers within 2e-4.
 - **It trains like diffusers' FLUX.1.**
-  [adapters/native_comparison.md](../adapters/native_comparison.md#flux1-dev)
+  [adapters/comparison.md](../adapters/comparison.md#flux1-dev)
   sets the same run beside the two adapters' FLUX.1: from step 150 on its
   means are within 2e-4 of diffusers', and MaxDiffusion's, which initializes
   its layers otherwise, ends 0.50 above.
@@ -98,7 +98,7 @@ With FSDP on 8 MI350X the recipe's command runs at 3,289 tokens/s per GPU,
 the median of three runs that differ by 0.5%, and its GPUs peak at 23.0 GiB,
 the first at 56.1. In fp32 the peaks are 25.5 GiB, 56.1 on the first, and
 186.8 GiB under data parallelism on one GPU.
-[adapters/native_comparison.md](../adapters/native_comparison.md#flux1-dev)
+[adapters/comparison.md](../adapters/comparison.md#flux1-dev)
 has the speed of the two adapters' FLUX.1 beside it. Other GPU counts and
 `flux-schnell` were not measured.
 
