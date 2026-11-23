@@ -22,38 +22,15 @@ median duration, the workgroups its kernel launches with (the CUs it takes)
 and the time no compute kernel overlapped it.
 Collectives running alongside take CUs and memory bandwidth, so a GEMM that
 overlaps one usually runs slower. `gemms.py --times` joins the launches to the
-program's GEMM sites, and `--overlap` to the collectives beside them.
+program's GEMM sites, and `--overlap` to the collectives beside them;
+`gemms.py --trace` reads the same from the trace without JAX.
 """
 
 import argparse
-import bisect
 import json
 import pathlib
-import re
-import statistics
 
-COLLECTIVE = re.compile(r"nccl|rccl|all.?reduce|all.?gather|reduce.?scatter|all.?to.?all|collective.?permute", re.I)
-# What a collective kernel runs, from its HLO op or else its name; RCCL's
-# generic kernel names none.
-KINDS = (("all-gather", re.compile(r"all.?gather", re.I)),
-         ("reduce-scatter", re.compile(r"reduce.?scatter", re.I)),
-         ("all-reduce", re.compile(r"all.?reduce", re.I)),
-         ("all-to-all", re.compile(r"all.?to.?all", re.I)),
-         ("collective-permute", re.compile(r"collective.?permute|send|recv", re.I)))
-# Runtime copies only: XLA's own copy fusions are compute kernels.
-COPY = re.compile(r"^Memcpy|^Memset|__amd_rocclr_(copy|fill)", re.I)
-DEVICE_PLANE = re.compile(r"/device:GPU:(\d+)")
-GRID = re.compile(r"\bgrid:(\d+),(\d+),(\d+)")
-
-
-def _merge(intervals):
-  out = []
-  for start, end in sorted(intervals):
-    if out and start <= out[-1][1]:
-      out[-1][1] = max(out[-1][1], end)
-    else:
-      out.append([start, end])
-  return out
+from jax_titan.observability import gemms
 
 
 def _length(intervals):
@@ -77,10 +54,6 @@ def _subtract(intervals, covered):
   return out
 
 
-def _is_stream_line(name: str) -> bool:
-  return name.startswith("Stream") or "stream" in name.lower()
-
-
 def device_events(xplane: pathlib.Path):
   """{gpu id: [(name, start_ns, end_ns)]} from the GPU stream lines."""
   from jax.profiler import ProfileData  # pylint: disable=g-import-not-at-top
@@ -88,24 +61,14 @@ def device_events(xplane: pathlib.Path):
   data = ProfileData.from_file(str(xplane))
   events = {}
   for plane in data.planes:
-    m = DEVICE_PLANE.search(plane.name)
+    m = gemms.DEVICE_PLANE.search(plane.name)
     if not m:
       continue
     out = events.setdefault(int(m.group(1)), [])
     for line in plane.lines:
-      if _is_stream_line(line.name):
+      if gemms.is_stream_line(line.name):
         out.extend((e.name, e.start_ns, e.end_ns) for e in line.events)
   return events
-
-
-def collective_kind(hlo_op: str, kernel: str = "") -> str:
-  """all-gather, reduce-scatter, all-reduce, all-to-all or collective-permute
-  for a collective kernel; "" when neither its HLO op nor its name says."""
-  for text in (hlo_op, kernel):
-    for kind, pattern in KINDS:
-      if text and pattern.search(text):
-        return kind
-  return ""
 
 
 def kernel_events(xplane: pathlib.Path) -> dict[int, list[dict]]:
@@ -116,12 +79,12 @@ def kernel_events(xplane: pathlib.Path) -> dict[int, list[dict]]:
   data = ProfileData.from_file(str(xplane))
   events = {}
   for plane in data.planes:
-    m = DEVICE_PLANE.search(plane.name)
+    m = gemms.DEVICE_PLANE.search(plane.name)
     if not m:
       continue
     out = events.setdefault(int(m.group(1)), [])
     for line in plane.lines:
-      if not _is_stream_line(line.name):
+      if not gemms.is_stream_line(line.name):
         continue
       for e in line.events:
         stats = {}
@@ -129,94 +92,22 @@ def kernel_events(xplane: pathlib.Path) -> dict[int, list[dict]]:
           if name in ("hlo_module", "hlo_op"):
             stats[name] = str(value)
           elif name == "kernel_details":
-            grid = GRID.search(str(value))
+            grid = gemms.GRID.search(str(value))
             if grid:
               stats["grid"] = int(grid.group(1)) * int(grid.group(2)) * int(grid.group(3))
         out.append({"name": e.name, "start_ns": e.start_ns, "end_ns": e.end_ns, **stats})
   return events
 
 
-def _covered(start, end, merged, starts) -> int:
-  """Length of [start, end) inside the merged, sorted intervals."""
-  i = max(0, bisect.bisect_right(starts, start) - 1)
-  total = 0
-  while i < len(merged) and merged[i][0] < end:
-    lo, hi = max(start, merged[i][0]), min(end, merged[i][1])
-    if hi > lo:
-      total += hi - lo
-    i += 1
-  return total
-
-
-def kernel_times(events: dict[int, list[dict]]) -> list[dict]:
-  """One record per compute kernel launch, with the share collectives overlapped
-  and, when they did, the share each collective's HLO op (or kernel name)
-  overlapped. Collectives can overlap each other, so those can add up to more."""
-  out = []
-  for gpu, evs in sorted(events.items()):
-    collectives = sorted((e for e in evs if COLLECTIVE.search(e["name"])), key=lambda e: e["start_ns"])
-    comm = _merge([(e["start_ns"], e["end_ns"]) for e in collectives])
-    starts = [s for s, _ in comm]
-    collective_starts = [e["start_ns"] for e in collectives]
-    longest = max((e["end_ns"] - e["start_ns"] for e in collectives), default=0)
-    for e in sorted(evs, key=lambda e: e["start_ns"]):
-      if COLLECTIVE.search(e["name"]) or COPY.search(e["name"]):
-        continue
-      dur = e["end_ns"] - e["start_ns"]
-      overlap = _covered(e["start_ns"], e["end_ns"], comm, starts) / dur if dur > 0 else 0.0
-      record = {"gpu": gpu, "kernel": e["name"], "hlo_module": e.get("hlo_module", ""),
-                "hlo_op": e.get("hlo_op", ""), "start_ns": e["start_ns"], "dur_ns": dur,
-                "rccl_overlap": round(overlap, 4)}
-      if overlap > 0:
-        shared = {}
-        first = bisect.bisect_left(collective_starts, e["start_ns"] - longest)
-        for c in collectives[first:bisect.bisect_left(collective_starts, e["end_ns"])]:
-          ns = min(e["end_ns"], c["end_ns"]) - max(e["start_ns"], c["start_ns"])
-          if ns > 0:
-            op = c.get("hlo_op") or c["name"]
-            shared[op] = shared.get(op, 0) + ns
-        record["collectives"] = {op: round(ns / dur, 4) for op, ns in shared.items()}
-      out.append(record)
-  return out
-
-
-def collective_launches(events: dict[int, list[dict]]) -> list[dict]:
-  """One record per collective HLO op (or kernel name, without one): its kind,
-  launches on all GPUs, the GPUs it ran on, its median duration, the
-  workgroups its kernel launched with, and its exposed time, which no compute
-  kernel overlapped (two collectives exposed at once both count it)."""
-  ops = {}
-  for gpu, evs in events.items():
-    compute = _merge([(e["start_ns"], e["end_ns"]) for e in evs
-                      if not COLLECTIVE.search(e["name"]) and not COPY.search(e["name"])])
-    starts = [s for s, _ in compute]
-    for e in evs:
-      if not COLLECTIVE.search(e["name"]):
-        continue
-      op = e.get("hlo_op") or e["name"]
-      r = ops.setdefault((e.get("hlo_module", ""), op),
-                         {"kernel": e["name"], "ns": [], "exposed_ns": 0, "gpus": set(), "grid": set()})
-      dur = e["end_ns"] - e["start_ns"]
-      r["ns"].append(dur)
-      r["exposed_ns"] += dur - _covered(e["start_ns"], e["end_ns"], compute, starts)
-      r["gpus"].add(gpu)
-      if e.get("grid"):
-        r["grid"].add(e["grid"])
-  return [{"hlo_module": module, "hlo_op": op, "kind": collective_kind(op, r["kernel"]),
-           "launches": len(r["ns"]), "gpus": len(r["gpus"]), "median_us": statistics.median(r["ns"]) / 1e3,
-           "exposed_us": r["exposed_ns"] / 1e3, "grid": sorted(r["grid"])}
-          for (module, op), r in sorted(ops.items())]
-
-
 def write_kernel_times(trace_dir: str, steps: int, out_path, gpu: int = -1) -> dict:
-  """`kernel_times` and `collective_launches` of the newest trace; `gpu` keeps
-  one device of a multi-GPU process."""
-  xplane = newest_xplane(trace_dir)
+  """`gemms.compute_launches` and `gemms.collective_launches` of the newest
+  trace; `gpu` keeps one device of a multi-GPU process."""
+  xplane = gemms.newest_xplane(trace_dir)
   events = kernel_events(xplane)
   if gpu >= 0:
     events = {gpu: events.get(gpu, [])}
   out = {"xplane": str(xplane), "steps": steps or None, "gpus": sorted(events),
-         "launches": kernel_times(events), "collectives": collective_launches(events)}
+         "launches": gemms.compute_launches(events), "collectives": gemms.collective_launches(events)}
   pathlib.Path(out_path).write_text(json.dumps(out) + "\n")
   return out
 
@@ -233,12 +124,12 @@ def summarize(xplane: pathlib.Path) -> dict:
   for gpu, evs in sorted(events.items()):
     kinds = {"compute": [], "collective": [], "copy": []}
     for name, start, end in evs:
-      kind = "collective" if COLLECTIVE.search(name) else (
-          "copy" if COPY.search(name) else "compute")
+      kind = "collective" if gemms.COLLECTIVE.search(name) else (
+          "copy" if gemms.COPY.search(name) else "compute")
       kinds[kind].append((start, end))
-    compute = _merge(kinds["compute"])
-    collective = _subtract(_merge(kinds["collective"]), compute)
-    copy = _subtract(_subtract(_merge(kinds["copy"]), compute), _merge(collective))
+    compute = gemms.merge_intervals(kinds["compute"])
+    collective = _subtract(gemms.merge_intervals(kinds["collective"]), compute)
+    copy = _subtract(_subtract(gemms.merge_intervals(kinds["copy"]), compute), gemms.merge_intervals(collective))
     busy = _length(compute) + _length(collective) + _length(copy)
     result[gpu] = {
         "compute": _length(compute) / window,
@@ -266,16 +157,9 @@ def report(xplane: pathlib.Path, steps: int = 0) -> dict:
 
 
 def write_json(trace_dir: str, steps: int, out_path) -> dict:
-  out = report(newest_xplane(trace_dir), steps)
+  out = report(gemms.newest_xplane(trace_dir), steps)
   pathlib.Path(out_path).write_text(json.dumps(out, indent=1) + "\n")
   return out
-
-
-def newest_xplane(trace_dir: str) -> pathlib.Path:
-  files = sorted(pathlib.Path(trace_dir).rglob("*.xplane.pb"), key=lambda p: p.stat().st_mtime)
-  if not files:
-    raise FileNotFoundError(f"no *.xplane.pb under {trace_dir}")
-  return files[-1]
 
 
 def main(argv=None):
@@ -293,7 +177,7 @@ def main(argv=None):
   parser.add_argument("--gpu", type=int, default=-1,
                       help="With --kernel_times, keep this device only (one process driving several).")
   args = parser.parse_args(argv)
-  xplane = newest_xplane(args.trace_dir)
+  xplane = gemms.newest_xplane(args.trace_dir)
   print(xplane)
   if args.kernel_times:
     out = write_kernel_times(args.trace_dir, args.steps, args.kernel_times, args.gpu)

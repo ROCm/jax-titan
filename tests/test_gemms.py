@@ -348,8 +348,6 @@ def test_compiled_scan_counts_each_layer():
 
 
 def test_kernel_times_tag_launches_a_collective_overlaps():
-  from jax_titan.observability import profile  # pylint: disable=g-import-not-at-top
-
   events = {0: [
       {"name": "Cijk_gemm", "start_ns": 0, "end_ns": 100, "hlo_module": "jit_step", "hlo_op": "custom-call.1"},
       {"name": "ncclDevKernel_AllGather", "start_ns": 50, "end_ns": 150},
@@ -357,7 +355,7 @@ def test_kernel_times_tag_launches_a_collective_overlaps():
       {"name": "loop_fusion", "start_ns": 300, "end_ns": 310, "hlo_module": "jit_step", "hlo_op": "fusion.2"},
       {"name": "__amd_rocclr_copyBuffer", "start_ns": 310, "end_ns": 320},
   ]}
-  out = profile.kernel_times(events)
+  out = gemms.compute_launches(events)
   assert [(k["kernel"], k["rccl_overlap"]) for k in out] == [
       ("Cijk_gemm", 0.5), ("Cijk_gemm", 0.0), ("loop_fusion", 0.0)]
   assert out[0]["hlo_op"] == "custom-call.1" and out[0]["dur_ns"] == 100
@@ -424,8 +422,6 @@ def test_library_gemm_in_a_slice_fusion_joins_launches_by_its_own_name():
 
 
 def test_kernel_times_name_the_collectives_beside_a_launch():
-  from jax_titan.observability import profile  # pylint: disable=g-import-not-at-top
-
   rccl = "ncclDevKernel_Generic_1(ncclDevKernelArgsStorage<4096ul>)"
   events = {0: [
       {"name": "Cijk_gemm", "start_ns": 0, "end_ns": 100, "hlo_module": "jit_step", "hlo_op": "custom-call.1"},
@@ -434,10 +430,10 @@ def test_kernel_times_name_the_collectives_beside_a_launch():
        "grid": 16},
       {"name": rccl, "start_ns": 300, "end_ns": 400, "hlo_module": "jit_step", "hlo_op": "all-gather.3", "grid": 16},
   ]}
-  (launch,) = profile.kernel_times(events)
+  (launch,) = gemms.compute_launches(events)
   assert launch["rccl_overlap"] == 0.8
   assert launch["collectives"] == {"all-gather.3": 0.4, "reduce-scatter.4": 0.6}
-  ops = {c["hlo_op"]: c for c in profile.collective_launches(events)}
+  ops = {c["hlo_op"]: c for c in gemms.collective_launches(events)}
   assert (ops["all-gather.3"]["kind"], ops["all-gather.3"]["launches"], ops["all-gather.3"]["grid"]) == (
       "all-gather", 2, [16])
   assert ops["all-gather.3"]["median_us"] == pytest.approx(0.07)
@@ -534,3 +530,106 @@ def test_overlap_costs_each_shape_its_time_beside_collectives():
   assert (fwd["sources"], wgrad["sources"]) == (["llama.py:120"], [])
   assert (wgrad["beside"], wgrad["cost_ms_per_step"]) == ([], None)
   assert [x["kind"] for x in wgrad["writes"]] == ["reduce-scatter"]
+
+
+def test_xplane_decodes_a_trace_as_jax_does(tmp_path):
+  from jax.profiler import ProfileData  # pylint: disable=g-import-not-at-top
+
+  jax.profiler.start_trace(str(tmp_path))
+  jax.jit(lambda x: jnp.tanh(x @ x))(jnp.ones((128, 128))).block_until_ready()
+  jax.profiler.stop_trace()
+  path = gemms.newest_xplane(tmp_path)
+  ours = [(p["name"], line["name"], e["name"], e["start_ns"], e["end_ns"], e["stats"])
+          for p in gemms.xplane(path) for line in p["lines"] for e in line["events"]]
+  theirs = [(p.name, line.name, e.name, e.start_ns, e.end_ns, dict(e.stats))
+            for p in ProfileData.from_file(str(path)).planes for line in p.lines for e in line.events]
+  assert ours and len(ours) == len(theirs)
+  for a, b in zip(ours, theirs):
+    assert a[:3] == b[:3] and a[3:5] == (pytest.approx(b[3]), pytest.approx(b[4])) and a[5] == b[5]
+
+
+def _varint(n):
+  out = bytearray()
+  while True:
+    byte, n = n & 0x7F, n >> 7
+    out.append(byte | (0x80 if n else 0))
+    if not n:
+      return bytes(out)
+
+
+def _pb(*fields):
+  """A protobuf message of (field number, value): an int as a varint, a str or
+  bytes length-delimited."""
+  out = b""
+  for number, value in fields:
+    if isinstance(value, int):
+      out += _varint(number << 3) + _varint(value)
+    else:
+      data = value.encode() if isinstance(value, str) else value
+      out += _varint(number << 3 | 2) + _varint(len(data)) + data
+  return out
+
+
+def _plane(name, lines, event_names, stat_names):
+  """An XPlane with its lines and the names of its event and stat metadata, by id."""
+  meta = lambda names: [_pb((1, i), (2, _pb((1, i), (2, n)))) for i, n in names.items()]  # noqa: E731
+  return _pb((2, name), *[(3, line) for line in lines], *[(4, m) for m in meta(event_names)],
+             *[(5, m) for m in meta(stat_names)])
+
+
+def _line(name, timestamp_ns, *events):
+  return _pb((2, name), (3, timestamp_ns), *[(4, e) for e in events])
+
+
+def _event(metadata_id, offset_ps, duration_ps, op, details=""):
+  """An XEvent whose hlo_module refers to stat metadata 4, with its hlo_op and kernel_details."""
+  stats = [_pb((1, 1), (7, 4)), _pb((1, 2), (5, op))] + ([_pb((1, 3), (5, details))] if details else [])
+  return _pb((1, metadata_id), (2, offset_ps), (3, duration_ps), *[(4, s) for s in stats])
+
+
+# One GPU's trace of COLLECTIVE_MODULE's step: the forward GEMM beside an
+# all-gather on another stream, then the weight gradient alone; and lines that
+# hold no kernels, on the GPU and on the host.
+_TRACE = _pb(*[(1, p) for p in (
+    _plane("/device:GPU:0", [
+        _line("Stream #0", 1000, _event(1, 0, 100_000, "fwd"), _event(2, 200_000, 50_000, "wgrad")),
+        _line("Stream #1", 1000, _event(3, 40_000, 100_000, "all-gather.7", "grid:16,1,1 block:256,1,1")),
+        _line("XLA Ops", 1000, _event(1, 0, 100_000, "fwd")),
+    ], {1: "Cijk_fwd", 2: "Cijk_wgrad", 3: "ncclDevKernel_Generic_1"},
+        {1: "hlo_module", 2: "hlo_op", 3: "kernel_details", 4: "jit_step"}),
+    _plane("/host:CPU", [_line("Stream #0", 0, _event(1, 0, 10, "host"))], {1: "PjitFunction"},
+           {1: "hlo_module", 2: "hlo_op", 4: "jit_step"}),
+)])
+
+
+def test_trace_kernels_are_the_gpu_stream_lines(tmp_path):
+  path = tmp_path / "host.xplane.pb"
+  path.write_bytes(_TRACE)
+  kernel = {"hlo_module": "jit_step"}
+  assert gemms.trace_kernels(path) == {0: [
+      dict(kernel, name="Cijk_fwd", start_ns=1000, end_ns=1100, hlo_op="fwd"),
+      dict(kernel, name="Cijk_wgrad", start_ns=1200, end_ns=1250, hlo_op="wgrad"),
+      dict(kernel, name="ncclDevKernel_Generic_1", start_ns=1040, end_ns=1140, hlo_op="all-gather.7", grid=16),
+  ]}
+
+
+def test_one_command_on_a_dump_and_a_trace(tmp_path):
+  dump, trace = tmp_path / "dump", tmp_path / "trace" / "plugins" / "profile" / "1"
+  dump.mkdir()
+  trace.mkdir(parents=True)
+  (dump / "module_0001.jit_step.gfx942_gpu_after_optimizations.txt").write_text(COLLECTIVE_MODULE)
+  (trace / "host.xplane.pb").write_bytes(_TRACE)
+  copy = shutil.copy(gemms.__file__, tmp_path / "hlo_gemms.py")
+  out = tmp_path / "out.json"
+  # -I -S: no site-packages, so no JAX and no JAX-Titan to import.
+  result = subprocess.run([sys.executable, "-I", "-S", copy, str(dump), "--trace", str(tmp_path / "trace"),
+                           "--steps", "1", "--overlap", "--json", str(out)],
+                          capture_output=True, text=True, check=False, cwd=tmp_path)
+  assert result.returncode == 0, result.stderr
+  report = json.loads(out.read_text())
+  assert report["times"]["kernels_matched"] == 2
+  rows = {(r["m"], r["n"], r["k"]): r for r in report["overlap"]}
+  fwd, wgrad = rows[(256, 128, 64)], rows[(64, 128, 256)]
+  assert (fwd["overlapped_per_step"], fwd["overlapped_us"]) == (1, pytest.approx(0.1))
+  assert [(b["kind"], b["ops"][0]["op"]) for b in fwd["beside"]] == [("all-gather", "all-gather.7")]
+  assert [x["kind"] for x in wgrad["writes"]] == ["reduce-scatter"] and wgrad["beside"] == []
