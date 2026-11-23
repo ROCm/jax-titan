@@ -18,7 +18,8 @@ seconds per step; `--json` writes the result, which `summarize` reads as
 duration, and the fraction of it that a collective kernel on the same GPU
 overlapped; for an overlapped launch, also the fraction each collective's HLO
 op overlapped. A summary of each collective op follows: its kind, launches,
-median duration and the workgroups its kernel launches with, the CUs it takes.
+median duration, the workgroups its kernel launches with (the CUs it takes)
+and the time no compute kernel overlapped it.
 Collectives running alongside take CUs and memory bandwidth, so a GEMM that
 overlaps one usually runs slower. `gemms.py --times` joins the launches to the
 program's GEMM sites, and `--overlap` to the collectives beside them.
@@ -181,22 +182,29 @@ def kernel_times(events: dict[int, list[dict]]) -> list[dict]:
 
 def collective_launches(events: dict[int, list[dict]]) -> list[dict]:
   """One record per collective HLO op (or kernel name, without one): its kind,
-  launches on all GPUs, the GPUs it ran on, its median duration and the
-  workgroups its kernel launched with."""
+  launches on all GPUs, the GPUs it ran on, its median duration, the
+  workgroups its kernel launched with, and its exposed time, which no compute
+  kernel overlapped (two collectives exposed at once both count it)."""
   ops = {}
   for gpu, evs in events.items():
+    compute = _merge([(e["start_ns"], e["end_ns"]) for e in evs
+                      if not COLLECTIVE.search(e["name"]) and not COPY.search(e["name"])])
+    starts = [s for s, _ in compute]
     for e in evs:
       if not COLLECTIVE.search(e["name"]):
         continue
       op = e.get("hlo_op") or e["name"]
-      r = ops.setdefault((e.get("hlo_module", ""), op), {"kernel": e["name"], "ns": [], "gpus": set(), "grid": set()})
-      r["ns"].append(e["end_ns"] - e["start_ns"])
+      r = ops.setdefault((e.get("hlo_module", ""), op),
+                         {"kernel": e["name"], "ns": [], "exposed_ns": 0, "gpus": set(), "grid": set()})
+      dur = e["end_ns"] - e["start_ns"]
+      r["ns"].append(dur)
+      r["exposed_ns"] += dur - _covered(e["start_ns"], e["end_ns"], compute, starts)
       r["gpus"].add(gpu)
       if e.get("grid"):
         r["grid"].add(e["grid"])
   return [{"hlo_module": module, "hlo_op": op, "kind": collective_kind(op, r["kernel"]),
            "launches": len(r["ns"]), "gpus": len(r["gpus"]), "median_us": statistics.median(r["ns"]) / 1e3,
-           "grid": sorted(r["grid"])}
+           "exposed_us": r["exposed_ns"] / 1e3, "grid": sorted(r["grid"])}
           for (module, op), r in sorted(ops.items())]
 
 
