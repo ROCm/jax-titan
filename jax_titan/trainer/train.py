@@ -138,8 +138,28 @@ def parse_args(argv=None):
       "256 for flux-schnell and Ideogram 4. A cache of samples (--data) sets its own.",
   )
   parser.add_argument("--steps", type=int, default=50)
-  parser.add_argument("--lr", type=float, default=3e-4)
+  parser.add_argument("--lr", type=float, default=3e-4, help="Peak learning rate.")
   parser.add_argument("--warmup_steps", type=int, default=10)
+  parser.add_argument(
+      "--lr_schedule", default="cosine", choices=["cosine", "nemo_cosine"],
+      help="cosine: optax's, from 0 at the first update to --lr over the warm-up, then a "
+      "cosine to a tenth of it. nemo_cosine: NeMo's CosineAnnealing, as the MLPerf "
+      "reference runs it: --lr * (s + 1) / (warm-up + 1) for update s up to the warm-up, "
+      "then the same cosine (jax_titan.trainer.schedules).",
+  )
+  parser.add_argument(
+      "--lr_decay_steps", type=int, default=0,
+      help="Updates of the cosine after the warm-up; default: the rest of --steps. MLPerf "
+      "fixes it at 1,200,000 minus the warm-up.",
+  )
+  parser.add_argument("--adam_b1", type=float, default=0.9, help="AdamW beta1.")
+  parser.add_argument("--adam_b2", type=float, default=0.95, help="AdamW beta2.")
+  parser.add_argument(
+      "--adam_eps", type=float, default=1e-8,
+      help="AdamW epsilon, added to the square root of the second moment.")
+  parser.add_argument(
+      "--weight_decay", type=float, default=0.1,
+      help="AdamW's decoupled weight decay, for every parameter but the norms' weights.")
   parser.add_argument(
       "--max_grad_norm", type=float, default=1.0,
       help="Clip by the gradient norm over all stages together.",
@@ -525,6 +545,7 @@ def main(argv=None):
   from jax_titan.data.text import WindowSampler  # pylint: disable=g-import-not-at-top
   from jax_titan.models import llama  # pylint: disable=g-import-not-at-top
   from jax_titan.observability import records  # pylint: disable=g-import-not-at-top
+  from jax_titan.trainer import schedules  # pylint: disable=g-import-not-at-top
 
   devices = jax.devices()
   jax_ready = time.time()
@@ -562,16 +583,18 @@ def main(argv=None):
   if args.ops:
     description += f" | ops {args.ops}"
 
-  lr = optax.warmup_cosine_decay_schedule(
-      0.0, args.lr, args.warmup_steps, max(args.steps, args.warmup_steps + 1),
-      end_value=args.lr * 0.1,
-  )
+  decay_steps = (args.lr_decay_steps
+                 or max(args.steps, args.warmup_steps + 1) - args.warmup_steps)
+  lr = schedules.SCHEDULES[args.lr_schedule](args.lr, args.warmup_steps, decay_steps,
+                                             args.lr * 0.1)
+
   def make_optimizer(decays=None):
     """AdamW; `decays(path, leaf)` says which parameters take weight decay."""
     mask = _decay_mask if decays is None else (
         lambda params: jax.tree_util.tree_map_with_path(decays, params))
     # Each step clips by the global gradient norm (--max_grad_norm) before this.
-    return optax.adamw(lr, b1=0.9, b2=0.95, eps=1e-8, weight_decay=0.1, mask=mask)
+    return optax.adamw(lr, b1=args.adam_b1, b2=args.adam_b2, eps=args.adam_eps,
+                       weight_decay=args.weight_decay, mask=mask)
 
   mb, num_mb, seq = args.microbatch_size, args.microbatches, args.seq_len
   if staged:

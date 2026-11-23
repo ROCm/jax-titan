@@ -3,10 +3,13 @@
 Both steps use the same stage functions, microbatches and optimizer, clipped
 by the gradient norm over all stages, in fp32, so their losses, gradient norms
 and parameters must agree. SGD keeps the parameter check tight: Adam magnifies
-rounding noise in near-zero embedding gradients.
+rounding noise in near-zero embedding gradients. `--optimizer=adamw` takes the
+AdamW of MLPerf's Llama 3.1 8B, whose epsilon of 1e-5 keeps that noise below
+the check's tolerance.
 
   python examples/llama_mpmd_parity.py --platform=cpu
   python examples/llama_mpmd_parity.py --platform=cpu --stage_fsdp --tensor_parallel=2
+  python examples/llama_mpmd_parity.py --platform=cpu --optimizer=adamw --lr=1e-3
 """
 
 import argparse
@@ -28,8 +31,13 @@ def parse_args(argv=None):
   parser.add_argument("--steps", type=int, default=4)
   parser.add_argument(
       "--lr", type=float, default=0.5,
-      help="SGD learning rate. 0.5 moves the parameters far in a few steps, "
+      help="Learning rate. For SGD, 0.5 moves the parameters far in a few steps, "
       "but over tens of steps it amplifies rounding differences.",
+  )
+  parser.add_argument(
+      "--optimizer", default="sgd", choices=["sgd", "adamw"],
+      help="adamw: betas 0.9 and 0.95, epsilon 1e-5, weight decay 0.1 on all but the "
+      "norms' weights, as MLPerf's Llama 3.1 8B fixes them.",
   )
   parser.add_argument(
       "--max_grad_norm", type=float, default=1.0,
@@ -88,7 +96,14 @@ def main(argv=None):
       stage_fns.append(functools.partial(lambda f, p, x: f(p, x, None), fn))
     else:
       stage_fns.append(fn)
-  optimizer = optax.sgd(args.lr)
+  if args.optimizer == "adamw":
+    norms = ("attn_norm", "mlp_norm", "final_norm")
+    optimizer = optax.adamw(
+        args.lr, b1=0.9, b2=0.95, eps=1e-5, weight_decay=0.1,
+        mask=lambda p: jax.tree_util.tree_map_with_path(
+            lambda path, _: path[-1].key not in norms, p))
+  else:
+    optimizer = optax.sgd(args.lr)
 
   layers = tuple(int(n) for n in args.stage_layers.split(",")) if args.stage_layers else None
   keys = jax.random.split(jax.random.key(0), num_stages)

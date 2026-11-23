@@ -44,6 +44,12 @@ def test_two_mesh_spike(tmp_path):
     ["--stage_layers=3,1"],
     ["--reduce_grads=step", "--per_device=shard_map"],
     ["--reduce_grads=step", "--per_device=shard_map", "--stage_fsdp", "--tensor_parallel=2"],
+    # MLPerf Llama 3.1 8B's AdamW under each schedule it might run.
+    ["--optimizer=adamw", "--lr=1e-3"],
+    ["--optimizer=adamw", "--lr=1e-3", "--schedule=GPIPE"],
+    ["--optimizer=adamw", "--lr=1e-3", "--schedule=ZERO_BUBBLE_H1"],
+    ["--optimizer=adamw", "--lr=1e-3", "--reduce_grads=microbatch", "--stage_fsdp",
+     "--tensor_parallel=2"],
 ], ids=lambda f: " ".join(f))
 def test_llama_parity(flags):
   out = _run("examples/llama_mpmd_parity.py", *flags)

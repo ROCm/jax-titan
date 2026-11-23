@@ -53,6 +53,7 @@ _CONFIG_KEYS = (
     "stages_per_mesh", "mpmd_options", "reduce_grads", "per_device", "stage_fsdp",
     "tensor_parallel", "microbatches", "microbatch_size", "seq_len", "resolution", "frames",
     "text_tokens", "ops", "remat", "max_grad_norm", "lr", "warmup_steps", "data",
+    "lr_schedule", "lr_decay_steps", "adam_b1", "adam_b2", "adam_eps", "weight_decay",
 )
 
 
