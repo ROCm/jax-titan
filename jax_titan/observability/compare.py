@@ -40,7 +40,7 @@ from jax_titan.observability import summarize
 # Trainer arguments that change neither a training step nor its speed: where a run
 # writes, how it is watched, a rehearsed failure, and the peak its MFU is taken against.
 _ASIDE = ("run_dir", "log_file", "checkpoint_dir", "profile_dir", "save_params", "step_timeout",
-          "power_sample_s", "fail_at_step", "peak_tflops_per_device")
+          "power_sample_s", "fail_at_step", "peak_tflops_per_device", "synthetic_warmup")
 
 
 def _training(start: dict) -> dict:

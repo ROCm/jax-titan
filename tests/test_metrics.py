@@ -77,6 +77,14 @@ def test_summary_of_a_restarted_run(restarted_log):
   assert c["restore_s"]["p50"] == 5.0
 
 
+def test_startup_counts_a_synthetic_warmup():
+  attempt, _ = _attempt(0.0, 0, 5, set(), completed=True)
+  data = next(i for i, r in enumerate(attempt) if r.get("event") == "data")
+  attempt[data + 1:data + 1] = [{"event": "warmup", "time": 31.0, "seconds": 7.0, "steps": 2},
+                                {"event": "run_start", "time": 31.0, "step": 0}]
+  assert summarize.startup(attempt, STEP_S)["warmup"] == 7.0
+
+
 def test_mfu_variants_of_a_restarted_run(restarted_log):
   m = summarize.run_metrics(restarted_log, skip=2, wcp_steps=1)
   # 8e12 FLOPs per step on 8 devices of 1 TFLOP/s: MFU 0.5 at the 2 s steady step.

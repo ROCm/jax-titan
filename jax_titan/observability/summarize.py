@@ -130,7 +130,8 @@ def startup(attempt: list[dict], steady_s: float | None) -> dict:
   if start.get("process_start") is not None:
     stages["python_imports"] = max(0.0, start["main_start"] - start["process_start"])
   stages["jax_init"] = start["jax_ready"] - start["main_start"]
-  state, compiled, data = (_first(attempt, n) for n in ("state", "compile", "data"))
+  state, compiled, data, warmup = (
+      _first(attempt, n) for n in ("state", "compile", "data", "warmup"))
   if state:
     stages["setup"] = max(0.0, state["time"] - state["seconds"] - start["jax_ready"])
     stages["restore" if state.get("restored_step") else "init"] = state["seconds"]
@@ -138,6 +139,8 @@ def startup(attempt: list[dict], steady_s: float | None) -> dict:
     stages["compile"] = compiled["lower_s"] + compiled["compile_s"]
   if data:
     stages["data"] = data["seconds"]
+  if warmup:
+    stages["warmup"] = warmup["seconds"]
   first = steps[0]
   if steady_s:
     stages["first_step_excess"] = max(0.0, first["step_time_s"] - steady_s)

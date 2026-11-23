@@ -114,6 +114,14 @@ This is the target design; [What works](#what-works) lists what runs today.
   - **Time left** in a running job (`planning.remaining`).
   - **A performance database** of predicted and measured runs that flags
     regressions (`observability.perfdb`).
+- MLPerf Training v6.1's Llama 3.1 8B, up to a trial on GPUs
+  ([docs/mlperf.md](docs/mlperf.md)):
+  - the contract, which refuses hyperparameters that depart from it;
+  - MLPerf's C4 read in the order of the reference's Megatron-core;
+  - the reference's schedule and AdamW;
+  - validation on the fixed set, stopping at the target;
+  - trials (`python -m jax_titan.mlperf.run`) warmed up before the clock
+    starts, with an MLLOG that MLCommons' compliance checker accepts.
 
 On 8x AMD Instinct MI355X, Llama 3.1 8B with 2 pipeline stages of 4 GPUs and
 65,536 tokens per step trains at 1.45 s per step (45.1k tokens/s, 10.5% MFU)
@@ -178,11 +186,12 @@ JAX-Titan on AMD's SPUR cluster.
 | `jax_titan/parallel` | DP, FSDP and TP shardings from logical parameter axes |
 | `jax_titan/models` | Llama 3 and Ideogram 4, with parameters grouped by pipeline stage; FLUX.1's denoiser; Ideogram 4's text encoder, autoencoder, published-weights reader and generation; Command A+ with its vision tower and generation; and the models of MaxText, MaxDiffusion, transformers and diffusers, each called whole, with the stages of MaxDiffusion's Ideogram branch (`adapters/`) |
 | `jax_titan/ops` | Semantic operators: per-op provider policy, native JAX, ROCm TE, JAX-AITER and JAX-Triton (Triton and Gluon) providers, and the conformance harness |
-| `jax_titan/data` | Llama 3's tokenizer and a published model's, and pretokenized text sampling; the cache of Ideogram 4's image tokens and text features; Command A+'s chat template, tokenizer and image tiles, and its cache of conversations |
+| `jax_titan/data` | Llama 3's tokenizer and a published model's, and pretokenized text sampling; Megatron's indexed datasets in Megatron-core's sample order; the cache of Ideogram 4's image tokens and text features; Command A+'s chat template, tokenizer and image tiles, and its cache of conversations |
 | `jax_titan/trainer` | Training entry point (`python -m jax_titan.trainer.train`) and Orbax checkpoints |
 | `jax_titan/observability` | Run records, metrics, figures, comparisons of runs, ETTR, ceilings, FLOPs model and per-GPU busy and idle time from profiler traces |
 | `jax_titan/planning` | Training budget planner and performance model: model shapes, GPU specs, memory, RCCL and MORI collectives, step time, time left |
 | `jax_titan/tuning` | hipBLASLt kernel selection for the GEMMs a program runs on ROCm: capture, sweep, override file and its checks; new kernels with TensileLite |
+| `jax_titan/mlperf` | MLPerf Training: the benchmarks' contracts, MLLOG from the trainer's records, the trial runner and its configs |
 | `examples/` | MPMD spike, parity checks, an example caption for Ideogram 4 and example conversations for Command A+ |
 | `tests/` | CPU tests: schedules and layouts against `jax.jit`, checkpoint resume, MaxText, MaxDiffusion, Ideogram 4, Command A+ and FLUX.1 models, the comparison of runs |
 | `scripts/` | Container, build, environment, GPU-availability and post-run cleanup scripts |

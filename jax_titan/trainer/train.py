@@ -214,6 +214,13 @@ def parse_args(argv=None):
       "stop at their quality target; 0 trains all --steps.",
   )
   parser.add_argument(
+      "--synthetic_warmup", type=int, default=0,
+      help="Llama flavors: train this many steps, and validate once, on synthetic tokens "
+      "before the run starts, so both programs are compiled and warm; the state is then "
+      "initialized (or restored) again. The run_start event, where MLPerf's clock starts, "
+      "follows it, and the first tokens of a Megatron dataset are read after it.",
+  )
+  parser.add_argument(
       "--eval_data", default="",
       help="uint32 token file to validate on (default: WikiText-103's validation split in "
       "Llama 3's tokens; a model with another tokenizer takes its own file), or the prefix "
@@ -537,7 +544,8 @@ def _enable_rccl_inspector(run_dir: str):
   os.environ.setdefault("NCCL_INSPECTOR_DUMP_THREAD_INTERVAL_MICROSECONDS", "1000000")
 
 
-def main(argv=None):
+def main(argv=None, listeners=()):
+  """Trains; `listeners` get every step record and event as the log is written."""
   main_start = time.time()
   args = parse_args(argv)
   if args.platform == "cpu":
@@ -567,7 +575,7 @@ def main(argv=None):
   if args.run_dir and not args.log_file:
     index = jax.process_index()
     args.log_file = os.path.join(args.run_dir, f"train.p{index}.jsonl" if index else "train.jsonl")
-  log = records.Log(args.log_file)
+  log = records.Log(args.log_file, listeners)
   launch = os.environ.get("JAX_TITAN_LAUNCH_TIME")
   log.event(
       "start", launch_time=float(launch) if launch else None,
@@ -623,6 +631,8 @@ def main(argv=None):
   if eval_batch != num_mb * mb and args.parallel == "mpmd":
     raise ValueError(f"a pipeline validates batches of one step's {num_mb * mb} sequences, "
                      f"not --eval_batch_size={eval_batch}")
+  if args.synthetic_warmup and staged:
+    raise NotImplementedError("--synthetic_warmup is for Llama flavors")
   if staged:
     layout, work = adapters.build(args, devices, make_optimizer)
   else:
@@ -752,6 +762,7 @@ def main(argv=None):
                          f"{args.model}'s vocabulary of {work.vocab_size}")
       return batch
 
+  load_eval = None
   if args.eval_every:
     num_eval = eval_count // eval_batch
     if work.next_batch is not None:
@@ -765,10 +776,14 @@ def main(argv=None):
       eval_path = args.eval_data or str(
           paths.work_dir() / "data/wikitext103_validation.llama3.bin")
       if megatron.prefix_of(eval_path):
-        held_out = megatron.validation(megatron.prefix_of(eval_path), seq, eval_count)
-        if held_out.max() >= work.vocab_size:
-          raise ValueError(f"{eval_path} has token ids beyond the vocabulary")
-        eval_batches = list(held_out.reshape(num_eval, eval_batch, seq + 1))
+        # The index is read here; the tokens at the first validation, after run_start.
+        held_out = megatron.validation_samples(megatron.prefix_of(eval_path), seq, eval_count)
+
+        def load_eval():
+          tokens = held_out.batch(0, eval_count)
+          if tokens.max() >= work.vocab_size:
+            raise ValueError(f"{eval_path} has token ids beyond the vocabulary")
+          return list(tokens.reshape(num_eval, eval_batch, seq + 1))
       else:
         held_out = WindowSampler(eval_path, seq, seed=args.seed, step=0)
         if held_out.max_token() >= work.vocab_size:
@@ -799,6 +814,31 @@ def main(argv=None):
         os.path.join(args.run_dir, "power.jsonl"), args.power_sample_s).start()
 
   compiled_eval = None
+  if args.synthetic_warmup:
+    t0 = time.time()
+    rng = np.random.default_rng(0)
+
+    def synthetic(batch):
+      return layout.put_batch(rng.integers(0, work.vocab_size, (batch, seq + 1), dtype=np.int32))
+
+    for _ in range(args.synthetic_warmup):
+      params, opt_states, _, _ = compiled(params, opt_states, *frozen, *synthetic(num_mb * mb))
+    if load_eval or eval_batches:
+      placed = synthetic(eval_batch)
+      compiled_eval = layout.eval_step.lower(params, *frozen, *placed).compile()
+      jax.block_until_ready(compiled_eval(params, *frozen, *placed))
+    jax.block_until_ready((params, opt_states))
+    # The warm-up changed the state: start again from the initial or restored one.
+    params = opt_states = None
+    if start:
+      (params, opt_states), _ = ckpt.restore(start, layout.abstract_state)
+    else:
+      params, opt_states = layout.init()
+    print(f"warmed up on {args.synthetic_warmup} synthetic steps in {time.time() - t0:.1f}s",
+          flush=True)
+    log.event("warmup", seconds=time.time() - t0, steps=args.synthetic_warmup)
+
+  log.event("run_start", step=start)
   status, done, reached = "completed", start, False
   try:
     for step in range(start, args.steps):
@@ -854,8 +894,10 @@ def main(argv=None):
             f"non-finite loss or gradient norm ({grad_norm}) at step {step}; the step "
             "made no update, and nothing was saved after it")
       done = step + 1
-      if eval_batches and (done % args.eval_every == 0 or done == args.steps):
+      if (eval_batches or load_eval) and (done % args.eval_every == 0 or done == args.steps):
         t0 = time.time()
+        if load_eval:
+          eval_batches, load_eval = load_eval(), None
         placed = [layout.put_batch(b) for b in eval_batches]
         compile_s = 0.0
         if compiled_eval is None:

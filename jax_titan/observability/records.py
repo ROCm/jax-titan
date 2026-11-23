@@ -13,6 +13,8 @@ Event records hold `event` and `time`:
   compile  `lower_s`, `compile_s`, and `programs`: each compiled program a step
            runs (by HLO module name) and its calls per step
   data     `seconds` to open the data
+  warmup   `seconds` and `steps` of --synthetic_warmup, the state initialized again
+  run_start  the first training step's data is about to be read: MLPerf's clock starts
   memory   `peak_hbm_gib` per device after the first step
   eval     `step` (updates done), validation `loss` and `seconds`; `samples`, the
            training sequences done, and `eval_samples`, the sequences validated
@@ -41,15 +43,19 @@ def process_start_time() -> float | None:
 
 
 class Log:
-  """Appends records to a JSONL file; does nothing without a path."""
+  """Appends records to a JSONL file, without a path to none, and hands each
+  record to `listeners` (such as jax_titan.mlperf.mllog's) as it is written."""
 
-  def __init__(self, path: str | None):
+  def __init__(self, path: str | None, listeners=()):
     self._file = open(path, "a") if path else None
+    self._listeners = tuple(listeners)
 
   def write(self, record: dict):
     if self._file:
       self._file.write(json.dumps(record) + "\n")
       self._file.flush()
+    for listener in self._listeners:
+      listener(record)
 
   def event(self, name: str, **fields):
     self.write({"event": name, "time": time.time(), **fields})

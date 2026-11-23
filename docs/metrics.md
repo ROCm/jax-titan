@@ -22,7 +22,7 @@ XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" python -m jax_titan.trainer.train \
 
 | File | Contents | Written by |
 |---|---|---|
-| `train.jsonl` | One record per step (loss, gradient norm, step time, tokens/s, tokens/s per GPU, MFU where the model has a FLOP count, wall time) and timeline events: `start`, `layout`, `state`, `compile`, `data`, `memory`, `eval`, `save`, `checkpoint_closed` and `end` (`jax_titan.observability.records`). A restart appends a new attempt. Processes past the first write `train.p<i>.jsonl` | the trainer |
+| `train.jsonl` | One record per step (loss, gradient norm, step time, tokens/s, tokens/s per GPU, MFU where the model has a FLOP count, wall time) and timeline events: `start`, `layout`, `state`, `compile`, `data`, `warmup`, `run_start`, `memory`, `eval`, `save`, `checkpoint_closed` and `end` (`jax_titan.observability.records`). A restart appends a new attempt. Processes past the first write `train.p<i>.jsonl` | the trainer |
 | `env.json` | Packages, git commits, ROCm; XLA flags and the RCCL, HSA, HIP and JAX environment; host, CPUs, GPUs (PCI bus ID, VBIOS, driver, power cap), RDMA NICs; the rank map (device, process, HIP index, PCI bus ID, mesh and stages) | the trainer, or `python -m jax_titan.observability.env OUT.json` |
 | `power.jsonl` | Per GPU every `--power_sample_s` seconds (default 1): energy counter, power, GFX and memory clocks, hotspot temperature; every 10 s the share of time throttled by the power limit, temperatures or PROCHOT | the trainer, or `python -m jax_titan.observability.power OUT.jsonl` beside any job |
 | `profile.json` | Per GPU: compute, exposed collective, copy and idle shares of the traced steps, exposed collective seconds per step, and the spread across GPUs | the trainer with `--profile_steps`, or `python -m jax_titan.observability.profile TRACE --steps N --json OUT` |
@@ -270,7 +270,7 @@ is recomputed; XLA recomputed 70% of it.
 | Exposed communication | trace | `profile`: collective kernel time no compute kernel overlaps, per GPU and step |
 | Collective completion time p50 and p99 | RCCL Inspector | `collectives`, `summarize` |
 | Checkpoint cost `w_cp` and restore time | `save` and `state` events, and the steps after each save | `summarize`, `ettr` |
-| Restart overhead `u0`, by stage | `start`, `state`, `compile`, `data` events and the first step | `summarize` (`startup_s`), `ettr` |
+| Restart overhead `u0`, by stage | `start`, `state`, `compile`, `data` and `warmup` events and the first step | `summarize` (`startup_s`), `ettr` |
 | ETTR and its loss terms; effective training throughput | events across attempts in one log | `ettr` |
 | Checkpoint interval (Daly) and ETTR at 1-2,048 nodes | measured `w_cp` and `u0`, published failure rates | `ettr --json` (the book's `ettr_model.json`) |
 | Energy per token (GPU boundary), clocks, throttle reasons | `power.jsonl` | `summarize` |

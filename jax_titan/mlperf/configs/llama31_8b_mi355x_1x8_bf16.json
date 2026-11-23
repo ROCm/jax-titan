@@ -1,0 +1,12 @@
+{
+  "benchmark": "llama31_8b",
+  "submission": {"org": "AMD", "platform": "MI355X", "division": "closed", "status": "onprem"},
+  "global_batch_size": 32,
+  "base_lr": 0.0008,
+  "warmup_steps": 128,
+  "precision": {"linear": "bfloat16", "attn": "bfloat16", "comm": "bfloat16"},
+  "eval_batch_size": 32,
+  "synthetic_warmup": 2,
+  "trainer": ["--parallel=fsdp", "--microbatches=1", "--microbatch_size=32",
+              "--ops=attention=te"]
+}
