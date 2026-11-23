@@ -51,14 +51,14 @@ before timing, for the kernel alone.
 JAX-Titan's operator providers show the three integration patterns; each
 backs `ops.linear`, which models call instead of `x @ w`:
 
-- **jax-triton** ([ops/providers/triton.py](../src/jax_titan/ops/providers/triton.py)):
+- **jax-triton** ([ops/providers/triton.py](../jax_titan/ops/providers/triton.py)):
   `triton_call` passes scalars without divisibility hints, so a kernel that
   takes strides as arguments cannot prove its loads contiguous. A thin
   `@triton.jit` wrapper with constexpr sizes and strides calls the library
-  kernel instead ([_triton_gemm.py](../src/jax_titan/ops/providers/_triton_gemm.py)),
+  kernel instead ([_triton_gemm.py](../jax_titan/ops/providers/_triton_gemm.py)),
   which also lets the backward GEMMs read the forward's operands in place.
 - **XLA FFI with an ahead-of-time kernel**
-  ([ops/providers/flydsl.py](../src/jax_titan/ops/providers/flydsl.py)):
+  ([ops/providers/flydsl.py](../jax_titan/ops/providers/flydsl.py)):
   FlyDSL's `export_to_c` writes a C object and header per specialization;
   a generated handler binds XLA's buffers and stream to the exported call,
   and `jax.ffi.ffi_call` runs it. Nothing of FlyDSL or Python runs in the

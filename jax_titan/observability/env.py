@@ -67,7 +67,7 @@ def software() -> dict:
     name = dist.metadata["Name"] or ""
     if _PACKAGES.match(name):
       packages[name] = dist.version
-  repo = pathlib.Path(__file__).resolve().parents[3]
+  repo = pathlib.Path(__file__).resolve().parents[2]
   commits = {"jax-titan": _git(repo)}
   src = paths.work_dir() / "src"
   if src.is_dir():

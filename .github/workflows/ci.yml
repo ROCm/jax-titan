@@ -49,7 +49,7 @@ jobs:
           grep -v jax_rocm .github/ci-wheels.sha256 | sha256sum --check
       - name: Check out MaxDiffusion
         run: |
-          commit=$(sed -n 's/^PINNED_COMMIT = "\(.*\)"$/\1/p' src/jax_titan/models/adapters/maxdiffusion.py)
+          commit=$(sed -n 's/^PINNED_COMMIT = "\(.*\)"$/\1/p' jax_titan/models/adapters/maxdiffusion.py)
           git init --quiet "$RUNNER_TEMP/maxdiffusion"
           cd "$RUNNER_TEMP/maxdiffusion"
           git fetch --quiet --depth 1 https://github.com/AI-Hypercomputer/maxdiffusion "${commit:?}"
@@ -99,7 +99,7 @@ jobs:
           sha256sum --check .github/ci-wheels.sha256
       - name: Check out MaxDiffusion
         run: |
-          commit=$(sed -n 's/^PINNED_COMMIT = "\(.*\)"$/\1/p' src/jax_titan/models/adapters/maxdiffusion.py)
+          commit=$(sed -n 's/^PINNED_COMMIT = "\(.*\)"$/\1/p' jax_titan/models/adapters/maxdiffusion.py)
           git init --quiet "$RUNNER_TEMP/maxdiffusion"
           cd "$RUNNER_TEMP/maxdiffusion"
           git fetch --quiet --depth 1 https://github.com/AI-Hypercomputer/maxdiffusion "${commit:?}"

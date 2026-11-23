@@ -41,8 +41,8 @@ PROFILE_GPU=${PROFILE_GPU:-0}
 GPU_NAME=${GPU_NAME:-MI300X}
 SWEEP_BIN=${SWEEP_BIN:-${JAX_TITAN_ROOT}/bin/hipblaslt_sweep}
 FLAGS="${XLA_FLAGS_BASE:-${JAX_TITAN_ROCM_XLA_FLAGS}} --xla_gpu_autotune_level=0 --xla_gpu_enable_triton_gemm=false"
-HB="python3 ${REPO}/src/jax_titan/tuning/hipblaslt.py"
-GEMMS="python3 ${REPO}/src/jax_titan/observability/gemms.py"
+HB="python3 ${REPO}/jax_titan/tuning/hipblaslt.py"
+GEMMS="python3 ${REPO}/jax_titan/observability/gemms.py"
 export JAX_ENABLE_COMPILATION_CACHE=${JAX_ENABLE_COMPILATION_CACHE:-false}
 mkdir -p "${OUT}"
 
@@ -164,7 +164,7 @@ if has profile; then
 fi
 
 if has cost; then
-  python3 "${REPO}/src/jax_titan/planning/gemm_cost.py" "${OUT}/sweep/results.json" --gpu "${GPU_NAME}" \
+  python3 "${REPO}/jax_titan/planning/gemm_cost.py" "${OUT}/sweep/results.json" --gpu "${GPU_NAME}" \
     ${CLOCK_GHZ:+--clock_ghz "${CLOCK_GHZ}"} --sites "${OUT}/profile/base_gemms.json" \
     --json "${OUT}/cost.json" | tee "${OUT}/cost.md"
 fi

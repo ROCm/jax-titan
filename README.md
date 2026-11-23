@@ -162,14 +162,14 @@ JAX-Titan on AMD's SPUR cluster.
 
 | Path | Contents |
 |---|---|
-| `src/jax_titan/mpmd` | Topology, Shardy MPMD config and pipelined train steps |
-| `src/jax_titan/parallel` | DP, FSDP and TP shardings from logical parameter axes |
-| `src/jax_titan/models` | Llama 3 and Ideogram 4, with parameters grouped by pipeline stage; Ideogram 4's text encoder, autoencoder, published-weights reader and generation; Command A+ with its vision tower and generation; and the models of MaxText, MaxDiffusion, transformers and diffusers, each called whole, with the stages of MaxDiffusion's Ideogram branch (`adapters/`) |
-| `src/jax_titan/ops` | Semantic operators: per-op provider policy, native JAX, ROCm TE, JAX-AITER and JAX-Triton (Triton and Gluon) providers, and the conformance harness |
-| `src/jax_titan/data` | Llama 3's tokenizer and a published model's, and pretokenized text sampling; the cache of Ideogram 4's image tokens and text features; Command A+'s chat template, tokenizer and image tiles, and its cache of conversations |
-| `src/jax_titan/trainer` | Training entry point (`python -m jax_titan.trainer.train`) and Orbax checkpoints |
-| `src/jax_titan/observability` | Run records, metrics, figures, ETTR, ceilings, FLOPs model and per-GPU busy and idle time from profiler traces |
-| `src/jax_titan/planning` | Training budget planner and performance model: model shapes, GPU specs, memory, RCCL and MORI collectives, step time, time left |
+| `jax_titan/mpmd` | Topology, Shardy MPMD config and pipelined train steps |
+| `jax_titan/parallel` | DP, FSDP and TP shardings from logical parameter axes |
+| `jax_titan/models` | Llama 3 and Ideogram 4, with parameters grouped by pipeline stage; Ideogram 4's text encoder, autoencoder, published-weights reader and generation; Command A+ with its vision tower and generation; and the models of MaxText, MaxDiffusion, transformers and diffusers, each called whole, with the stages of MaxDiffusion's Ideogram branch (`adapters/`) |
+| `jax_titan/ops` | Semantic operators: per-op provider policy, native JAX, ROCm TE, JAX-AITER and JAX-Triton (Triton and Gluon) providers, and the conformance harness |
+| `jax_titan/data` | Llama 3's tokenizer and a published model's, and pretokenized text sampling; the cache of Ideogram 4's image tokens and text features; Command A+'s chat template, tokenizer and image tiles, and its cache of conversations |
+| `jax_titan/trainer` | Training entry point (`python -m jax_titan.trainer.train`) and Orbax checkpoints |
+| `jax_titan/observability` | Run records, metrics, figures, ETTR, ceilings, FLOPs model and per-GPU busy and idle time from profiler traces |
+| `jax_titan/planning` | Training budget planner and performance model: model shapes, GPU specs, memory, RCCL and MORI collectives, step time, time left |
 | `examples/` | MPMD spike, parity checks, an example caption for Ideogram 4 and example conversations for Command A+ |
 | `tests/` | CPU tests: schedules and layouts against `jax.jit`, checkpoint resume, MaxText, MaxDiffusion, Ideogram 4 and Command A+ models |
 | `scripts/` | Container, build, environment, GPU-availability and post-run cleanup scripts |

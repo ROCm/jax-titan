@@ -89,7 +89,7 @@ Every package CI installs has its version fixed in the repository:
 |---|---|---|
 | jax, jaxlib, the ROCm plugin wheels and Shardy's MPMD package | `WHEELS` in `ci.yml`, which names a release of this repository, and the checksums in `.github/ci-wheels.sha256` | Publish new wheels (below) |
 | MaxText | `maxtext==0.2.5` in the `maxtext` extra of `pyproject.toml` | Change the pin, and its line in the constraints file |
-| MaxDiffusion | `PINNED_COMMIT` in `src/jax_titan/models/adapters/maxdiffusion.py`, with `third_party/patches/maxdiffusion-*.patch` | Change the commit or the patches: every run applies them to a new checkout |
+| MaxDiffusion | `PINNED_COMMIT` in `jax_titan/models/adapters/maxdiffusion.py`, with `third_party/patches/maxdiffusion-*.patch` | Change the commit or the patches: every run applies them to a new checkout |
 | transformers, diffusers, torchax and PyTorch | The `transformers` and `diffusers` extras of `pyproject.toml` and their lines in the constraints file; PyTorch's CPU build comes from `download.pytorch.org/whl/cpu` | Change the pins, then compare the adapters with PyTorch again ([adapters/transformers.md](adapters/transformers.md)) |
 | Every other Python package | `.github/ci-constraints.txt` | Replace its lines, as its first lines say |
 | ROCm 10.1 and the rest of the GPU job's system | The digest of the container image in `ci.yml` | Change the digest |
