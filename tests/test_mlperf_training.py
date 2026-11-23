@@ -294,11 +294,29 @@ def test_validation_loss_is_the_mean_over_tokens(tmp_path):
   np.testing.assert_allclose(losses[1:], [losses[0]] * 2, rtol=1e-5)
 
 
+@pytest.mark.parametrize("layout", [["--parallel=dp"], ["--parallel=mpmd", "--num_stages=2"]])
+def test_synthetic_warmup_trains_from_the_initial_state(tmp_path, layout):
+  """Warm-up steps and a validation pass on synthetic tokens leave no trace: the run
+  then trains and validates as one without them, and its clock starts after them."""
+  data = _megatron_data(tmp_path)
+  flags = [*data, *layout, "--steps=4", "--eval_every=2", "--eval_samples=16",
+           "--eval_batch_size=16"]
+  _, cold = _train(tmp_path, "cold", *flags)
+  _, warm = _train(tmp_path, "warm", *flags, "--synthetic_warmup=2")
+  assert [r["loss"] for r in records.steps(warm)] == [r["loss"] for r in records.steps(cold)]
+  assert ([e["loss"] for e in records.events(warm, "eval")] ==
+          [e["loss"] for e in records.events(cold, "eval")])
+  events = [r.get("event") for r in warm]
+  assert events.index("warmup") < events.index("run_start") < events.index("eval")
+  assert records.events(warm, "warmup")[0]["steps"] == 2
+
+
 @pytest.mark.parametrize("flags,message", [
     (["--target_eval_loss=3.3"], "needs validation passes"),
     (["--eval_every=1", "--eval_samples=20", "--eval_batch_size=8"], "not whole batches of 8"),
     (["--eval_every=1", "--parallel=mpmd", "--eval_batch_size=8"],
      "validates batches of one step's 16 sequences"),
+    (["--model=command-a-plus", "--synthetic_warmup=1"], "--synthetic_warmup is for Llama"),
 ])
 def test_validation_flags_are_checked(tmp_path, flags, message):
   result, _ = _train(tmp_path, "bad", "--data=synthetic", "--steps=1", *flags, check=False)

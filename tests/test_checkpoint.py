@@ -43,6 +43,12 @@ def test_resume_is_exact(tmp_path):
     assert resumed[step] == full[step], (step, resumed[step], full[step])
 
 
+def test_resume_after_a_synthetic_warmup_is_exact(tmp_path):
+  full, resumed = _resume_from_step_3(tmp_path, "warm", "--synthetic_warmup=2")
+  for step in (3, 4, 5):
+    assert resumed[step] == full[step], (step, resumed[step], full[step])
+
+
 def test_restore_into_fsdp_stages(tmp_path):
   full, resumed = _resume_from_step_3(tmp_path, "fsdp", "--stage_fsdp")
   for step in (3, 4, 5):

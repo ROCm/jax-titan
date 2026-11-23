@@ -336,14 +336,20 @@ class Sampler:
     return {"seed": self.seed, "step": self.step}
 
 
-def validation(prefix, seq_len: int, count: int) -> np.ndarray:
-  """The first `count` samples of `seq_len + 1` tokens in file order, unshuffled."""
+def validation_samples(prefix, seq_len: int, count: int) -> Samples:
+  """The samples of `seq_len + 1` tokens in file order, unshuffled, checked to hold
+  `count`; this reads the index alone."""
   dataset = IndexedDataset(prefix)
   samples = Samples(dataset, build_indices(dataset, seq_len), seq_len)
   if count > len(samples):
     raise ValueError(f"{prefix} holds {len(samples)} samples of {seq_len + EXTRA} tokens, "
                      f"not {count}")
-  return samples.batch(0, count)
+  return samples
+
+
+def validation(prefix, seq_len: int, count: int) -> np.ndarray:
+  """The first `count` samples of `seq_len + 1` tokens in file order, unshuffled."""
+  return validation_samples(prefix, seq_len, count).batch(0, count)
 
 
 def main(argv=None):

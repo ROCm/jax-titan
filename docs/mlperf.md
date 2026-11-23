@@ -7,8 +7,10 @@ what JAX-Titan implements of them.
 > **Status.** The contract of Llama 3.1 8B and GPT-OSS 20B is in
 > `jax_titan.mlperf.contract`; the trainer reads MLPerf's C4 in the
 > reference's order, trains with the reference's schedule and AdamW, and
-> validates as the contract asks until it reaches the target. No compliant
-> run exists yet.
+> validates as the contract asks until it reaches the target;
+> `jax_titan.mlperf.run` runs a trial in the order MLPerf times and writes
+> its MLLOG, which MLCommons' compliance checker accepts. No trial has run on
+> GPUs to the target yet.
 
 ## The benchmarks
 
@@ -223,3 +225,50 @@ of the RCP at GBS 32:
   `--target_eval_loss`. Each `eval` record holds `samples`, the training
   sequences done, which MLLOG's `samples_count` takes; the `end` record says
   whether the target was reached.
+
+## Running a trial: timing and MLLOG
+
+```bash
+pip install 'jax-titan[mlperf]'    # MLLOG, the compliance and RCP checkers
+CONFIG=jax_titan/mlperf/configs/llama31_8b_mi355x_1x8_bf16.json
+python -m jax_titan.mlperf.run $CONFIG --data_dir=$DIR --dry_run
+scripts/mlperf_run_and_time.sh $CONFIG $DIR $LOGDIR 10
+```
+
+- **Config.** A trial's config holds what a submitter chooses: the global
+  batch, base learning rate and warm-up, the lowest precision in linear
+  layers, attention and communication, the validation batch, the steps of
+  synthetic warm-up, and the trainer's flags for the layout, micro-batching
+  and operators. `jax_titan.mlperf.run` derives the rest of the trainer's
+  flags from the contract (model, sequence length, steps, schedule, AdamW,
+  data, validation and target), refuses a config or command line that sets
+  one of them, and draws each trial's seed from the operating system.
+  `--dry_run` prints the flags and the hyperparameters.
+- **Run order.** The trainer initializes the state, compiles the training
+  step and opens the data, reading only the indices. With
+  `--synthetic_warmup`, it then trains that many steps and validates once on
+  synthetic tokens, so both programs are compiled and warm, and initializes
+  the state again from the seed (or restores the checkpoint again). Then it
+  logs `run_start` and reads the first tokens: the training batches step by
+  step, the validation set at the first pass. The tests check that a run
+  with a warm-up trains and validates bit for bit as one without, in data
+  parallelism, in a pipeline and resumed, and that no token is read before
+  `run_start`.
+- **Timing.** The time to train is from `run_start` to `run_stop`.
+  Initialization, compilation, the indices and the warm-up come before it,
+  within the 30 minutes the rules allow from `init_start` to `init_stop`.
+- **MLLOG.** `jax_titan.mlperf.mllog.Listener` turns the trainer's records,
+  as they are written, into MLLOG lines through `mlperf_logging.mllog`, which
+  the rules require for the seed: `init_start` at the trainer's start,
+  `init_stop` and `run_start` at `run_start`, a block from each validation to
+  the next, `eval_start`, `eval_accuracy` and `eval_stop` with
+  `samples_count`, then `run_stop` (`success` at the target, `aborted`
+  otherwise) and `train_samples`. Before it logs the hyperparameters, it
+  checks them against the run's arguments. The tests run MLCommons'
+  compliance checker (ruleset 6.1.0) on a trial's log: it passes when the
+  trial reaches 3.3 and fails when the trial stops short.
+- **Trials.** `scripts/mlperf_run_and_time.sh` drops the page cache before
+  each trial when `sudo -n` allows it, and the runner logs whether it did
+  (`cache_clear`). Each log holds the trainer's output and its MLLOG lines;
+  the script checks each with the compliance checker and, with ten or more,
+  the set with the RCP checker.
