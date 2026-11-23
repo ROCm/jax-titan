@@ -153,7 +153,7 @@ after diffusers' FLUX.1, from which this adapter's FLUX.1 differs in two places
 weights; `--model_overrides='{"theta": 10000}'` removes the RoPE base's. Trained
 alike from random weights, with the same arguments `$ARGS` for both, they are
 compared as in the example of
-[native_comparison.md](native_comparison.md#example-flux1-dev), where this
+[native_comparison.md](native_comparison.md#flux1-dev), where this
 adapter's FLUX.1, whose layers MaxDiffusion initializes otherwise, ends 0.5
 above JAX-Titan's:
 

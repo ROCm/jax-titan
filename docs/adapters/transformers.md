@@ -213,7 +213,7 @@ gradients ([maxtext.md](maxtext.md#jax-titans-own-llama-against-the-adapter)),
 as this adapter gives PyTorch's ([How it is verified](#how-it-is-verified)).
 Trained alike from random weights, with the same arguments `$ARGS` for both,
 the two are compared as in the example of
-[native_comparison.md](native_comparison.md#example-llama-31-8b):
+[native_comparison.md](native_comparison.md#llama-31-8b):
 
 ```bash
 python -m jax_titan.trainer.train --model=llama3.1-8b $ARGS --run_dir=runs/native

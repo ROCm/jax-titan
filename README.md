@@ -48,12 +48,12 @@ This is the target design; [What works](#what-works) lists what runs today.
   written after diffusers' `FluxTransformer2DModel` and matching it in
   prediction, loss and gradients from the same weights in fp32;
   `--model=flux-dev` trains it under `--parallel=dp` or `fsdp` on the
-  synthetic batches of the two FLUX.1 adapters.
+  synthetic batches of the two FLUX.1 adapters
+  ([docs/pipelines.md](docs/pipelines.md#flux1-2026-11-21-8x-mi350x)).
 - A comparison of an adapter with JAX-Titan's own model of the same network,
-  Llama 3.1 8B or FLUX.1, trained alike
-  (`python -m jax_titan.observability.compare`): the loss per window of steps
-  and the validation loss against the reference, with the variation between
-  repeated runs for scale, and tokens/s per GPU
+  trained alike (`python -m jax_titan.observability.compare`): the loss per
+  window of steps and the validation loss against the reference, with the
+  variation between repeated runs for scale, and tokens/s per GPU
   ([docs/adapters/native_comparison.md](docs/adapters/native_comparison.md)).
 - Ideogram 4 as JAX-Titan's own model on `jax_titan.ops`, written after
   diffusers' transformer and training example and matching diffusers' model;
