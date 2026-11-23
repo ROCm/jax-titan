@@ -57,9 +57,9 @@ power cap the step can run every GEMM at a lower clock than a GEMM gets alone,
 even with nothing alongside. On MI300X at 750 W, incoming xGMI traffic lowers
 the engine clock within a second, and it stays low for about 3 s after the
 traffic stops; a step with collectives every few milliseconds never leaves
-that state. A few milliseconds of traffic from another GPU every second holds
-a lone GPU there too; sweeping in that state picked the same kernels as the
-isolated sweep in our test, so the clock alone does not explain a winner that
+that state. A few milliseconds of traffic from the other GPUs every second
+holds a lone GPU there too; the winners of the isolated sweep still won in
+that state in our test, so the clock alone does not explain a winner that
 loses in the step. `observability.power` beside the step shows how much of it each
 GPU spends held by its power limit, and `observability/counters.py` gives each
 launch's engine clock and matrix-unit use from hardware counters
