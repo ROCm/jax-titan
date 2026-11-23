@@ -69,9 +69,9 @@ python -m jax_titan.observability.plot runs/a runs/b --out figures
 
 # One model structure in two or more implementations trained alike, the reference first: the
 # loss per window of steps, the validation loss and tokens/s per GPU; repeats of a
-# configuration are grouped (docs/adapters/native_comparison.md).
-python -m jax_titan.observability.compare runs/native_r1 runs/native_r2 runs/adapter_r1 \
-  runs/adapter_r2 [--window 50] [--figure loss.svg] [--json report.json]
+# configuration are grouped (docs/adapters/comparison.md).
+python -m jax_titan.observability.compare runs/jax-titan_r1 runs/jax-titan_r2 runs/maxtext_r1 \
+  runs/maxtext_r2 [--window 50] [--figure loss.svg] [--json report.json]
 
 # Training FLOPs and communication per op and per stage, and the balanced layer split.
 python -m jax_titan.observability.flops --model=llama3.1-8b --num_stages=2 \

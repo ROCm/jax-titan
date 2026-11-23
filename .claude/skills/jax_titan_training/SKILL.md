@@ -171,7 +171,7 @@ a language model on token files of its own tokenizer (`--data` and
   both with the same arguments but `--model` (and the `--model_overrides` that
   make the model structures the same), three runs each, and read them
   with `python -m jax_titan.observability.compare REFERENCE RUN ...`
-  (`docs/adapters/native_comparison.md`): it groups the repeats and prints the
+  (`docs/adapters/comparison.md`): it groups the repeats and prints the
   loss per window of steps, the validation loss and tokens/s per GPU against
   the reference.
 - Change one thing at a time. To A/B a code change, run the old variant from

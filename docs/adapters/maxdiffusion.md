@@ -147,23 +147,22 @@ validation loss after them.
 
 ## JAX-Titan's own FLUX.1 against the adapter
 
-JAX-Titan's native FLUX.1 (`--model=flux-dev` and `flux-schnell`) is written
-after diffusers' FLUX.1, from which this adapter's FLUX.1 differs in two places
+JAX-Titan's FLUX.1 (`--model=flux-dev` and `flux-schnell`) is written after
+diffusers' FLUX.1, from which this adapter's FLUX.1 differs in two places
 ([Known issues](#known-issues)), so the two are not compared from the same
 weights; `--model_overrides='{"theta": 10000}'` removes the RoPE base's. Trained
 alike from random weights, with the same arguments `$ARGS` for both, they are
-compared as in the example of
-[native_comparison.md](native_comparison.md#flux1-dev), where this
-adapter's FLUX.1, whose layers MaxDiffusion initializes otherwise, ends 0.5
-above JAX-Titan's:
+compared as in the example of [comparison.md](comparison.md#flux1-dev), where
+this adapter's FLUX.1, whose layers MaxDiffusion initializes otherwise, ends
+0.5 above JAX-Titan's:
 
 ```bash
-python -m jax_titan.trainer.train --model=flux-dev $ARGS --run_dir=runs/native
-python -m jax_titan.trainer.train --model=maxdiffusion:flux-dev $ARGS --run_dir=runs/adapter
-python -m jax_titan.observability.compare runs/native runs/adapter
+python -m jax_titan.trainer.train --model=flux-dev $ARGS --run_dir=runs/jax-titan
+python -m jax_titan.trainer.train --model=maxdiffusion:flux-dev $ARGS --run_dir=runs/maxdiffusion
+python -m jax_titan.observability.compare runs/jax-titan runs/maxdiffusion
 ```
 
-Wan 2.1 has no native model.
+JAX-Titan has no Wan 2.1 of its own.
 
 ## Known issues
 

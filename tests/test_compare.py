@@ -76,9 +76,9 @@ def test_sets_each_configuration_against_the_reference(tmp_path):
     compare.figure(report, tmp_path / "two.png")
     assert (tmp_path / "two.png").stat().st_size > 0
   out = tmp_path / "named.json"
-  compare.main([*map(str, runs), "--window=3", "--names=native,adapter", f"--json={out}"])
+  compare.main([*map(str, runs), "--window=3", "--names=jax-titan,maxtext", f"--json={out}"])
   assert [c["name"] for c in json.loads(out.read_text())["configurations"]] == [
-      "native", "adapter"]
+      "jax-titan", "maxtext"]
 
 
 def test_counts_a_window_only_where_a_run_has_all_of_it(tmp_path):
@@ -151,9 +151,9 @@ def test_reads_the_trainers_records(tmp_path):
   out = tmp_path / "report.json"
   figure = [f"--figure={tmp_path / 'loss.png'}"] if PLOTS else []
   compare.main([str(tmp_path / "r1"), str(tmp_path / "r2"), "--window=3", "--skip=1",
-                "--names=native", f"--json={out}", *figure])
+                "--names=jax-titan", f"--json={out}", *figure])
   (config,) = json.loads(out.read_text())["configurations"]
-  assert config["name"] == "native" and config["args"]["num_devices"] == 8
+  assert config["name"] == "jax-titan" and config["args"]["num_devices"] == 8
   losses = [r["loss"] for r in records.steps(records.read(tmp_path / "r1" / "train.jsonl"))]
   assert config["window_loss"] == pytest.approx([sum(losses[:3]) / 3, sum(losses[3:]) / 3])
   evals = records.events(records.read(tmp_path / "r1" / "train.jsonl"), "eval")
