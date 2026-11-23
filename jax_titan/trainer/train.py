@@ -196,7 +196,22 @@ def parse_args(argv=None):
   )
   parser.add_argument(
       "--eval_batches", type=int, default=4,
-      help="Batches of one step's size per validation pass, the same every pass.",
+      help="Batches of --eval_batch_size per validation pass, the same every pass.",
+  )
+  parser.add_argument(
+      "--eval_samples", type=int, default=0,
+      help="Token models: sequences per validation pass, the same ones every pass, in "
+      "batches of --eval_batch_size; default --eval_batches batches.",
+  )
+  parser.add_argument(
+      "--eval_batch_size", type=int, default=0,
+      help="Token models: sequences per validation batch, a multiple of the data-parallel "
+      "ranks; default one step's batch, the only size a pipeline takes.",
+  )
+  parser.add_argument(
+      "--target_eval_loss", type=float, default=0.0,
+      help="Stop after the first validation whose loss is at or below this, as MLPerf runs "
+      "stop at their quality target; 0 trains all --steps.",
   )
   parser.add_argument(
       "--eval_data", default="",
@@ -597,6 +612,17 @@ def main(argv=None):
                        weight_decay=args.weight_decay, mask=mask)
 
   mb, num_mb, seq = args.microbatch_size, args.microbatches, args.seq_len
+  eval_batch = args.eval_batch_size or num_mb * mb
+  eval_count = args.eval_samples or args.eval_batches * eval_batch
+  if args.target_eval_loss and not args.eval_every:
+    raise ValueError("--target_eval_loss needs validation passes: set --eval_every")
+  if eval_count % eval_batch:
+    raise ValueError(f"--eval_samples={eval_count} is not whole batches of {eval_batch}")
+  if (args.eval_samples or args.eval_batch_size) and staged:
+    raise NotImplementedError("--eval_samples and --eval_batch_size are for Llama flavors")
+  if eval_batch != num_mb * mb and args.parallel == "mpmd":
+    raise ValueError(f"a pipeline validates batches of one step's {num_mb * mb} sequences, "
+                     f"not --eval_batch_size={eval_batch}")
   if staged:
     layout, work = adapters.build(args, devices, make_optimizer)
   else:
@@ -727,22 +753,27 @@ def main(argv=None):
       return batch
 
   if args.eval_every:
-    if work.next_batch is not None or args.data == "synthetic":
-      eval_batches = [next_batch(EVAL_STEPS + i) for i in range(args.eval_batches)]
+    num_eval = eval_count // eval_batch
+    if work.next_batch is not None:
+      eval_batches = [next_batch(EVAL_STEPS + i) for i in range(num_eval)]
+    elif args.data == "synthetic":
+      eval_batches = [
+          np.random.default_rng((args.seed, EVAL_STEPS + i)).integers(
+              0, work.vocab_size, (eval_batch, seq + 1), dtype=np.int32)
+          for i in range(num_eval)]
     else:
       eval_path = args.eval_data or str(
           paths.work_dir() / "data/wikitext103_validation.llama3.bin")
       if megatron.prefix_of(eval_path):
-        held_out = megatron.validation(megatron.prefix_of(eval_path), seq,
-                                       args.eval_batches * num_mb * mb)
+        held_out = megatron.validation(megatron.prefix_of(eval_path), seq, eval_count)
         if held_out.max() >= work.vocab_size:
           raise ValueError(f"{eval_path} has token ids beyond the vocabulary")
-        eval_batches = list(held_out.reshape(args.eval_batches, num_mb * mb, seq + 1))
+        eval_batches = list(held_out.reshape(num_eval, eval_batch, seq + 1))
       else:
         held_out = WindowSampler(eval_path, seq, seed=args.seed, step=0)
         if held_out.max_token() >= work.vocab_size:
           raise ValueError(f"{eval_path} has token ids beyond the vocabulary")
-        eval_batches = [held_out.next(num_mb * mb) for _ in range(args.eval_batches)]
+        eval_batches = [held_out.next(eval_batch) for _ in range(num_eval)]
   log.event("data", seconds=time.time() - t0)
 
   def meta(step):
@@ -768,7 +799,7 @@ def main(argv=None):
         os.path.join(args.run_dir, "power.jsonl"), args.power_sample_s).start()
 
   compiled_eval = None
-  status, done = "completed", start
+  status, done, reached = "completed", start, False
   try:
     for step in range(start, args.steps):
       if profile and step == profile[0]:
@@ -831,15 +862,19 @@ def main(argv=None):
           compiled_eval = layout.eval_step.lower(params, *frozen, *placed[0]).compile()
           compile_s = time.time() - t0
         t1 = time.time()
+        # Every batch has eval_batch sequences of seq tokens, so the mean of the batch means
+        # is the mean loss over every validation token.
         eval_loss = float(np.mean([float(compiled_eval(params, *frozen, x, t)) for x, t in placed]))
         eval_s = time.time() - t1
+        reached = bool(args.target_eval_loss) and eval_loss <= args.target_eval_loss
         print(f"step {done:4d} | validation loss {eval_loss:.4f} over {len(placed)} batches "
-              f"in {eval_s:.1f}s", flush=True)
+              f"in {eval_s:.1f}s" + (f" | at or below {args.target_eval_loss}" if reached else ""),
+              flush=True)
         log.event("eval", step=done, loss=eval_loss, seconds=time.time() - t0,
-                  compile_s=compile_s)
+                  compile_s=compile_s, samples=done * num_mb * mb, eval_samples=eval_count)
       if ckpt:
         t0 = time.time()
-        force = step + 1 == args.steps
+        force = step + 1 == args.steps or reached
         if ckpt.save(step + 1, (params, opt_states), meta(step + 1), force=force):
           blocking = time.time() - t0
           print(f"saved step {step + 1} in {blocking:.1f}s", flush=True)
@@ -847,6 +882,8 @@ def main(argv=None):
       if done == args.fail_at_step:
         print(f"--fail_at_step: exiting after step {step}", flush=True)
         os._exit(75)
+      if reached:
+        break
     if ckpt:
       t0 = time.time()
       ckpt.close()
@@ -863,7 +900,8 @@ def main(argv=None):
   finally:
     if power_sampler:
       power_sampler.stop()
-    log.event("end", status=status, steps_done=done - start)
+    log.event("end", status=status, steps_done=done - start,
+              **({"target_reached": reached} if args.target_eval_loss else {}))
     log.close()
   if args.run_dir and jax.process_index() == 0:
     from jax_titan.observability import summarize  # pylint: disable=g-import-not-at-top

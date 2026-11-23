@@ -14,9 +14,11 @@ Event records hold `event` and `time`:
            runs (by HLO module name) and its calls per step
   data     `seconds` to open the data
   memory   `peak_hbm_gib` per device after the first step
-  eval     `step` (updates done), validation `loss` and `seconds`
+  eval     `step` (updates done), validation `loss` and `seconds`; `samples`, the
+           training sequences done, and `eval_samples`, the sequences validated
   save     `step` and `blocking_s`, how long the step loop waited for the save
-  end      `status` ("completed", or the exception) and `steps_done`
+  end      `status` ("completed", or the exception) and `steps_done`; with
+           `--target_eval_loss`, `target_reached`
 
 A log appended across restarts holds one attempt per `start` event.
 """
