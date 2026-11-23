@@ -14,7 +14,7 @@ the sequence after projecting them, which is what the branch's transformer
 computes from features zero-padded over the image positions. Every stage
 boundary carries the hidden states, the segment ids, the rotary embeddings
 and the conditioning, and the last stage returns the branch's flow-matching
-loss over the image tokens. `native_params` maps the stage parameters onto
+loss over the image tokens. `own_params` maps the stage parameters onto
 `jax_titan.models.ideogram`, JAX-Titan's own model.
 """
 
@@ -70,7 +70,7 @@ def sequence_ids(image_side: int, text_tokens: int) -> dict[str, np.ndarray]:
   }
 
 
-def native_params(stage_params: Sequence[dict]) -> tuple[dict, ...]:
+def own_params(stage_params: Sequence[dict]) -> tuple[dict, ...]:
   """Stage parameters in the `jax_titan.models.ideogram` layout.
 
   Stacks the blocks along a leading layer axis and splits the branch's one

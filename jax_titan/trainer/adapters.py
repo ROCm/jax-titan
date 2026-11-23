@@ -21,7 +21,7 @@ cache of image tokens and text features (`jax_titan.data.ideogram`), and
 `--model=maxdiffusion:ideogram4` the model of MaxDiffusion's Ideogram branch
 on the same batches. They run as a Shardy MPMD pipeline with data parallelism
 inside each stage, reducing gradients in every microbatch's backward pass.
-Ideogram 4's attention does not follow the ops policy: the native model passes
+Ideogram 4's attention does not follow the ops policy: JAX-Titan's model passes
 a mask, which the providers decline, and the branch's model runs its own
 attention. `--model=command-a-plus` trains JAX-Titan's Command A+
 (`jax_titan.models.command_a`) on token windows or on a cache of conversations
@@ -613,13 +613,13 @@ def _flux(args, devices, optimizer):
   return layout, work
 
 
-def _ideogram(args, devices, optimizer, native: bool):
-  """Ideogram 4, JAX-Titan's own (`native`) or from MaxDiffusion's Ideogram branch.
+def _ideogram(args, devices, optimizer, own: bool):
+  """Ideogram 4, JAX-Titan's own (`own`) or from MaxDiffusion's Ideogram branch.
 
-  Besides config fields, `--model_overrides` takes `dtype` and, for the native
-  model, `timestep_mean` and `timestep_std` of the training timesteps. The
-  native model's config starts from the `config.json` of published weights
-  that `--init_from` names. It also trains on a cache of real samples
+  Besides config fields, `--model_overrides` takes `dtype` and, for JAX-Titan's
+  own model, `timestep_mean` and `timestep_std` of the training timesteps. That
+  model's config starts from the `config.json` of published weights that
+  `--init_from` names. It also trains on a cache of real samples
   (`--data`), with a tenth of its images, at least one, held out for
   validation when `--eval_every` is set, so a run that resumes with that flag
   changed trains on other images.
@@ -635,7 +635,7 @@ def _ideogram(args, devices, optimizer, native: bool):
   overrides = _overrides(args)
   dtype = jnp.dtype(overrides.pop("dtype", "bfloat16"))
   schedule = {}
-  if native:
+  if own:
     ig, config = ideogram, ideogram.IdeogramConfig
     schedule = {k: overrides.pop(f"timestep_{k}") for k in ("mean", "std")
                 if f"timestep_{k}" in overrides}
@@ -644,7 +644,7 @@ def _ideogram(args, devices, optimizer, native: bool):
 
     config = ig.Ideogram4Config
   fields = {k: tuple(v) if isinstance(v, list) else v for k, v in overrides.items()}
-  if native and args.init_from and pretrained.is_safetensors(args.init_from):
+  if own and args.init_from and pretrained.is_safetensors(args.init_from):
     cfg = dataclasses.replace(ideogram.pretrained_config(args.init_from), **fields)
   else:
     cfg = config(**fields)
@@ -668,7 +668,7 @@ def _ideogram(args, devices, optimizer, native: bool):
   text_tokens = args.text_tokens or 256
   cache, held_out = None, 0
   if args.data not in ("", "synthetic"):
-    if not native:
+    if not own:
       raise NotImplementedError("--data reads a cache of samples for ideogram4 only")
     from jax_titan.data import ideogram as data  # pylint: disable=g-import-not-at-top
 
@@ -867,14 +867,14 @@ def build(args, devices, make_optimizer) -> tuple[Layout, Workload]:
   MaxText's and MaxDiffusion's norms.
   """
   provider, _, name = args.model.partition(":")
-  native = args.model in MODELS
+  own = args.model in MODELS
   ideogram = args.model == "ideogram4" or (provider == "maxdiffusion" and name == "ideogram4")
   if args.stage_fsdp or args.tensor_parallel != 1:
     raise NotImplementedError(f"{args.model} takes neither --stage_fsdp nor --tensor_parallel")
   if args.parallel == "mpmd" and args.reduce_grads != "microbatch":
     raise NotImplementedError(f"{args.model} reduces gradients per microbatch only")
   if args.init_from and provider not in ("maxtext", "transformers") and (
-      not native or args.model in FLUX):
+      not own or args.model in FLUX):
     raise NotImplementedError(
         "--init_from loads parameters of maxtext: and transformers: models, ideogram4 and "
         "command-a-plus")
@@ -895,7 +895,7 @@ def build(args, devices, make_optimizer) -> tuple[Layout, Workload]:
   if provider == "maxtext":
     return _maxtext(args, name, devices, optimizer)
   if ideogram:
-    return _ideogram(args, devices, optimizer, native)
+    return _ideogram(args, devices, optimizer, own)
   if args.model == "command-a-plus":
     return _command_a(args, devices, optimizer)
   if args.model in FLUX:

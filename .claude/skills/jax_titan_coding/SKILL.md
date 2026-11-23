@@ -82,7 +82,7 @@ for a later comparison: do not import from it or edit it.
   trains through the layouts of `trainer/adapters.py` (`--model=ideogram4`),
   so with gradients reduced per microbatch. `models/adapters/ideogram.py`
   builds the same stages from MaxDiffusion's Ideogram branch
-  (`maxdiffusion:ideogram4`), and its `native_params` maps those weights onto
+  (`maxdiffusion:ideogram4`), and its `own_params` maps those weights onto
   `models/ideogram.py`. Compute the rotary frequencies on the host: a compiled
   program folds the same expression to other last bits, and image positions
   start at 65536. The models around the transformer are JAX-Titan's own too:

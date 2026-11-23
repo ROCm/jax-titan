@@ -33,7 +33,7 @@ FLAGS = [
 ]
 
 
-# Native parameters -> diffusers' module, in a stream of a double block and in a single block.
+# JAX-Titan's parameters -> diffusers' module, in a stream of a double block and in a single block.
 _IMG = {("wq", "bq"): "attn.to_q", ("wk", "bk"): "attn.to_k", ("wv", "bv"): "attn.to_v",
         "q_norm": "attn.norm_q", "k_norm": "attn.norm_k", ("mod_w", "mod_b"): "norm1.linear",
         ("wo", "bo"): "attn.to_out.0", ("mlp_w1", "mlp_b1"): "ff.net.0.proj",
