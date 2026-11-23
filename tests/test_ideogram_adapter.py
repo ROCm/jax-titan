@@ -88,7 +88,7 @@ def _models(num_stages=1, blocks=None):
 
   cfg = ig.Ideogram4Config(**CONFIG)
   adapter = ig.Model(cfg, num_stages=num_stages, blocks=blocks, dtype=jnp.float32)
-  native = ideogram.Model(
+  own = ideogram.Model(
       ideogram.IdeogramConfig(
           in_channels=cfg.in_channels, num_layers=cfg.num_layers,
           attention_head_dim=cfg.emb_dim // cfg.num_heads, num_attention_heads=cfg.num_heads,
@@ -97,7 +97,7 @@ def _models(num_stages=1, blocks=None):
           mrope_section=cfg.mrope_section, norm_eps=cfg.norm_eps),
       num_stages=num_stages, blocks=blocks, dtype=jnp.float32)
   params = adapter.init(0)
-  return adapter, native, params, ig.native_params(params)
+  return adapter, own, params, ig.own_params(params)
 
 
 def _batch(cfg, batch=2, side=4, text_tokens=8):
@@ -138,12 +138,12 @@ def _assert_trees_close(a, b, rtol=1e-4, atol=1e-6):
 
 
 @pytest.mark.parametrize("num_stages,blocks", [(1, None), (3, (1, 2, 1))])
-def test_native_model_matches(num_stages, blocks):
+def test_own_model_matches(num_stages, blocks):
   import jax  # pylint: disable=g-import-not-at-top
   import numpy as np  # pylint: disable=g-import-not-at-top
   from jax_titan.models.adapters import ideogram as ig  # pylint: disable=g-import-not-at-top
 
-  adapter, native, params, native_params = _models(num_stages, blocks)
+  adapter, own, params, own_params = _models(num_stages, blocks)
   x, target = _batch(adapter.config)
 
   def boundaries(model, stage_params):
@@ -154,13 +154,13 @@ def test_native_model_matches(num_stages, blocks):
     return out
 
   # The hidden states and the conditioning after every stage, and the velocity after the last.
-  _assert_trees_close(jax.jit(lambda p: boundaries(native, p))(native_params),
+  _assert_trees_close(jax.jit(lambda p: boundaries(own, p))(own_params),
                       jax.jit(lambda p: boundaries(adapter, p))(params), rtol=1e-5, atol=1e-5)
 
   ref_loss, ref_grads = _loss_and_grads(adapter, params, x, target)
-  loss, grads = _loss_and_grads(native, native_params, x, target)
+  loss, grads = _loss_and_grads(own, own_params, x, target)
   np.testing.assert_allclose(loss, ref_loss, rtol=1e-5)
-  _assert_trees_close(grads, ig.native_params(ref_grads))
+  _assert_trees_close(grads, ig.own_params(ref_grads))
 
 
 def test_train_step_matches_the_trainer():
@@ -178,7 +178,7 @@ def test_train_step_matches_the_trainer():
   from jax_titan.models.adapters import ideogram as ig  # pylint: disable=g-import-not-at-top
   from maxdiffusion.trainers import ideogram_trainer as trainer  # pylint: disable=g-import-not-at-top
 
-  adapter, native, params, native_params = _models()
+  adapter, own, params, own_params = _models()
   cfg = adapter.config
   x, latents = _batch(cfg)
   text_tokens, image_tokens = x["txt"].shape[1], x["img"].shape[1]
@@ -208,7 +208,7 @@ def test_train_step_matches_the_trainer():
           state, data, key)
   ref_loss = metrics["scalar"]["learning/loss"]
   ref_norm = metrics["scalar"]["learning/max_grad_norm"]
-  ref_params = ig.native_params(adapter.split(new_state.params.to_pure_dict()))
+  ref_params = ig.own_params(adapter.split(new_state.params.to_pure_dict()))
   assert ref_norm > max_grad_norm, "the step must clip to test clipping"
 
   # The same draws, as the branch's step makes them from its key.
@@ -234,9 +234,9 @@ def test_train_step_matches_the_trainer():
   loss, norm, updated = step(adapter, params)
   np.testing.assert_allclose(loss, ref_loss, rtol=1e-5)
   np.testing.assert_allclose(norm, ref_norm, rtol=1e-4)
-  _assert_trees_close(ig.native_params(updated), ref_params)
+  _assert_trees_close(ig.own_params(updated), ref_params)
 
-  loss, norm, updated = step(native, native_params)
+  loss, norm, updated = step(own, own_params)
   np.testing.assert_allclose(loss, ref_loss, rtol=1e-5)
   np.testing.assert_allclose(norm, ref_norm, rtol=1e-4)
   _assert_trees_close(updated, ref_params)
@@ -267,18 +267,18 @@ def test_layout_matches_data_parallel_reference(flags, dp_reference, tmp_path):
         dp_reference[step]["grad_norm"], rel=1e-4), step
 
 
-def test_native_model_trains_like_the_adapter(dp_reference, tmp_path):
+def test_own_model_trains_like_the_adapter(dp_reference, tmp_path):
   """From the adapter's initial weights and on its batches, JAX-Titan's own model trains alike."""
   import dataclasses  # pylint: disable=g-import-not-at-top
 
   from jax_titan.trainer import checkpoint  # pylint: disable=g-import-not-at-top
 
-  _, native, _, native_params = _models()
-  checkpoint.save_params(tmp_path / "init", native_params[0])
-  # The branch's training timesteps, not the native model's defaults.
-  overrides = dataclasses.asdict(native.config) | {
+  _, own, _, own_params = _models()
+  checkpoint.save_params(tmp_path / "init", own_params[0])
+  # The branch's training timesteps, not the defaults of JAX-Titan's model.
+  overrides = dataclasses.asdict(own.config) | {
       "dtype": "float32", "timestep_mean": 0.5, "timestep_std": 1.0}
-  trained = _run(tmp_path / "native.jsonl", "--parallel=dp", "--model=ideogram4",
+  trained = _run(tmp_path / "own.jsonl", "--parallel=dp", "--model=ideogram4",
                  "--model_overrides=" + json.dumps(overrides), f"--init_from={tmp_path / 'init'}")
   for step in range(4):
     assert trained[step]["loss"] == pytest.approx(dp_reference[step]["loss"], rel=1e-5), step
