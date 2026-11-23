@@ -71,7 +71,7 @@ compares each row's in-step launches and writes the rows that are not slower,
 for a second A/B:
 
 ```bash
-python3 src/jax_titan/tuning/hipblaslt.py instep OUT/profile/base_gemms.json \
+python3 jax_titan/tuning/hipblaslt.py instep OUT/profile/base_gemms.json \
   OUT/profile/tuned_gemms.json --override OUT/tuning.txt --out OUT/tuning_refined.txt
 ```
 
@@ -92,14 +92,14 @@ The tools take files, so they serve programs other than the trainer:
 ```bash
 XLA_FLAGS="$FLAGS --xla_dump_to=DUMP --xla_dump_hlo_as_text" \
   HIPBLASLT_LOG_MASK=32 HIPBLASLT_LOG_FILE=hbl_%i.log python my_step.py
-python3 src/jax_titan/observability/gemms.py DUMP --module jit_train_step --merge --json gemms.json
-python3 src/jax_titan/tuning/hipblaslt.py capture "hbl_*.log" --json problems.json
-python3 src/jax_titan/tuning/hipblaslt.py join problems.json gemms.json --steps 3
-python3 src/jax_titan/tuning/hipblaslt.py sweep problems.json --out sweep \
+python3 jax_titan/observability/gemms.py DUMP --module jit_train_step --merge --json gemms.json
+python3 jax_titan/tuning/hipblaslt.py capture "hbl_*.log" --json problems.json
+python3 jax_titan/tuning/hipblaslt.py join problems.json gemms.json --steps 3
+python3 jax_titan/tuning/hipblaslt.py sweep problems.json --out sweep \
   --sweep_bin ${JAX_TITAN_ROOT}/bin/hipblaslt_sweep --gpus 0,1,2,3,4,5,6,7
-python3 src/jax_titan/tuning/hipblaslt.py write sweep/results.json --out tuning.txt
+python3 jax_titan/tuning/hipblaslt.py write sweep/results.json --out tuning.txt
 HIPBLASLT_TUNING_OVERRIDE_FILE=tuning.txt HIPBLASLT_LOG_MASK=32 HIPBLASLT_LOG_FILE=v_%i.log python my_step.py
-python3 src/jax_titan/tuning/hipblaslt.py verify "v_*.log" --override tuning.txt
+python3 jax_titan/tuning/hipblaslt.py verify "v_*.log" --override tuning.txt
 ```
 
 `tuning/hipblaslt.py`, `observability/gemms.py` and `planning/gemm_cost.py`
@@ -149,7 +149,7 @@ rocisa`, `invoke build-client`) and a hipBLASLt source tree at the revision of
 the library XLA loads:
 
 ```bash
-TL=src/jax_titan/tuning/tensilelite.py
+TL=jax_titan/tuning/tensilelite.py
 python $TL config "OUT/capture/hipblaslt_*.log" --src HIPBLASLT --out TL_OUT --only REGEX --gpus 8
 python $TL tune TL_OUT --src HIPBLASLT --gpus 0,1,2,3,4,5,6,7
 python $TL decode TL_OUT --stock OUT/sweep/results.json

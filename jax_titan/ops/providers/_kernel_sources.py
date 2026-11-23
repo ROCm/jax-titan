@@ -22,7 +22,7 @@ import pathlib
 import sys
 import types
 
-_REPO = pathlib.Path(__file__).resolve().parents[4]
+_REPO = pathlib.Path(__file__).resolve().parents[3]
 
 
 def _root(env_var: str, default: pathlib.Path) -> pathlib.Path:

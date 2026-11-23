@@ -7,7 +7,7 @@ caches and logs. It defaults to a `.jax_titan` directory next to this repository
 import os
 import pathlib
 
-_REPO = pathlib.Path(__file__).resolve().parents[2]
+_REPO = pathlib.Path(__file__).resolve().parents[1]
 
 
 def work_dir() -> pathlib.Path:

@@ -14,11 +14,11 @@ description: >-
 
 JAX-Titan runs on upstream JAX, Shardy and XLA with a few patches. Find the
 component that owns the bug and fix it there, as a patch that can go
-upstream. Never work around an upstream bug inside `src/jax_titan`.
+upstream. Never work around an upstream bug inside `jax_titan`.
 
 | Owner | Source tree | Fix goes to |
 |-------|-------------|-------------|
-| JAX-Titan | `src/jax_titan/` | Normal commit |
+| JAX-Titan | `jax_titan/` | Normal commit |
 | jaxlib (`sdy_mpmd.cc`, `py_mpmd_loaded_executable.cc`) | `${JAX_TITAN_ROOT}/src/jax` | `third_party/patches/jaxlib-*.patch` |
 | Shardy MPMD: Python API, partitioner, jaxlib glue (`mpmd_program.cc`) | `${JAX_TITAN_ROOT}/src/shardy` | `third_party/patches/shardy-*.patch` |
 | XLA: IFRT IR (`xla/python/ifrt/ir`), PJRT (`xla/pjrt`), GPU compiler, ROCm profiler | `${JAX_TITAN_ROOT}/src/xla` | `third_party/patches/xla-*.patch` (none today) |
@@ -89,9 +89,9 @@ JAX-Titan bug; fix the caller.
 
 ## Hard Rules
 
-- Never monkey-patch upstream modules from `src/jax_titan`. The only shim is
-  `src/jax_titan/_compat.py`.
-- Never copy upstream files into `src/jax_titan` to work around a bug.
+- Never monkey-patch upstream modules from `jax_titan`. The only shim is
+  `jax_titan/_compat.py`.
+- Never copy upstream files into `jax_titan` to work around a bug.
 - One patch file per upstreamable change; patches stay Apache-2.0.
 - XLA must stay at or after the commit the build documents; the build script
   overrides jax's pinned XLA with `${JAX_TITAN_ROOT}/src/xla`.
@@ -99,5 +99,5 @@ JAX-Titan bug; fix the caller.
 
 ## Pairing
 
-Pair with `jax_titan_coding` for changes in `src/jax_titan`, and with
+Pair with `jax_titan_coding` for changes in `jax_titan`, and with
 `jax_titan_training` for running, measuring and cleaning up jobs.

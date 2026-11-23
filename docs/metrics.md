@@ -60,7 +60,7 @@ python -m jax_titan.observability.collectives runs/a/rccl_inspector
 
 # The GEMMs a run's compiled program launches: shapes, dtypes, layouts, library and
 # kernel configuration, launches per training step (below). Standard library only.
-python3 src/jax_titan/observability/gemms.py runs/a.hlo --run_dir runs/a --merge [--sites] [--csv gemms.csv]
+python3 jax_titan/observability/gemms.py runs/a.hlo --run_dir runs/a --merge [--sites] [--csv gemms.csv]
 
 # Figures: MFU and step time over wall time with saves, validation and restarts marked,
 # loss against tokens, gradient norm, power; comparison.svg for several runs. Needs the
@@ -107,7 +107,7 @@ launches every GEMM the HLO holds.
 The tool is one file that uses only the Python standard library. It needs
 neither JAX nor JAX-Titan, reads the dump of any XLA program, and runs from a
 checkout or as a copy on another machine with Python 3.8 or later:
-`python3 src/jax_titan/observability/gemms.py DUMP`. Inside JAX-Titan's
+`python3 jax_titan/observability/gemms.py DUMP`. Inside JAX-Titan's
 environment, `python -m jax_titan.observability.gemms` runs the same code.
 
 The parallelism does not matter either. Under SPMD (`--parallel=dp` or
@@ -126,7 +126,7 @@ JAX_ENABLE_COMPILATION_CACHE=false \
 XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS --xla_dump_to=runs/a.hlo --xla_dump_hlo_as_text" \
   python -m jax_titan.trainer.train --model=llama3.1-8b --num_stages=2 --steps=2 \
   --run_dir=runs/a
-python3 src/jax_titan/observability/gemms.py runs/a.hlo --run_dir runs/a --merge
+python3 jax_titan/observability/gemms.py runs/a.hlo --run_dir runs/a --merge
 ```
 
 `runs/a.hlo` is the dump, one set of files per compiled module. `--run_dir
@@ -167,7 +167,7 @@ HIP_VISIBLE_DEVICES=0,1 JAX_ENABLE_COMPILATION_CACHE=false \
 XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS --xla_dump_to=runs/llama8b_pp2.hlo --xla_dump_hlo_as_text" \
   python -m jax_titan.trainer.train --model=llama3.1-8b --num_stages=2 --microbatches=8 \
   --microbatch_size=1 --seq_len=2048 --steps=3 --run_dir=runs/llama8b_pp2
-python3 src/jax_titan/observability/gemms.py runs/llama8b_pp2.hlo --run_dir runs/llama8b_pp2 --merge
+python3 jax_titan/observability/gemms.py runs/llama8b_pp2.hlo --run_dir runs/llama8b_pp2 --merge
 ```
 
 The top rows of one training step:
@@ -209,7 +209,7 @@ older `__triton_gemm`) fusion, which it launches as a kernel of the same name.
 stage 1 forward fragment of the first microbatch in the run above:
 
 ```bash
-python3 src/jax_titan/observability/gemms.py runs/llama8b_pp2.hlo --run_dir runs/llama8b_pp2 \
+python3 jax_titan/observability/gemms.py runs/llama8b_pp2.hlo --run_dir runs/llama8b_pp2 \
   --module p1_stage1_fwd_call0 --sites
 ```
 

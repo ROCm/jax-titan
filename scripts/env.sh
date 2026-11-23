@@ -9,7 +9,7 @@ _rocm_root=$(rocm-sdk path --root)
 export LD_LIBRARY_PATH="${_rocm_root}/lib:${_rocm_root}/lib/rocm_sysdeps/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 unset _rocm_root
 
-export PYTHONPATH="${JAX_TITAN_REPO}/src${PYTHONPATH:+:${PYTHONPATH}}"
+export PYTHONPATH="${JAX_TITAN_REPO}${PYTHONPATH:+:${PYTHONPATH}}"
 export JAX_COMPILATION_CACHE_DIR="${JAX_TITAN_ROOT}/cache/jax"
 
 # A GPU memory fault otherwise writes a core dump of all GPU memory to the

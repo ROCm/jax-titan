@@ -17,7 +17,7 @@ and XLA, and no training step runs PyTorch: the adapters of PyTorch models
 execute PyTorch only while JAX traces a model. A pipeline is one Shardy MPMD program, not
 hand-written point-to-point code. Changes to jaxlib, XLA or Shardy are
 upstreamable patches in `third_party/patches/`, never workarounds in
-`src/jax_titan`. `third_party/jaxpp/` is the earlier JaxPP project, kept unchanged
+`jax_titan`. `third_party/jaxpp/` is the earlier JaxPP project, kept unchanged
 for a later comparison: do not import from it or edit it.
 
 ## Architecture Rules

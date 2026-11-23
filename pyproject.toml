@@ -84,7 +84,6 @@ command_a = ["jinja2>=3.1.6", "pillow", "tokenizers"]
 version = {attr = "jax_titan.__version__"}
 
 [tool.setuptools.packages.find]
-where = ["src"]
 include = ["jax_titan*"]
 
 [tool.setuptools.package-data]

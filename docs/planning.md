@@ -351,7 +351,7 @@ everything the report prints.
 
 ### The model config index
 
-The index, `src/jax_titan/planning/data/models/model_config_index.json`, keeps
+The index, `jax_titan/planning/data/models/model_config_index.json`, keeps
 the `config.json` fields planning reads, per model, with the repository and
 commit they were read from
 (`https://huggingface.co/<hf_config_source>/blob/<hf_config_revision>/config.json`).
