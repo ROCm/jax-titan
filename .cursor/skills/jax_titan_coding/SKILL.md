@@ -225,7 +225,10 @@ for a later comparison: do not import from it or edit it.
 - Comments only state constraints the code cannot show, never what the next
   line does or why a change is correct.
 - Spell the project `JAX-Titan`. Write docs in plain technical English with
-  complete sentences, and keep measured numbers in `docs/pipelines.md`.
+  complete sentences. A model of JAX-Titan's own has a recipe page in
+  `docs/recipes/`, which holds what it is, how to run it and its measured
+  numbers; `docs/pipelines.md` holds those of pipelines, layouts and
+  operators, and describes no particular model.
 - Commit locally in logical pieces with a message that says what changed and
   why. Never push; the user pushes. Never edit the user's own `jax` or `xla`
   checkouts; use the worktrees in `${JAX_TITAN_ROOT}/src`.

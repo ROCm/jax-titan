@@ -180,8 +180,9 @@ a language model on token files of its own tokenizer (`--data` and
   runs with the same `--steps`. GPU runs are not bitwise reproducible; the
   CPU parity check (`examples/llama_mpmd_parity.py`) is the numerics
   reference.
-- Put per-step JSONL under `docs/results/<date>/` and the table in
-  `docs/pipelines.md`.
+- Put per-step JSONL under `docs/results/<date>/`, and the table on the
+  model's recipe page in `docs/recipes/`, or in `docs/pipelines.md` for a
+  pipeline, a layout or an operator.
 
 ## After the Job: Free the GPUs and Disk
 
@@ -249,6 +250,8 @@ Rules:
 - `docs/tools.md`: every script and command-line tool, by the stage of a
   training job
 - `docs/pipelines.md`: schedules, layouts, checkpoints and measured results
+- `docs/recipes/`: one page per model of JAX-Titan's own, with its commands
+  and measured results
 - `docs/planning.md`: training budgets (time, GPU-hours, energy, memory) per
   GPU type
 - `docs/getting_started.md`: container, build and environment
