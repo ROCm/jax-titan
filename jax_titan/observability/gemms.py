@@ -5,7 +5,7 @@
       python -m jax_titan.trainer.train ... --steps=2 --run_dir=RUN
   python3 gemms.py DUMP [--run_dir RUN | --calls FILE] [--merge]
       [--module REGEX] [--sites] [--csv OUT] [--json OUT]
-      [--times KERNEL_TIMES --steps N]
+      [--times KERNEL_TIMES --steps N [--overlap]]
 
 This file uses only the Python standard library: run it directly, or copy it
 to any machine with Python 3.8 or later, for a dump of any XLA program; it
@@ -38,6 +38,16 @@ program: each site's kernel launches, joined by HLO module and op, with the
 median per launch and its bootstrap interval, the medians of launches no
 collective overlapped ("clean") and of those mostly overlapped, and the
 milliseconds per traced step (`--steps`). Sites are then ranked by time.
+
+`--overlap` adds one row per GEMM shape that collectives overlap: the
+launches a collective mostly overlapped, their median against the clean one,
+the milliseconds per step its overlapped launches take beyond the clean
+median, the collectives beside it (kind, share of the overlapped time and
+size), and the collectives it reads or writes in the program: an all-gather
+whose result it multiplies, a reduce-scatter its result feeds. Those are
+followed through bitcasts, copies, tuples and a loop's carried values, not
+through fusions. In a loop that prefetches the next layer's weights, the
+collective beside a GEMM is often not the one it reads.
 """
 
 from __future__ import annotations
@@ -71,11 +81,12 @@ FUSION_KINDS = {
 DOTS = ("dot", "ragged-dot", "scaled-dot")
 FILE = re.compile(r"^module_\d+\..+after_optimizations\.txt$")
 
-_DEF = re.compile(r"^\s+(?:ROOT\s+)?%?([^\s=]+)\s+=\s+")
+_DEF = re.compile(r"^\s+(ROOT\s+)?%?([^\s=]+)\s+=\s+")
 _HEADER = re.compile(r"^(ENTRY\s+)?%?([^\s(]+)")
 _OPCODE = re.compile(r"\s*([\w\-]+)\(")
 _ARRAY = re.compile(r"(\w+)\[([^\]]*)\](?:\{([^}]*)\})?")
 _META = re.compile(r'(\w+)=("(?:[^"\\]|\\.)*"|\S+)')
+_COMMENT = re.compile(r"/\*.*?\*/")
 _TABLES = ("FileNames", "FunctionNames", "FileLocations", "StackFrames")
 
 
@@ -138,7 +149,7 @@ def _array(text):
 
 def _elements(shape):
   """Element shapes of a tuple shape."""
-  shape = re.sub(r"/\*.*?\*/", "", shape).strip()
+  shape = _COMMENT.sub("", shape).strip()
   return _split(shape[1:-1]) if shape.startswith("(") else [shape]
 
 
@@ -178,6 +189,7 @@ class Module:
     self.other_calls = {}  # custom-call target -> launches, for calls not read as GEMMs
     self.launch_check = None
     self.computations = {}  # name -> [(instruction, opcode, rest of line, index of its "(")]
+    self.roots = {}  # computation -> its ROOT instruction
     self.shapes = {}
     self._tables = {t: {} for t in _TABLES}
     current, table = None, None
@@ -209,14 +221,18 @@ class Module:
         op = _OPCODE.match(rest, end) if end > 0 else None
         if not op:
           continue
-        self.shapes[m.group(1)] = rest[:end]
-        self.computations[current].append((m.group(1), op.group(1), rest, op.end() - 1))
+        name = m.group(2)
+        self.shapes[name] = rest[:end]
+        self.computations[current].append((name, op.group(1), rest, op.end() - 1))
+        if m.group(1):
+          self.roots[current] = name
 
   def parts(self, rest, at):
     """Operands [(name, tuple indices)] and attributes {key: raw value} of an instruction."""
     end = _close(rest, at)
     operands = []
     for text in _split(rest[at + 1:end - 1]):
+      text = _COMMENT.sub("", text).strip()
       if not text:
         continue
       name, *index = text.split()[-1].lstrip("%").split("#")
@@ -582,6 +598,164 @@ def analyze(path, module_re: str = "") -> list[tuple[Module, list[dict]]]:
   return out
 
 
+# Collective opcodes. XLA also runs them as `<op>-start` and `-done` pairs, or
+# wraps one in an async computation between `async-start` and `async-done`.
+COLLECTIVE_OPS = ("all-gather", "reduce-scatter", "all-reduce", "ragged-all-to-all", "all-to-all",
+                  "collective-permute", "collective-broadcast")
+_DONE = ("async-done", "all-gather-done", "all-reduce-done", "collective-permute-done")
+# Ops that hand a value on unchanged, as far as which collective it comes from or goes to.
+_PASS = ("bitcast", "copy", "reshape", "transpose", "convert", "copy-start", "copy-done",
+         "optimization-barrier")
+
+
+def _array_bytes(array) -> int:
+  if not array or None in array[1]:
+    return 0
+  bits = re.match(r"[a-z]+(\d+)", array[0])
+  return int(math.prod(array[1]) * (int(bits.group(1)) / 8 if bits else 1))
+
+
+def _nbytes(shape: str) -> int:
+  """Bytes of an array shape, or of a tuple shape's arrays."""
+  shape = _COMMENT.sub("", shape).strip()
+  if shape.startswith("("):
+    return sum(_nbytes(e) for e in _split(shape[1:-1]))
+  return _array_bytes(_array(shape))
+
+
+def collectives(module: Module) -> dict:
+  """{name: {"kind", "bytes", "tensors", "op"}} of each collective in the
+  module: a collective op, a `<kind>-start`, or an `async-start` whose
+  computation is rooted at one. `bytes` is the larger of the op's operands and
+  its result, the gathered or the unreduced buffers; `tensors` counts its
+  operands, more than one where XLA combined collectives. A trace can name the
+  op without the last `.N` XLA appended when it wrapped it, so that name is
+  listed too."""
+  index = {name: (opcode, rest, at) for instructions in module.computations.values()
+           for name, opcode, rest, at in instructions}
+
+  def size(name):
+    opcode, rest, at = index[name]
+    operands, _ = module.parts(rest, at)
+    given = sum(_array_bytes(module.shape(n, i)) for n, i in operands)
+    result = _nbytes(module.shapes.get(name, ""))
+    return {"bytes": max(given, result - given if opcode.endswith("-start") else result),
+            "tensors": len(operands)}
+
+  out = {}
+  for name, (opcode, rest, at) in index.items():
+    op = name
+    if opcode == "async-start":
+      _, attrs = module.parts(rest, at)
+      op = module.roots.get((_names(attrs.get("calls")) or [""])[0], "")
+      kind = index[op][0] if op in index else ""
+    else:
+      kind = opcode[:-len("-start")] if opcode.endswith("-start") else opcode
+    if kind not in COLLECTIVE_OPS:
+      continue
+    out[name] = {"kind": kind, **size(op), "op": op}
+  for name in list(out):
+    alias = re.sub(r"\.\d+$", "", name)
+    if alias != name and alias not in index:
+      out.setdefault(alias, out[name])
+  return out
+
+
+class _Links:
+  """Def-use links between a module's instructions, to follow a value through
+  ops that hand it on unchanged, tuples and a loop's carried values."""
+
+  def __init__(self, module: Module, ops: dict):
+    self.ops = ops
+    self.defs, self.users = {}, {}
+    self.carried, self.carry = {}, {}  # body parameter -> body ROOT, and back
+    for instructions in module.computations.values():
+      for name, opcode, rest, at in instructions:
+        operands, attrs = module.parts(rest, at)
+        if opcode in ("parameter", "constant"):
+          operands = []
+        self.defs[name] = (opcode, operands, attrs)
+        for position, (operand, index) in enumerate(operands):
+          self.users.setdefault(operand, []).append((name, position, tuple(index)))
+    for opcode, _, attrs in list(self.defs.values()):
+      if opcode != "while":
+        continue
+      body = attrs.get("body", "").lstrip("%")
+      params = [n for n, op, _, _ in module.computations.get(body, []) if op == "parameter"]
+      root = module.roots.get(body)
+      if root and len(params) == 1:
+        self.carried[params[0]], self.carry[root] = root, params[0]
+
+  def source(self, name: str, index: tuple = (), hops: int = 16) -> str:
+    """The collective whose result the value at `name`, tuple `index`, is; ""
+    when it is none. The loop's parameter element i is its last trip's ROOT
+    operand i."""
+    while hops and name in self.defs:
+      hops -= 1
+      opcode, operands, attrs = self.defs[name]
+      if name in self.ops:
+        return name
+      if (opcode in _PASS or opcode in _DONE) and operands:
+        name, index = operands[0][0], tuple(operands[0][1]) + index
+      elif opcode == "get-tuple-element" and operands:
+        name, index = operands[0][0], tuple(operands[0][1]) + (int(attrs.get("index", "0")),) + index
+      elif opcode == "tuple" and index and index[0] < len(operands):
+        name, index = operands[index[0]][0], tuple(operands[index[0]][1]) + index[1:]
+      elif opcode == "parameter" and name in self.carried and index:
+        name = self.carried[name]
+      else:
+        return ""
+    return ""
+
+  def sinks(self, name: str, index: tuple = (), hops: int = 16, seen=None) -> set:
+    """The collectives the value at `name`, tuple `index`, feeds; a loop's ROOT
+    operand i is its next trip's parameter element i."""
+    seen = set() if seen is None else seen
+    if not hops or (name, index) in seen:
+      return set()
+    seen.add((name, index))
+    out = set()
+    for user, position, ref in self.users.get(name, []):
+      if ref == index[:len(ref)]:
+        inner = index[len(ref):]  # where the value sits in what the user reads
+      elif ref[:len(index)] == index:
+        inner = ()  # the user reads a part of the value
+      else:
+        continue
+      opcode, _, attrs = self.defs[user]
+      if user in self.ops:
+        out.add(user)
+      elif opcode == "get-tuple-element":
+        if inner and int(attrs.get("index", "0")) == inner[0]:
+          out |= self.sinks(user, inner[1:], hops - 1, seen)
+      elif opcode == "tuple":
+        out |= self.sinks(user, (position,) + inner, hops - 1, seen)
+        if user in self.carry:
+          out |= self.sinks(self.carry[user], (position,) + inner, hops - 1, seen)
+      elif opcode in _PASS or opcode in _DONE:
+        out |= self.sinks(user, inner, hops - 1, seen)
+    return out
+
+
+def link_collectives(module: Module, sites: list[dict], ops: dict | None = None) -> dict:
+  """Adds to each GEMM site the collective ops whose results it reads (`reads`)
+  and those its result feeds (`writes`), followed through ops that hand a
+  value on unchanged, tuples and a loop's carried values but not through
+  fusions. An async collective is named by the op it wraps, as a trace names
+  it. Returns the module's `collectives`."""
+  ops = collectives(module) if ops is None else ops
+  links = _Links(module, ops)
+  for s in sites:
+    if s["kernel"] not in links.defs:
+      continue
+    _, operands, _ = links.defs[s["kernel"]]
+    tuple_out = module.shapes.get(s["kernel"], "").startswith("(") and s["op"] in BLAS_TARGETS
+    reads = {links.source(n, tuple(i)) for n, i in operands} - {""}
+    s["reads"] = sorted({ops[c]["op"] for c in reads})
+    s["writes"] = sorted({ops[c]["op"] for c in links.sinks(s["kernel"], (0,) if tuple_out else ())})
+  return ops
+
+
 def program_calls(text: str) -> dict[str, int]:
   """Calls per step of each compiled module, from the text of the program one
   step runs: the fragments an IFRT IR or MPMD program calls, or else the one
@@ -635,13 +809,16 @@ def per_step(results, programs) -> list[tuple[Module, list[dict]]]:
   return out
 
 
+def _shape_key(s):
+  return (s["library"], s["a_dtype"], s["b_dtype"], s["c_dtype"], s["batch"], s["m"], s["n"], s["k"],
+          s["groups"], s["layout"])
+
+
 def group(sites: list[dict]) -> list[dict]:
   """Sites with the same library, dtypes, shape and layout, by total FLOPs."""
   groups = {}
   for s in sites:
-    key = (s["library"], s["a_dtype"], s["b_dtype"], s["c_dtype"], s["batch"], s["m"], s["n"], s["k"],
-           s["groups"], s["layout"])
-    g = groups.setdefault(key, {**{k: s[k] for k in (
+    g = groups.setdefault(_shape_key(s), {**{k: s[k] for k in (
         "library", "a_dtype", "b_dtype", "c_dtype", "batch", "m", "n", "k", "groups", "layout", "flops")},
         "count": 0, "kernels": 0, "modules": set(), "passes": set(), "sources": [], "flags": set()})
     g["count"] += s["count"]
@@ -773,14 +950,15 @@ def write_csv(path, sites: list[dict]):
   """One row per GEMM site, with its flags joined and its kernel config as JSON."""
   fields = ["module", "kernel", "library", "op", "count", "calls_per_step", "pass", "batch", "m", "n",
             "k", "groups", "a_dtype", "b_dtype", "c_dtype", "layout", "flops", "lhs", "rhs", "flags",
-            "source", "op_name", "kernel_config", "config", "launch"]
+            "source", "op_name", "kernel_config", "config", "launch", "reads", "writes"]
   with open(path, "w", newline="") as f:
     writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
     writer.writeheader()
     for s in sites:
       writer.writerow({**s, "flags": ";".join(s["flags"]), "kernel_config": config_text(s),
                        "config": json.dumps(s["config"], sort_keys=True),
-                       "launch": json.dumps(s["launch"]) if s.get("launch") else ""})
+                       "launch": json.dumps(s["launch"]) if s.get("launch") else "",
+                       "reads": ";".join(s.get("reads", [])), "writes": ";".join(s.get("writes", []))})
 
 
 CLEAN, OVERLAPPED = 0.05, 0.5  # collective-overlap fractions of a launch
@@ -794,9 +972,9 @@ def _median_ci(values, n=1000, seed=0):
   return meds[int(0.025 * n)], meds[int(0.975 * n) - 1]
 
 
-def attach_times(sites: list[dict], kernel_times: dict, steps: int = 0) -> dict:
-  """Add each site's measured launches from `profile.py --kernel_times` as `site["time"]`."""
-  steps = steps or kernel_times.get("steps") or 1
+def _launches(sites: list[dict], kernel_times: dict):
+  """{(module, kernel): (its sites, its launches)} for the kernels a trace
+  launched, joined by HLO module and op; the kernels; the HLO ops traced."""
   by_op = {}
   for k in kernel_times["launches"]:
     if k.get("hlo_op"):
@@ -804,16 +982,21 @@ def attach_times(sites: list[dict], kernel_times: dict, steps: int = 0) -> dict:
   kernels = {}
   for s in sites:
     kernels.setdefault((s["module"], s["kernel"]), []).append(s)
-  matched = 0
+  matched = {}
   for (module, kernel), group_ in kernels.items():
-    launches = []
     for op in [kernel] + sorted({s["trace_op"] for s in group_ if s.get("trace_op")}):
       launches = by_op.get((module, op)) or by_op.get((module, "%" + op), [])
       if launches:
+        matched[(module, kernel)] = (group_, launches)
         break
-    if not launches:
-      continue
-    matched += 1
+  return matched, kernels, by_op
+
+
+def attach_times(sites: list[dict], kernel_times: dict, steps: int = 0) -> dict:
+  """Add each site's measured launches from `profile.py --kernel_times` as `site["time"]`."""
+  steps = steps or kernel_times.get("steps") or 1
+  matched, kernels, by_op = _launches(sites, kernel_times)
+  for group_, launches in matched.values():
     us = [k["dur_ns"] / 1e3 for k in launches]
     clean = [k["dur_ns"] / 1e3 for k in launches if k["rccl_overlap"] < CLEAN]
     over = [k["dur_ns"] / 1e3 for k in launches if k["rccl_overlap"] >= OVERLAPPED]
@@ -833,9 +1016,131 @@ def attach_times(sites: list[dict], kernel_times: dict, steps: int = 0) -> dict:
   timed = [s for s in sites if s.get("time")]
   seen = sum(s["time"]["launches_per_step"] for s in timed)
   expected = sum(s["count"] for s in timed)
-  return {"steps": steps, "kernels_matched": matched, "kernels": len(kernels),
-          "launches": len(kernel_times["launches"]), "unmatched_hlo_ops": len(by_op) - matched,
+  return {"steps": steps, "kernels_matched": len(matched), "kernels": len(kernels),
+          "launches": len(kernel_times["launches"]), "unmatched_hlo_ops": len(by_op) - len(matched),
           "coverage": seen / expected if expected else None}
+
+
+def _kind(op: str, ops: dict, traced: dict) -> str:
+  if op in ops:
+    return ops[op]["kind"]
+  if traced.get(op):
+    return traced[op]
+  return next((kind for kind in COLLECTIVE_OPS if kind in op), "collective")
+
+
+def overlap(sites: list[dict], kernel_times: dict, steps: int = 0, ops: dict | None = None) -> list[dict]:
+  """One record per GEMM shape that collectives overlapped, or that reads or
+  writes a collective (`link_collectives`): its launches and time per step, the
+  medians of its clean and of its mostly overlapped launches, the milliseconds
+  per step its launches a collective overlapped took beyond the clean median,
+  the collectives beside it with their share of the overlapped time, and the
+  collectives it reads and writes. `ops` holds the program's `collectives`, for
+  the kinds and sizes."""
+  steps = steps or kernel_times.get("steps") or 1
+  ops = ops or {}
+  traced = {c["hlo_op"]: c.get("kind", "") for c in kernel_times.get("collectives", [])}
+  shapes = {}
+  for group_, launches in _launches(sites, kernel_times)[0].values():
+    shapes.setdefault(_shape_key(group_[0]), {"site": group_[0], "launches": []})["launches"] += launches
+  for s in sites:
+    r = shapes.get(_shape_key(s))
+    if r is None:
+      continue
+    r.setdefault("reads", set()).update(s.get("reads", ()))
+    r.setdefault("writes", set()).update(s.get("writes", ()))
+    r.setdefault("passes", set()).update([s["pass"]] if s["pass"] else [])
+
+  def named(names):
+    return [{"op": op, "kind": _kind(op, ops, traced), "bytes": ops.get(op, {}).get("bytes"),
+             "tensors": ops.get(op, {}).get("tensors")} for op in sorted(names)]
+
+  rows = []
+  for r in shapes.values():
+    launches = r["launches"]
+    beside = [k for k in launches if k["rccl_overlap"] >= CLEAN]
+    if not beside and not r["reads"] and not r["writes"]:
+      continue
+    clean = [k["dur_ns"] / 1e3 for k in launches if k["rccl_overlap"] < CLEAN]
+    over = [k["dur_ns"] / 1e3 for k in launches if k["rccl_overlap"] >= OVERLAPPED]
+    ref = statistics.median(clean) if clean else None
+    by_kind = {}
+    for k in beside:
+      for op, share in k.get("collectives", {}).items():
+        entry = by_kind.setdefault(_kind(op, ops, traced), {})
+        entry[op] = entry.get(op, 0.0) + share * k["dur_ns"] / 1e3
+    total = sum(sum(e.values()) for e in by_kind.values())
+    s = r["site"]
+    rows.append({
+        **{key: s[key] for key in ("library", "a_dtype", "b_dtype", "c_dtype", "batch", "m", "n", "k",
+                                   "groups", "layout", "flops")},
+        "passes": sorted(r["passes"]), "launches_per_step": len(launches) / steps,
+        "overlapped_per_step": len(over) / steps, "ms_per_step": sum(k["dur_ns"] for k in launches) / 1e6 / steps,
+        "clean_us": ref, "overlapped_us": statistics.median(over) if over else None,
+        "cost_ms_per_step": (sum(k["dur_ns"] / 1e3 - ref for k in beside) / 1e3 / steps
+                             if ref is not None and beside else None),
+        "beside": [{"kind": kind, "share": sum(e.values()) / total,
+                    "ops": [dict(named([op])[0], share=us / total)
+                            for op, us in sorted(e.items(), key=lambda kv: -kv[1])]}
+                   for kind, e in sorted(by_kind.items(), key=lambda kv: -sum(kv[1].values()))],
+        "reads": named(r["reads"]), "writes": named(r["writes"]),
+    })
+  return sorted(rows, key=lambda r: (r["cost_ms_per_step"] is None, -(r["cost_ms_per_step"] or 0),
+                                     -r["ms_per_step"]))
+
+
+def _mib(n):
+  if not n:
+    return "?"
+  return f"{n / 2**20:.0f} MiB" if n >= 10 * 2**20 else f"{n / 2**20:.1g} MiB"
+
+
+def _size_text(c):
+  """A collective's size, and the tensors XLA combined into it."""
+  return _mib(c["bytes"]) + (f", {c['tensors']} tensors" if (c.get("tensors") or 0) > 1 else "")
+
+
+def _collectives_line(traced: list[dict], steps: int) -> str:
+  """Per kind: launches per step on each GPU, the median launch and the
+  workgroups its kernels launch with."""
+  kinds = {}
+  for c in traced:
+    k = kinds.setdefault(c.get("kind") or "collective", {"launches": 0.0, "us": [], "grid": set()})
+    k["launches"] += c["launches"] / max(c.get("gpus") or 1, 1) / steps
+    k["us"] += [c["median_us"]] * c["launches"]
+    k["grid"].update(c.get("grid", []))
+  parts = []
+  for kind, k in sorted(kinds.items(), key=lambda kv: -kv[1]["launches"]):
+    grid = "-".join(str(g) for g in sorted({min(k["grid"]), max(k["grid"])})) if k["grid"] else ""
+    parts.append(f"{kind} {k['launches']:.0f} per step, median {statistics.median(k['us']) / 1e3:.2f} ms"
+                 + (f", {grid} workgroups" if grid else ""))
+  return "; ".join(parts)
+
+
+def _overlap_table(rows, traced, steps, width=0):
+  line = _collectives_line(traced, steps)
+  if line:
+    print(f"\ncollectives on each GPU: {line}")
+  print(f"GEMM shapes beside collectives (one overlaps {100 * CLEAN:.0f}% or more of a launch), or "
+        f"that read or write one: cost = their time beyond the clean median")
+  print(f"  {'ms/step':>8} {'cost ms':>8} {'overlapped':>12} {'clean us':>9} {'overlap us':>10} {'slower':>7}  "
+        f"{'library':<10} {'M':>7} {'N':>7} {'K':>7}  {'layout':<6} {'pass':<9} collectives beside it | reads, writes")
+  for r in rows:
+    fmt = lambda v, w=9: f"{v:{w}.1f}" if v is not None else f"{'-':>{w}}"  # noqa: E731
+    slower = (f"{100 * (r['overlapped_us'] / r['clean_us'] - 1):+6.0f}%"
+              if r["overlapped_us"] and r["clean_us"] else f"{'-':>7}")
+    overlapped = f"{r['overlapped_per_step']:.0f} of {r['launches_per_step']:.0f}"
+    beside = ", ".join(f"{b['kind']} {100 * b['share']:.0f}% ({_size_text(b['ops'][0])})" for b in r["beside"])
+    data = ", ".join(dict.fromkeys([f"reads {x['kind']} {_size_text(x)}" for x in r["reads"]]
+                                   + [f"writes {x['kind']} {_size_text(x)}" for x in r["writes"]]))
+    text = (f"  {r['ms_per_step']:8.2f} {fmt(r['cost_ms_per_step'], 8)} {overlapped:>12} {fmt(r['clean_us'])} "
+            f"{fmt(r['overlapped_us'], 10)} {slower}  {r['library']:<10} {r['m']:>7} {r['n']:>7} {r['k']:>7}  "
+            f"{r['layout']:<6} {','.join(r['passes']):<9} {beside or '-'} | {data or '-'}")
+    print(text[:width] if width else text)
+  costs = [r["cost_ms_per_step"] for r in rows if r["cost_ms_per_step"] is not None]
+  unclean = sum(1 for r in rows if r["clean_us"] is None and r["beside"])
+  print(f"  collectives cost these GEMMs {sum(costs):.1f} ms per step against their clean medians"
+        + (f"; {unclean} shapes have no clean launch to compare" if unclean else ""))
 
 
 def _times_table(sites, top=0, width=0):
@@ -882,7 +1187,12 @@ def main(argv=None):
                       "sites by measured time.")
   parser.add_argument("--steps", type=int, default=0,
                       help="Steps in that trace; default: the steps it records.")
+  parser.add_argument("--overlap", action="store_true",
+                      help="With --times: the GEMM shapes collectives overlap, what that costs per "
+                      "step, the collectives beside them, and those each reads or writes.")
   args = parser.parse_args(argv)
+  if args.overlap and not args.times:
+    parser.error("--overlap needs --times")
   results = analyze(args.dump, args.module)
   if not results:
     print(f"no *after_optimizations.txt under {args.dump}; dump with "
@@ -904,13 +1214,21 @@ def main(argv=None):
   with_gemms = [(m, sites) for m, sites in results if sites or m.other_calls]
   without = len(results) - len(with_gemms)
   everything = [site for _, sites in with_gemms for site in sites]
-  timing = None
+  timing, overlaps = None, None
   if args.times:
-    timing = attach_times(everything, json.loads(pathlib.Path(args.times).read_text()), args.steps)
+    kernel_times = json.loads(pathlib.Path(args.times).read_text())
+    timing = attach_times(everything, kernel_times, args.steps)
     coverage = f"{100 * timing['coverage']:.0f}%" if timing["coverage"] is not None else "n/a"
     print(f"times: {timing['kernels_matched']} of {timing['kernels']} GEMM kernels matched launches "
           f"over {timing['steps']} steps; launches traced per expected launch: {coverage}")
     _times_table(everything, args.top, args.width)
+    if args.overlap:
+      ops = {}
+      for module, sites in with_gemms:
+        ops.update(link_collectives(module, sites))
+      overlaps = overlap(everything, kernel_times, timing["steps"], ops)
+      _overlap_table(overlaps[:args.top or None], kernel_times.get("collectives", []), timing["steps"],
+                     args.width)
   if args.merge:
     launches, total, split = _summary(everything)
     scope = "in one training step" if args.run_dir or args.calls else "each run once"
@@ -949,7 +1267,7 @@ def main(argv=None):
   if args.csv:
     write_csv(args.csv, everything)
   if args.json:
-    out = {"dump": str(args.dump), "counts": unit, "times": timing, "modules": [
+    out = {"dump": str(args.dump), "counts": unit, "times": timing, "overlap": overlaps, "modules": [
         {"module": m.name, "file": m.path, "platform": m.platform,
          "calls_per_step": m.calls_per_step or None, "gemms": s, "shapes": group(s),
          "other_custom_calls": m.other_calls, "launch_check": m.launch_check}

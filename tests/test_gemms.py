@@ -421,3 +421,112 @@ def test_library_gemm_in_a_slice_fusion_joins_launches_by_its_own_name():
                "dur_ns": 2000, "rccl_overlap": 0.0}]
   info = gemms.attach_times([s], {"steps": 1, "launches": launches})
   assert info["kernels_matched"] == 1 and s["time"]["median_us"] == pytest.approx(2.0)
+
+
+def test_kernel_times_name_the_collectives_beside_a_launch():
+  from jax_titan.observability import profile  # pylint: disable=g-import-not-at-top
+
+  rccl = "ncclDevKernel_Generic_1(ncclDevKernelArgsStorage<4096ul>)"
+  events = {0: [
+      {"name": "Cijk_gemm", "start_ns": 0, "end_ns": 100, "hlo_module": "jit_step", "hlo_op": "custom-call.1"},
+      {"name": rccl, "start_ns": 20, "end_ns": 60, "hlo_module": "jit_step", "hlo_op": "all-gather.3", "grid": 16},
+      {"name": rccl, "start_ns": 40, "end_ns": 120, "hlo_module": "jit_step", "hlo_op": "reduce-scatter.4",
+       "grid": 16},
+      {"name": rccl, "start_ns": 300, "end_ns": 400, "hlo_module": "jit_step", "hlo_op": "all-gather.3", "grid": 16},
+  ]}
+  (launch,) = profile.kernel_times(events)
+  assert launch["rccl_overlap"] == 0.8
+  assert launch["collectives"] == {"all-gather.3": 0.4, "reduce-scatter.4": 0.6}
+  ops = {c["hlo_op"]: c for c in profile.collective_launches(events)}
+  assert (ops["all-gather.3"]["kind"], ops["all-gather.3"]["launches"], ops["all-gather.3"]["grid"]) == (
+      "all-gather", 2, [16])
+  assert ops["all-gather.3"]["median_us"] == pytest.approx(0.07)
+  assert ops["reduce-scatter.4"]["kind"] == "reduce-scatter"
+
+
+_LOOP_STATE = ("(s32[], bf16[256,64]{1,0}, bf16[64,128]{1,0}, bf16[8,128]{1,0}, bf16[8,128]{1,0}, "
+               "/*index=5*/bf16[64,128]{1,0})")
+
+# One layer of a loop that prefetches the next trip's weights: the forward GEMM
+# multiplies the weights the last trip all-gathered, and the weight gradient
+# reaches the next trip's reduce-scatter through the loop. XLA wrapped both
+# collectives in async computations, naming the ops it wrapped `.1`.
+COLLECTIVE_MODULE = f"""HloModule jit_step, is_scheduled=true
+
+%add (a: bf16[], b: bf16[]) -> bf16[] {{
+  %a = bf16[] parameter(0)
+  %b = bf16[] parameter(1)
+  ROOT %sum = bf16[] add(%a, %b)
+}}
+
+%async_computation (param_0: bf16[8,128]) -> bf16[64,128] {{
+  %param_0 = bf16[8,128]{{1,0}} parameter(0)
+  ROOT %all-gather.7.1 = bf16[64,128]{{1,0}} all-gather(%param_0), channel_id=1, replica_groups=[1,8]<=[8], dimensions={{0}}, use_global_device_ids=true
+}}
+
+%async_computation.1 (param_0.1: bf16[64,128]) -> bf16[8,128] {{
+  %param_0.1 = bf16[64,128]{{1,0}} parameter(0)
+  ROOT %reduce-scatter.9.1 = bf16[8,128]{{1,0}} reduce-scatter(%param_0.1), channel_id=2, replica_groups=[1,8]<=[8], dimensions={{0}}, to_apply=%add
+}}
+
+%body (p: (s32[], bf16[256,64], bf16[64,128], bf16[8,128], bf16[8,128], bf16[64,128])) -> {_LOOP_STATE} {{
+  %p = {_LOOP_STATE} parameter(0)
+  %all-gather-start = ((bf16[8,128]{{1,0}}), bf16[64,128]{{1,0}}) async-start(%p#3), calls=%async_computation
+  %reduce-scatter-start = ((bf16[64,128]{{1,0}}), bf16[8,128]{{1,0}}) async-start(%p#5), calls=%async_computation.1
+  %fwd = (bf16[256,128]{{1,0}}, s8[1024]{{0}}) custom-call(%p#1, %p#2), custom_call_target="__cublas$lt$matmul", backend_config={_MATMUL}
+  %wgrad = (bf16[64,128]{{1,0}}, s8[1024]{{0}}) custom-call(%p#1, %fwd#0), custom_call_target="__cublas$lt$matmul", backend_config={_GEMM_CONFIG % (0, 0, "", "")}
+  %all-gather-done = bf16[64,128]{{1,0}} async-done(%all-gather-start)
+  %reduce-scatter-done = bf16[8,128]{{1,0}} async-done(%reduce-scatter-start)
+  %grad = bf16[64,128]{{1,0}} bitcast(%wgrad#0)
+  ROOT %t = {_LOOP_STATE} tuple(%p#0, %p#1, %all-gather-done, %p#3, %reduce-scatter-done, /*index=5*/%grad)
+}}
+
+%cond (c: (s32[], bf16[256,64], bf16[64,128], bf16[8,128], bf16[8,128], bf16[64,128])) -> pred[] {{
+  %c = {_LOOP_STATE} parameter(0)
+  ROOT %lt = pred[] constant(true)
+}}
+
+ENTRY %main (init: (s32[], bf16[256,64], bf16[64,128], bf16[8,128], bf16[8,128], bf16[64,128])) -> bf16[8,128] {{
+  %init = {_LOOP_STATE} parameter(0)
+  %while = {_LOOP_STATE} while(%init), condition=%cond, body=%body, backend_config={{"known_trip_count":{{"n":"4"}}}}
+  ROOT %out = bf16[8,128]{{1,0}} get-tuple-element(%while), index=4
+}}
+"""
+
+
+def test_gemms_read_and_write_collectives_through_the_loop():
+  module = gemms.Module(COLLECTIVE_MODULE, platform="rocm")
+  sites = {s["kernel"]: s for s in gemms.gemms(module)}
+  ops = gemms.link_collectives(module, list(sites.values()))
+  assert module.roots["body"] == "t"
+  assert ops["all-gather-start"] == {"kind": "all-gather", "bytes": 64 * 128 * 2, "tensors": 1,
+                                     "op": "all-gather.7.1"}
+  # A trace names the wrapped ops without the `.1`.
+  assert ops["reduce-scatter.9"]["op"] == "reduce-scatter.9.1"
+  assert (sites["fwd"]["reads"], sites["fwd"]["writes"]) == (["all-gather.7.1"], [])
+  assert (sites["wgrad"]["reads"], sites["wgrad"]["writes"]) == ([], ["reduce-scatter.9.1"])
+
+
+def test_overlap_costs_each_shape_its_time_beside_collectives():
+  module = gemms.Module(COLLECTIVE_MODULE, platform="rocm")
+  sites = gemms.gemms(module)
+  ops = gemms.link_collectives(module, sites)
+
+  def launch(op, us, overlap, collectives=None):
+    out = {"hlo_module": "jit_step", "hlo_op": op, "kernel": "Cijk", "dur_ns": us * 1000, "rccl_overlap": overlap}
+    return dict(out, collectives=collectives) if collectives else out
+
+  launches = [launch("fwd", 100, 0.0), launch("fwd", 104, 0.01),
+              launch("fwd", 130, 0.9, {"all-gather.7": 0.6, "reduce-scatter.9": 0.3}),
+              launch("fwd", 140, 1.0, {"all-gather.7": 1.0}), launch("wgrad", 50, 0.0), launch("wgrad", 50, 0.0)]
+  rows = {(r["m"], r["n"], r["k"]): r for r in gemms.overlap(sites, {"steps": 2, "launches": launches}, 0, ops)}
+  fwd, wgrad = rows[(256, 128, 64)], rows[(64, 128, 256)]
+  assert (fwd["launches_per_step"], fwd["overlapped_per_step"]) == (2, 1)
+  assert (fwd["clean_us"], fwd["overlapped_us"]) == (pytest.approx(102), pytest.approx(135))
+  assert fwd["cost_ms_per_step"] == pytest.approx((28 + 38) / 1e3 / 2)
+  assert [(b["kind"], b["share"]) for b in fwd["beside"]] == [
+      ("all-gather", pytest.approx(218 / 257)), ("reduce-scatter", pytest.approx(39 / 257))]
+  assert fwd["beside"][0]["ops"][0]["bytes"] == 64 * 128 * 2
+  assert [x["kind"] for x in fwd["reads"]] == ["all-gather"] and fwd["writes"] == []
+  assert (wgrad["beside"], wgrad["cost_ms_per_step"]) == ([], None)
+  assert [x["kind"] for x in wgrad["writes"]] == ["reduce-scatter"]
