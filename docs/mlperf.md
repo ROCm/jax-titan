@@ -5,8 +5,9 @@ This page holds the benchmark contracts, with the source of every value, and
 what JAX-Titan implements of them.
 
 > **Status.** The contract of Llama 3.1 8B and GPT-OSS 20B is in
-> `jax_titan.mlperf.contract`, and the trainer reads MLPerf's C4 in the
-> reference's order. No compliant run exists yet.
+> `jax_titan.mlperf.contract`; the trainer reads MLPerf's C4 in the
+> reference's order and trains with the reference's schedule and AdamW. No
+> compliant run exists yet.
 
 ## The benchmarks
 
@@ -169,3 +170,34 @@ python -m jax_titan.trainer.train --model=llama3.1-8b --seq_len=8192 --steps=120
   --data=$DIR/c4-train.en_6_text_document \
   --eval_data=$DIR/c4-validation-91205-samples.en_text_document ...
 ```
+
+## Model, optimizer and schedule
+
+The trainer's flags that set the reference's training method, with the values
+of the RCP at GBS 32:
+
+```bash
+--lr=8e-4 --warmup_steps=128 --lr_schedule=nemo_cosine --lr_decay_steps=1199872 \
+--adam_b1=0.9 --adam_b2=0.95 --adam_eps=1e-5 --weight_decay=0.1 --max_grad_norm=1.0
+```
+
+- **Schedule.** `--lr_schedule=nemo_cosine` is NeMo's `CosineAnnealing`
+  (`jax_titan.trainer.schedules`), with `--lr_decay_steps` = 1,200,000 − the
+  warm-up. The default, `cosine`, is optax's, which starts the warm-up from 0.
+- **AdamW.** `optax.adamw` computes the update of Apex's `FusedAdam` in
+  `adam_w_mode`, which the rules list as compliant for Adam on large language
+  models and which Megatron's distributed optimizer runs:
+  `m ← β1 m + (1 − β1) g`, `v ← β2 v + (1 − β2) g²`,
+  `p ← p − lr × ((m / (1 − β1^t)) / (sqrt(v / (1 − β2^t)) + ε) + λ p)`, with
+  `λ = 0` for the norms' weights. `tests/test_mlperf_training.py` checks it
+  over six steps against that equation and against `torch.optim.AdamW`.
+- **Model.** `--model=llama3.1-8b` has Meta-Llama-3.1-8B's 8,030,261,248
+  parameters. The tests check its loss and every gradient against
+  transformers' `LlamaForCausalLM`, with Llama 3.1's RoPE scaling, from the
+  same weights in fp32, and its initialization against the reference's.
+- **Layouts.** Under this AdamW, `--parallel=dp`, `--parallel=fsdp` and the
+  pipeline agree on CPU, and the pipeline's 1F1B, GPipe and zero-bubble
+  schedules, also with FSDP and tensor parallelism in the stages, match one
+  `jax.jit` step (`tests/test_mpmd_parity.py`). Each schedule takes one
+  update per global batch from the gradients of all its microbatches, so no
+  weight is stale.
