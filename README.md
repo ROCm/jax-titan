@@ -50,7 +50,7 @@ This is the target design; [What works](#what-works) lists what runs today.
   `--model=flux-dev` trains it under `--parallel=dp` or `fsdp` on the
   synthetic batches of the two FLUX.1 adapters
   ([docs/recipes/flux.md](docs/recipes/flux.md)).
-- A comparison of an adapter with JAX-Titan's own model of the same network,
+- A comparison of an adapter with JAX-Titan's own model of the same structure,
   trained alike (`python -m jax_titan.observability.compare`): the loss per
   window of steps and the validation loss against the reference, with the
   variation between repeated runs for scale, and tokens/s per GPU
@@ -166,7 +166,7 @@ skills by the stage of a training job they serve.
 [docs/adapters](docs/adapters) has one page per model repository whose models
 train here: what comes from the repository and what from JAX-Titan, how to
 run a model, and how the adapter is verified; and how to compare an adapter
-with JAX-Titan's own model of the same network.
+with JAX-Titan's own model of the same structure.
 [docs/amd-jax-train-runbook](docs/amd-jax-train-runbook) covers running
 JAX-Titan on AMD's SPUR cluster.
 
