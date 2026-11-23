@@ -148,7 +148,9 @@ def parse_args(argv=None):
       "--data", default="",
       help="Token models: a uint32 token file (default: the WikiText-103 train file in "
       "Llama 3's tokens; a model with another tokenizer takes its own file, from "
-      "python -m jax_titan.data.text --tokenizer) or "
+      "python -m jax_titan.data.text --tokenizer), the prefix of a Megatron indexed "
+      "dataset (PREFIX.bin and PREFIX.idx, read in the order Megatron's GPTDataset gives "
+      "--seed, --seq_len and --steps; jax_titan.data.megatron) or "
       "'synthetic'. Image models train on synthetic batches; ideogram4 also on a cache "
       "directory that jax_titan.data.ideogram wrote. command-a-plus also takes a cache of "
       "conversations that jax_titan.data.command_a wrote.",
@@ -179,9 +181,10 @@ def parse_args(argv=None):
   parser.add_argument(
       "--eval_data", default="",
       help="uint32 token file to validate on (default: WikiText-103's validation split in "
-      "Llama 3's tokens; a model with another tokenizer takes its own file). Synthetic "
-      "training data validates on held-out synthetic batches, and a cache on the samples it "
-      "holds out.",
+      "Llama 3's tokens; a model with another tokenizer takes its own file), or the prefix "
+      "of a Megatron indexed dataset, whose first sequences in file order are validated on. "
+      "Synthetic training data validates on held-out synthetic batches, and a cache on the "
+      "samples it holds out.",
   )
   parser.add_argument(
       "--power_sample_s", type=float, default=1.0,
@@ -518,6 +521,7 @@ def main(argv=None):
 
   import jax_titan  # noqa: F401  pylint: disable=g-import-not-at-top,unused-import
   from jax_titan import ops  # pylint: disable=g-import-not-at-top
+  from jax_titan.data import megatron  # pylint: disable=g-import-not-at-top
   from jax_titan.data.text import WindowSampler  # pylint: disable=g-import-not-at-top
   from jax_titan.models import llama  # pylint: disable=g-import-not-at-top
   from jax_titan.observability import records  # pylint: disable=g-import-not-at-top
@@ -674,17 +678,30 @@ def main(argv=None):
 
   else:
     path = args.data or str(paths.work_dir() / "data/wikitext103_train.llama3.bin")
-    sampler = WindowSampler(path, seq, seed=args.seed, step=start)
-    print(f"data: {path} ({sampler.num_tokens / 1e6:.1f}M tokens)", flush=True)
-    if sampler.max_token() >= work.vocab_size:
-      raise ValueError(
-          f"{path} has token ids up to {sampler.max_token()}, beyond "
-          f"{args.model}'s vocabulary of {work.vocab_size}"
-      )
+    prefix = megatron.prefix_of(path)
+    if prefix:
+      # Megatron's order for a run of --steps global batches. The tokens are read batch by
+      # batch, so their ids are checked batch by batch too.
+      sampler = megatron.Sampler(prefix, seq, num_samples=args.steps * num_mb * mb,
+                                 seed=args.seed, step=start)
+      print(f"data: {prefix} (Megatron indexed dataset, {sampler.num_tokens / 1e6:.1f}M "
+            f"tokens, {len(sampler.samples)} samples of {seq + 1})", flush=True)
+    else:
+      sampler = WindowSampler(path, seq, seed=args.seed, step=start)
+      print(f"data: {path} ({sampler.num_tokens / 1e6:.1f}M tokens)", flush=True)
+      if sampler.max_token() >= work.vocab_size:
+        raise ValueError(
+            f"{path} has token ids up to {sampler.max_token()}, beyond "
+            f"{args.model}'s vocabulary of {work.vocab_size}"
+        )
 
     def next_batch(step):
       assert sampler.step == step, (sampler.step, step)
-      return sampler.next(num_mb * mb)
+      batch = sampler.next(num_mb * mb)
+      if prefix and batch.max() >= work.vocab_size:
+        raise ValueError(f"{prefix} has token ids up to {batch.max()} in step {step}, beyond "
+                         f"{args.model}'s vocabulary of {work.vocab_size}")
+      return batch
 
   if args.eval_every:
     if work.next_batch is not None or args.data == "synthetic":
@@ -692,10 +709,17 @@ def main(argv=None):
     else:
       eval_path = args.eval_data or str(
           paths.work_dir() / "data/wikitext103_validation.llama3.bin")
-      held_out = WindowSampler(eval_path, seq, seed=args.seed, step=0)
-      if held_out.max_token() >= work.vocab_size:
-        raise ValueError(f"{eval_path} has token ids beyond the vocabulary")
-      eval_batches = [held_out.next(num_mb * mb) for _ in range(args.eval_batches)]
+      if megatron.prefix_of(eval_path):
+        held_out = megatron.validation(megatron.prefix_of(eval_path), seq,
+                                       args.eval_batches * num_mb * mb)
+        if held_out.max() >= work.vocab_size:
+          raise ValueError(f"{eval_path} has token ids beyond the vocabulary")
+        eval_batches = list(held_out.reshape(args.eval_batches, num_mb * mb, seq + 1))
+      else:
+        held_out = WindowSampler(eval_path, seq, seed=args.seed, step=0)
+        if held_out.max_token() >= work.vocab_size:
+          raise ValueError(f"{eval_path} has token ids beyond the vocabulary")
+        eval_batches = [held_out.next(num_mb * mb) for _ in range(args.eval_batches)]
   log.event("data", seconds=time.time() - t0)
 
   def meta(step):

@@ -5,7 +5,8 @@ This page holds the benchmark contracts, with the source of every value, and
 what JAX-Titan implements of them.
 
 > **Status.** The contract of Llama 3.1 8B and GPT-OSS 20B is in
-> `jax_titan.mlperf.contract`. No compliant run exists yet.
+> `jax_titan.mlperf.contract`, and the trainer reads MLPerf's C4 in the
+> reference's order. No compliant run exists yet.
 
 ## The benchmarks
 
@@ -125,3 +126,46 @@ what the code computes, except for the validation set:
   reduction. Megatron scales by `1.0 / (norm + 1e-6)` when that is below 1;
   JAX-Titan scales by `1.0 / norm` when the norm is 1.0 or more, a relative
   difference of `1e-6 / norm`.
+
+## Data
+
+`scripts/mlperf_download_c4.sh DIR` downloads the pretokenized C4 that
+MLCommons publishes for Llama 3.1 8B and GPT-OSS 20B (85 GB), resuming a
+transfer that breaks off, and checks every file against MLCommons' md5 sums.
+The files are Megatron indexed datasets of Llama 3.1 token ids (int32):
+
+| Prefix | Documents | Tokens | Samples of 8,193 tokens |
+|---|---|---|---|
+| `c4-train.en_6_text_document` | 45,608,611 | 20,994,193,570 | 2,562,767 per epoch |
+| `c4-validation-91205-samples.en_text_document` | 91,205 | 41,642,091 | 5,083 |
+
+The README counts 47,186,855 validation tokens, enough for 5,760 sequences;
+the published file holds the 41,642,091 above, and validation needs 1,024.
+
+The trainer reads a Megatron dataset when `--data` or `--eval_data` names its
+prefix (`jax_titan.data.megatron`):
+
+- **Training order: the reference's.** `GPTDataset` at `core_r0.11.0` cuts
+  the documents into windows of 8,193 tokens that overlap by one, in a
+  document order shuffled by `numpy.random.RandomState(seed)` over as many
+  epochs as its sample count needs, and shuffles the windows with the same
+  random state. The reference asks for `max_steps × GBS` samples. The trainer
+  builds the same three indices for `--steps` × its global batch with the
+  run's `--seed`, so with `--steps=1200000` and the same seed it reads the
+  reference's samples in the reference's order. `tests/test_megatron_data.py`
+  checks the indices against a line-by-line port of Megatron's code.
+- **Cost.** At GBS 32, the indices span 38,441,516 samples over 15 epochs,
+  all shuffled together, as in the reference: the 180,000 or so samples a run
+  reads can hold a document twice. Building them reads the documents' lengths,
+  not their tokens, which the rules allow before the clock starts; on the dev
+  node it takes 55 s and 4.3 GB of memory. They are kept as .npy files (about
+  3.2 GB per seed) in `${JAX_TITAN_ROOT}/cache/megatron_indices`, and
+  `python -m jax_titan.data.megatron index` builds them before a run.
+- **Validation: the first sequences in file order**, as the README says
+  (above).
+
+```bash
+python -m jax_titan.trainer.train --model=llama3.1-8b --seq_len=8192 --steps=1200000 \
+  --data=$DIR/c4-train.en_6_text_document \
+  --eval_data=$DIR/c4-validation-91205-samples.en_text_document ...
+```
