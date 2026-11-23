@@ -476,7 +476,7 @@ COLLECTIVE_MODULE = f"""HloModule jit_step, is_scheduled=true
   %p = {_LOOP_STATE} parameter(0)
   %all-gather-start = ((bf16[8,128]{{1,0}}), bf16[64,128]{{1,0}}) async-start(%p#3), calls=%async_computation
   %reduce-scatter-start = ((bf16[64,128]{{1,0}}), bf16[8,128]{{1,0}}) async-start(%p#5), calls=%async_computation.1
-  %fwd = (bf16[256,128]{{1,0}}, s8[1024]{{0}}) custom-call(%p#1, %p#2), custom_call_target="__cublas$lt$matmul", backend_config={_MATMUL}
+  %fwd = (bf16[256,128]{{1,0}}, s8[1024]{{0}}) custom-call(%p#1, %p#2), custom_call_target="__cublas$lt$matmul", metadata={{source_file="/w/jax_titan/models/llama.py" source_line=120}}, backend_config={_MATMUL}
   %wgrad = (bf16[64,128]{{1,0}}, s8[1024]{{0}}) custom-call(%p#1, %fwd#0), custom_call_target="__cublas$lt$matmul", backend_config={_GEMM_CONFIG % (0, 0, "", "")}
   %all-gather-done = bf16[64,128]{{1,0}} async-done(%all-gather-start)
   %reduce-scatter-done = bf16[8,128]{{1,0}} async-done(%reduce-scatter-start)
@@ -531,5 +531,6 @@ def test_overlap_costs_each_shape_its_time_beside_collectives():
       ("all-gather", pytest.approx(218 / 257)), ("reduce-scatter", pytest.approx(39 / 257))]
   assert fwd["beside"][0]["ops"][0]["bytes"] == 64 * 128 * 2
   assert [x["kind"] for x in fwd["reads"]] == ["all-gather"] and fwd["writes"] == []
+  assert (fwd["sources"], wgrad["sources"]) == (["llama.py:120"], [])
   assert (wgrad["beside"], wgrad["cost_ms_per_step"]) == ([], None)
   assert [x["kind"] for x in wgrad["writes"]] == ["reduce-scatter"]

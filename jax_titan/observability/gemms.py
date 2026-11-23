@@ -43,11 +43,12 @@ milliseconds per traced step (`--steps`). Sites are then ranked by time.
 launches a collective mostly overlapped, their median against the clean one,
 the milliseconds per step its overlapped launches take beyond the clean
 median, the collectives beside it (kind, share of the overlapped time and
-size), and the collectives it reads or writes in the program: an all-gather
-whose result it multiplies, a reduce-scatter its result feeds. Those are
-followed through bitcasts, copies, tuples and a loop's carried values, not
-through fusions. In a loop that prefetches the next layer's weights, the
-collective beside a GEMM is often not the one it reads.
+size), its source, and the collectives it reads or writes in the program:
+an all-gather whose result it multiplies, a reduce-scatter its result feeds.
+Those are followed through bitcasts, copies, tuples and a loop's carried
+values, not through fusions. In a loop that prefetches the next layer's
+weights, the collective beside a GEMM is never the launch it reads, and often
+another collective.
 """
 
 from __future__ import annotations
@@ -858,6 +859,11 @@ def _count(n, noun):
   return f"{n} {noun}" + ("" if n == 1 else "s")
 
 
+def _sources(sources):
+  """The first source of a shape's sites, and how many others there are."""
+  return sources[0] + (f" +{len(sources) - 1}" if len(sources) > 1 else "") if sources else ""
+
+
 def _table(rows, total, width=110):
   header = (f"  {'count':>6}  {'library':<10} {'dtype':<16} {'batch':>6} {'M':>7} {'N':>7} {'K':>7}  "
             f"{'layout':<6} {'GFLOP':>8} {'share':>6}  pass      source")
@@ -865,9 +871,7 @@ def _table(rows, total, width=110):
   for g in rows:
     share = f"{100 * g['total_flops'] / total:5.1f}%" if total and g["total_flops"] is not None else "     -"
     flags = " (" + "; ".join(g["flags"]) + ")" if g["flags"] else ""
-    sources = ""
-    if g["sources"]:
-      sources = g["sources"][0] + (f" +{len(g['sources']) - 1}" if len(g["sources"]) > 1 else "")
+    sources = _sources(g["sources"])
     batch = "-" if g["batch"] == 1 else str(g["batch"])
     if g["groups"]:
       batch = f"g{g['groups']}"
@@ -1034,9 +1038,9 @@ def overlap(sites: list[dict], kernel_times: dict, steps: int = 0, ops: dict | N
   writes a collective (`link_collectives`): its launches and time per step, the
   medians of its clean and of its mostly overlapped launches, the milliseconds
   per step its launches a collective overlapped took beyond the clean median,
-  the collectives beside it with their share of the overlapped time, and the
-  collectives it reads and writes. `ops` holds the program's `collectives`, for
-  the kinds and sizes."""
+  the collectives beside it with their share of the overlapped time, the
+  collectives it reads and writes, and its sites' sources. `ops` holds the
+  program's `collectives`, for the kinds and sizes."""
   steps = steps or kernel_times.get("steps") or 1
   ops = ops or {}
   traced = {c["hlo_op"]: c.get("kind", "") for c in kernel_times.get("collectives", [])}
@@ -1050,6 +1054,9 @@ def overlap(sites: list[dict], kernel_times: dict, steps: int = 0, ops: dict | N
     r.setdefault("reads", set()).update(s.get("reads", ()))
     r.setdefault("writes", set()).update(s.get("writes", ()))
     r.setdefault("passes", set()).update([s["pass"]] if s["pass"] else [])
+    sources = r.setdefault("sources", [])
+    if s["source"] and s["source"] not in sources:
+      sources.append(s["source"])
 
   def named(names):
     return [{"op": op, "kind": _kind(op, ops, traced), "bytes": ops.get(op, {}).get("bytes"),
@@ -1083,7 +1090,7 @@ def overlap(sites: list[dict], kernel_times: dict, steps: int = 0, ops: dict | N
                     "ops": [dict(named([op])[0], share=us / total)
                             for op, us in sorted(e.items(), key=lambda kv: -kv[1])]}
                    for kind, e in sorted(by_kind.items(), key=lambda kv: -sum(kv[1].values()))],
-        "reads": named(r["reads"]), "writes": named(r["writes"]),
+        "reads": named(r["reads"]), "writes": named(r["writes"]), "sources": r["sources"],
     })
   return sorted(rows, key=lambda r: (r["cost_ms_per_step"] is None, -(r["cost_ms_per_step"] or 0),
                                      -r["ms_per_step"]))
@@ -1126,8 +1133,10 @@ def _overlap_table(rows, traced, steps, width=0):
     print(f"\ncollectives on each GPU: {line}")
   print(f"GEMM shapes beside collectives (one overlaps {100 * CLEAN:.0f}% or more of a launch), or "
         f"that read or write one: cost = their time beyond the clean median")
+  wide = max([len("source")] + [len(_sources(r["sources"])) for r in rows])
   print(f"  {'ms/step':>8} {'cost ms':>8} {'overlapped':>12} {'clean us':>9} {'overlap us':>10} {'slower':>7}  "
-        f"{'library':<10} {'M':>7} {'N':>7} {'K':>7}  {'layout':<6} {'pass':<9} collectives beside it | reads, writes")
+        f"{'library':<10} {'M':>7} {'N':>7} {'K':>7}  {'layout':<6} {'pass':<9} {'source':<{wide}}  "
+        f"collectives beside it | reads, writes")
   for r in rows:
     fmt = lambda v, w=9: f"{v:{w}.1f}" if v is not None else f"{'-':>{w}}"  # noqa: E731
     slower = (f"{100 * (r['overlapped_us'] / r['clean_us'] - 1):+6.0f}%"
@@ -1138,7 +1147,8 @@ def _overlap_table(rows, traced, steps, width=0):
                                    + [f"writes {x['kind']} {_size_text(x)}" for x in r["writes"]]))
     text = (f"  {r['ms_per_step']:8.2f} {fmt(r['cost_ms_per_step'], 8)} {overlapped:>12} {fmt(r['clean_us'])} "
             f"{fmt(r['overlapped_us'], 10)} {slower}  {r['library']:<10} {r['m']:>7} {r['n']:>7} {r['k']:>7}  "
-            f"{r['layout']:<6} {','.join(r['passes']):<9} {beside or '-'} | {data or '-'}")
+            f"{r['layout']:<6} {','.join(r['passes']):<9} {_sources(r['sources']) or '-':<{wide}}  "
+            f"{beside or '-'} | {data or '-'}")
     print(text[:width] if width else text)
   costs = [r["cost_ms_per_step"] for r in rows if r["cost_ms_per_step"] is not None]
   unclean = sum(1 for r in rows if r["clean_us"] is None and r["beside"])
