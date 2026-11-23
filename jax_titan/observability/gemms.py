@@ -1101,19 +1101,22 @@ def _size_text(c):
 
 
 def _collectives_line(traced: list[dict], steps: int) -> str:
-  """Per kind: launches per step on each GPU, the median launch and the
-  workgroups its kernels launch with."""
+  """Per kind: launches per step on each GPU, the median launch, the
+  workgroups its kernels launch with and the milliseconds per step no compute
+  kernel overlapped."""
   kinds = {}
   for c in traced:
-    k = kinds.setdefault(c.get("kind") or "collective", {"launches": 0.0, "us": [], "grid": set()})
-    k["launches"] += c["launches"] / max(c.get("gpus") or 1, 1) / steps
+    k = kinds.setdefault(c.get("kind") or "collective", {"launches": 0.0, "us": [], "grid": set(), "exposed": 0.0})
+    per_step = max(c.get("gpus") or 1, 1) * steps
+    k["launches"] += c["launches"] / per_step
+    k["exposed"] += c.get("exposed_us", 0) / 1e3 / per_step
     k["us"] += [c["median_us"]] * c["launches"]
     k["grid"].update(c.get("grid", []))
   parts = []
   for kind, k in sorted(kinds.items(), key=lambda kv: -kv[1]["launches"]):
     grid = "-".join(str(g) for g in sorted({min(k["grid"]), max(k["grid"])})) if k["grid"] else ""
     parts.append(f"{kind} {k['launches']:.0f} per step, median {statistics.median(k['us']) / 1e3:.2f} ms"
-                 + (f", {grid} workgroups" if grid else ""))
+                 + (f", {grid} workgroups" if grid else "") + f", {k['exposed']:.1f} ms exposed")
   return "; ".join(parts)
 
 

@@ -441,7 +441,10 @@ def test_kernel_times_name_the_collectives_beside_a_launch():
   assert (ops["all-gather.3"]["kind"], ops["all-gather.3"]["launches"], ops["all-gather.3"]["grid"]) == (
       "all-gather", 2, [16])
   assert ops["all-gather.3"]["median_us"] == pytest.approx(0.07)
-  assert ops["reduce-scatter.4"]["kind"] == "reduce-scatter"
+  # Exposed: the second all-gather, and the reduce-scatter past the GEMM's end.
+  assert ops["all-gather.3"]["exposed_us"] == pytest.approx(0.1)
+  assert (ops["reduce-scatter.4"]["kind"], ops["reduce-scatter.4"]["exposed_us"]) == (
+      "reduce-scatter", pytest.approx(0.02))
 
 
 _LOOP_STATE = ("(s32[], bf16[256,64]{1,0}, bf16[64,128]{1,0}, bf16[8,128]{1,0}, bf16[8,128]{1,0}, "
