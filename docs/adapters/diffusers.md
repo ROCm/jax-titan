@@ -135,7 +135,7 @@ validation loss after them.
 JAX-Titan's native FLUX.1 (`--model=flux-dev` and `flux-schnell`) is written
 after this adapter's model, `FluxTransformer2DModel`: from the same weights
 the two give the same prediction, loss and gradients in fp32
-([pipelines.md](../pipelines.md#flux1-2026-11-21-8x-mi350x)). Trained alike
+([recipes/flux.md](../recipes/flux.md#correctness)). Trained alike
 from random weights, with the same arguments `$ARGS` for both, they are
 compared as in the example of
 [native_comparison.md](native_comparison.md#flux1-dev):
