@@ -750,3 +750,53 @@ those of the recipe's commands):
 Records: [`results/2026-11-18`](results/2026-11-18), the files
 `command-a-plus_*`. The loop of the comparison with transformers and the
 script that wrote the example conversations are not in the repository.
+
+## FLUX.1 (2026-11-21, 8x MI350X)
+
+`--model=flux-dev` and `--model=flux-schnell` are JAX-Titan's own FLUX.1
+(`models/flux.py`), the denoiser alone, written after diffusers'
+`FluxTransformer2DModel` 0.43.0: the published FLUX.1-dev's sizes and guidance
+embedding, 11.90B parameters, and FLUX.1-schnell's, 11.89B. The model trains
+from random weights under `--parallel=dp` or `fsdp`, on the synthetic batches
+the two FLUX.1 adapters take (`jax_titan.data.diffusion`), with checkpoints,
+validation and rematerialization, and its operators go through
+`jax_titan.ops`. It has no pipeline, reads no published weights and draws no
+pictures. Its random weights are drawn as PyTorch draws those of diffusers'
+model: weights and biases uniform within 1/sqrt(fan-in) of zero, norm weights
+one. The runs here are on MI350X on 2026-11-21 and 22, at FLUX.1-dev's size in
+fp32; neither their scripts nor their records are in the repository.
+[adapters/native_comparison.md](adapters/native_comparison.md#flux1-dev)
+trains the model beside MaxDiffusion's and diffusers' FLUX.1.
+
+The model against its reference, with the same weights on both sides:
+
+| Reference | Where | Largest difference |
+|---|---|---|
+| diffusers' model, with and without the guidance embedding | one GPU, 2 double and 2 single blocks of width 32, fp32 | prediction and loss within the test's 1e-5, every gradient within its 1e-3 |
+| diffusers' model, run by PyTorch 2.10.0 on CPU | one MI350X, full size, fp32, one sample of 512 x 512 pixels | prediction 7.7e-6, of values up to 2.62, and 1.4e-6 on average; loss 1.6e-8 of its value, 2.3219905 |
+
+At full size the weights are those PyTorch initializes under
+`torch.manual_seed(0)`, and the sample is drawn as the trainer draws a batch
+of one sample (seed 0, step 0): 1,024 image tokens and 512 text tokens. The
+gradients are compared in the test alone.
+
+Training under FSDP on 8 GPUs against data parallelism on one, from the same
+random weights and on the same 8 samples of 512 x 512 pixels a step, with
+`--lr=1e-5`: over 10 steps the losses differ by at most 1.2e-7 of their value
+and the gradient norms by 1.1e-7. The peak HBM per GPU is 186.8 GiB under data
+parallelism and 25.5 GiB under FSDP, 56.1 on the first GPU.
+
+`tests/test_flux.py` also checks, at a small size, FSDP against data
+parallelism for both flavors, a resumed run against the uninterrupted one and
+the initialization, and at full size that FLUX.1-dev has the 11,901,408,320
+parameters of diffusers' model and that FSDP shards every parameter, never
+along the block axis.
+
+- **JAX-Titan's FLUX.1 is diffusers' model in fp32.** In bf16 the two embed
+  the timestep differently, beyond rounding: JAX-Titan's model scales the
+  timestep and the guidance by 1000 in fp32, where diffusers' first rounds
+  them to its compute dtype. They were not compared in bf16.
+- **The random weights are drawn on the first GPU and then sharded**, as
+  Ideogram 4's and Command A+'s are, which is that GPU's 56.1 GiB under FSDP.
+- **Not checked:** FLUX.1-schnell's prediction and training at full size, and
+  providers of `jax_titan.ops` other than `native`.
