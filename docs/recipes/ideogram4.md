@@ -36,7 +36,8 @@ Both commands run the same configuration:
 
 - **Layout:** FSDP over the visible GPUs, the 4 that `HIP_VISIBLE_DEVICES`
   names, in one `jax.jit` program, no pipeline.
-- **Batch:** 8 images of 1024x1024 per step, 34,816 tokens.
+- **Batch:** 8 images of 1024x1024 per step, each 256 text and 4,096 latent
+  tokens: 34,816 tokens.
 - **Precision:** fp32 parameters and AdamW state, bf16 compute.
 - **Optimizer:** AdamW at 1e-5 after 10 warmup steps, then a cosine decay to
   1e-6 at the last step; weight decay 0.1 on all but the norm weights;
@@ -148,19 +149,74 @@ the floor.
 - **JAX-Titan's own model and the adapter draw one line.** From the adapter's
   weights, on its batches and with its timesteps, the own model on 4 GPUs
   follows the adapter on 8: the losses of a step differ by at most 0.0031
-  from step 200 on, where the loss varies by 0.10 from batch to batch, and
-  the validation losses end at 1.5964 and 1.5963.
+  from step 200 on, where the loss varies by 0.10 from batch to batch. Their
+  means over 100 steps agree to 0.0001 from step 200 on, and their
+  validation losses to 0.0005 from step 300 on, ending at 1.5964 and 1.5963:
+  after 1,000 steps both are 0.0068 above the floor of those batches.
 - **The branch's own trainer is not in the figure,** because its run is
   another experiment: it starts from the pretrained weights and, at the
   commit the adapter pins, its step returns the random key it was given, so
   every step draws the same noise and the same timesteps. One step of it
   matches the step of these runs in a test with small sizes.
 
-The comparisons with diffusers' model and with the branch's model, in tests
-with small sizes and at full size on one GPU, are in
-[pipelines.md](../pipelines.md#ideogram-4-2026-11-17-4x-mi350x).
+The two curves of the figure as means over 100 steps, with the validation
+loss after each window's last step; the floor of these validation batches is
+1.5895:
+
+| Steps | 0-99 | 100-199 | 200-299 | 300-399 | 400-499 | 500-599 | 600-699 | 700-799 | 800-899 | 900-999 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Training loss, adapter | 2.6328 | 1.7046 | 1.6211 | 1.5918 | 1.5820 | 1.5421 | 1.5720 | 1.5611 | 1.5965 | 1.5529 |
+| Training loss, JAX-Titan's model | 2.6309 | 1.7038 | 1.6212 | 1.5917 | 1.5820 | 1.5421 | 1.5721 | 1.5612 | 1.5965 | 1.5530 |
+| Validation loss, adapter | 1.9729 | 1.6741 | 1.6363 | 1.6193 | 1.6113 | 1.6066 | 1.6024 | 1.5979 | 1.5969 | 1.5963 |
+| Validation loss, JAX-Titan's model | 1.9706 | 1.6732 | 1.6364 | 1.6191 | 1.6109 | 1.6067 | 1.6024 | 1.5979 | 1.5970 | 1.5964 |
+
+The same training over its first steps. The table gives the largest relative
+difference between two runs over their first 10 steps, which Gate 0 compares
+with a tolerance of 2e-3 in loss, and over 30:
+
+| Runs | Loss, 10 steps | Loss, 30 steps | Gradient norm, 10 steps | Gradient norm, 30 steps |
+|---|---|---|---|---|
+| JAX-Titan's model against the adapter, both on 4 GPUs | 3.1e-4 | 6.9e-4 | 1.9e-3 | 2.8e-3 |
+| The adapter on 4 GPUs against the adapter on 8 | 4.5e-4 | 4.5e-4 | 1.7e-3 | 1.8e-3 |
+| Two identical runs of the adapter on 8 GPUs | 1.8e-4 | 2.8e-4 | 8.1e-4 | 1.5e-3 |
+
+JAX-Titan's own model (`models/ideogram.py`) is written after diffusers'
+`Ideogram4Transformer2DModel` and its training example, and the adapter
+builds the same stages from MaxDiffusion's Ideogram branch, a port of the
+same model. The model against its references, with the same weights on both
+sides:
+
+| Reference | Where | Largest difference |
+|---|---|---|
+| diffusers' model | CPU, 4 blocks of width 64, fp32 | velocity 4.8e-7 |
+| the branch's model | CPU, the same sizes | hidden states after every stage 9.5e-7; loss and every gradient within the tests' 1e-5 and 1e-4 |
+| the branch's model | one MI350X, full size, fp32, 2 images, one with padded text | velocity 6.6e-6 (relative l2); loss and gradient norm 7.9e-8; every gradient 1.4e-5 (relative l2) |
+| one step of the branch's trainer | CPU, small sizes, the same batch and random key | loss, gradient norm and the parameters after a clipped SGD step within the test's 1e-5, 1e-4 and 1e-4 |
+
+- **JAX-Titan's model is the branch's model.** At full size in fp32 every
+  gradient agrees to 1.4e-5. In bf16 the two round differently, and their
+  runs differ by as much as the adapter differs from itself on another number
+  of GPUs.
+- **The rotary frequencies are computed on the host.** Inside a compiled
+  program XLA folds `1 / theta^(i/d)` to other last bits than an eager
+  computation gives: 3 of 16 frequencies at the tests' size, which moved the
+  outputs by 3e-5 against the branch's model, and 34 of 128 at full size
+  against diffusers' table. Image positions start at 65536, where one unit in
+  the last place of a frequency moves an angle by up to 0.004 rad. The host
+  computes every step in fp32 as diffusers rounds it, which leaves 1 of the
+  128 entries different from diffusers'.
+
+These runs are of 2026-11-17, with every op on native JAX. Their per-step
+records are in [results/2026-11-17](../results/2026-11-17).
 
 ### Pictures from the published weights
+
+The pictures come from three more modules of JAX-Titan's own: the text
+encoder (`models/qwen3.py`, the text tower of Qwen3-VL), the autoencoder
+(`models/flux2_vae.py`) and a reader of published weights
+(`models/pretrained.py`). The checkpoint `ideogram-ai/ideogram-4-fp8` stores
+a Linear weight as float8 with one scale per output row; the reader
+multiplies them out to fp32.
 
 - **The pictures match their captions.** The picture
   [above](#pictures-from-the-published-weights) has its caption's golden
@@ -175,13 +231,38 @@ with small sizes and at full size on one GPU, are in
   1.5e-2 in bf16, the precision generation runs in.
 - **The autoencoder matches diffusers'** in a test with small sizes. At full
   size an image encoded and decoded again comes back at 27-32 dB.
+- **The constants that scale image tokens matter.** The first runs of the day
+  scaled them by the batch-norm statistics stored with the autoencoder, as
+  diffusers' pipeline does with the autoencoder it loads. Ideogram's pipeline
+  uses constants of its own, and in this checkpoint the two differ. With the
+  stored statistics the same captions and seeds gave the same pictures 14 to
+  24 levels of 255 darker, most in blue; the numbers and pictures here are
+  from runs with Ideogram's constants.
 
-No picture was compared with one from Ideogram's own pipeline.
+The models around the transformer against their references:
+
+| Model | Reference | Where | Largest difference |
+|---|---|---|---|
+| Text encoder | transformers' `Qwen3VLTextModel` | CPU, 4 layers of width 32, fp32, one prompt padded | features within the test's 1e-4 |
+| Text encoder | the same, with the published weights | one MI350X, full size, a caption of 66 tokens | features 3.7e-7 in fp32, 1.5e-2 in bf16 (relative l2) |
+| Tokenizer | transformers' tokenizer and chat template | two prompts | the same token ids |
+| Autoencoder | diffusers' `AutoencoderKLFlux2` | CPU, 3 levels of 32 to 64 channels, fp32 | latents and decoded images within the test's 1e-4 |
+| Autoencoder | an image, encoded and decoded again | one MI350X, full size, 3 images of 1024x1024 | 27.5-31.9 dB PSNR |
+
+No picture was compared with one from Ideogram's own pipeline for the same
+noise.
 
 ### Fine-tuning on images
 
 The run is the [example above](#fine-tuning-on-images), at 512x512: 17 of
-its images to train on and one held out.
+its images to train on and one held out, with FSDP on 4 MI350X, 8 images per
+step, each 1,024 image tokens and up to 120 text tokens. Means over 50 steps,
+and the loss on the held-out image after the window's last step:
+
+| Steps | 0-49 | 50-99 | 100-149 | 150-199 | 200-249 | 250-299 |
+|---|---|---|---|---|---|---|
+| Training loss | 0.7621 | 0.7131 | 0.6516 | 0.5980 | 0.5803 | 0.5430 |
+| Validation loss | 0.6437 | 0.6628 | 0.6958 | 0.7255 | 0.7464 | 0.7617 |
 
 - **The training loss falls,** from 0.76 over the first 50 steps to 0.54 over
   the last 50 of 300. The loss on the held-out image rises from 0.64 to 0.76:
@@ -193,23 +274,48 @@ its images to train on and one held out.
   The published weights' teapot also carries a line of text that its caption
   does not have.
 
-The numbers of these runs are in
-[pipelines.md](../pipelines.md#ideogram-4-with-published-weights-2026-11-18-4x-mi350x).
+These runs are of 2026-11-18. The record of the fine-tuning run is
+[results/2026-11-18/ideogram4_finetune-yarn512_fsdp4.jsonl](../results/2026-11-18/ideogram4_finetune-yarn512_fsdp4.jsonl).
 
 ## Performance
 
-TODO: measure throughput and memory on an idle node, on 4 and on 8 GPUs. What
-the runs above saw is in
-[pipelines.md](../pipelines.md#ideogram-4-2026-11-17-4x-mi350x).
+TODO: measure throughput and memory on an idle node, on 4 and on 8 GPUs.
+Another job held a GPU of the node during the runs above, so what they saw is
+not throughput of record:
+
+- **Training on synthetic batches, on these 4 GPUs:** JAX-Titan's model ran
+  at 6.1k tokens/s per GPU and the adapter at 7.2k, with 47.6 against 70.8
+  GiB in use per GPU, 47-54 s against 74 s to compile, and 2.1 s against 27 s
+  to initialize. The difference in speed has not been looked into.
+- **Fine-tuning:** a step takes 0.610 s (15.0k tokens/s, 3.8k per GPU) with
+  37.2 GiB in use per GPU; starting from the published weights takes 57 s,
+  compiling 41 s, and writing the trained parameters (32 GiB) 24 s.
+- **The trainer's energy figures count every GPU of the node.** For a run on
+  4 of 8 GPUs, `results.json` reported 4,293 W and 0.185 J/token, with the
+  idle GPUs and another job's GPU in them; the run's own GPUs drew 3,325 W,
+  0.144 J/token.
+
+Generation on one MI350X, with the text encoder and both transformers in
+bf16 and the autoencoder in fp32, its convolutions on the GPU, on one device
+outside any mesh:
+
+| What | Time |
+|---|---|
+| Loading the text encoder, both transformers and the autoencoder | 154 s: 44 s, 110 s and under 1 s |
+| A picture of 1024x1024 in 20 steps | 5-6 s, and 15-17 s for the first one of a caption length, which compiles |
+| A picture of 512x512 in 20 steps | 2 s, and 5-7 s for the first one of a caption length |
 
 ## Known limits
 
 - Square images only, in the cache and in generation.
 - Fine-tuning trains all of the conditional transformer; there is no LoRA.
 - A caption must be JSON in Ideogram 4's schema, and nothing here rewrites a
-  plain prompt into one. For a plain prompt, and at 1024x1024 for a sparse
-  caption, the published model draws a gray picture that says
-  `Image blocked by safety filter`, as its prompting guide warns.
+  plain prompt into one. For a plain prompt, and at 1024x1024 for a JSON
+  caption of a sentence or two, the published model draws a gray picture that
+  says `Image blocked by safety filter`; the same sparse captions gave
+  pictures at 512x512. Its prompting guide describes this picture and its
+  false positives. Whether Ideogram's own pipeline refuses the same captions
+  was not checked.
 - Ideogram's pipeline screens prompts and pictures with moderation services
   and expects whoever serves or redistributes the model to do the same. This
   code has no such filter.
