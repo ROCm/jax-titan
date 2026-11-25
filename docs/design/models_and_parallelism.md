@@ -21,7 +21,7 @@ function its meshes.
 flowchart TD
     CLI["--model=llama3.1-8b"] --> NAMES["MODELS / SOURCES<br/>name → module"]
     NAMES --> TABLE["BUILDERS<br/>module → builder"]
-    PAR["--pipeline_parallel, --tensor_parallel, --fsdp"] -.-> PLAN["parallel.resolve<br/>the Plan: degrees and meshes"]
+    PAR["--pipeline_parallel, --tensor_parallel, --fsdp<br/>--num_stages, --stage_layers"] -.-> PLAN["parallel.resolve<br/>the Plan: degrees, stages and meshes"]
 
     subgraph MOD["Define: the model's module, jax_titan/models/llama.py"]
         CFG["LlamaConfig, CONFIGS<br/>the configuration and its names"]
@@ -520,7 +520,7 @@ A run has four strategies, which TorchTitan and MaxText have under the same name
 | **DP**, data parallelism | each takes a share of the batch | a copy on each | every model |
 | **FSDP**, fully sharded data parallelism | each takes a share of the batch | sharded across them | every model |
 | **TP**, tensor parallelism | a group shares every layer | attention heads, MLP columns and the vocabulary sharded across the group | Llama, and another model once its builder names it (3.5) |
-| **PP**, pipeline parallelism | the groups run the stages, and a microbatch goes from group to group | each stage's on the group that runs it | the JAX-Titan models with stages: Llama, Ideogram 4, Command A+ |
+| **PP**, pipeline parallelism | the groups run the stages, and a microbatch goes from group to group | each stage's on the group that runs it | the JAX-Titan models with stages, Llama, Ideogram 4 and Command A+, and the adapter model `maxdiffusion:ideogram4` (3.5) |
 
 They combine as a product: a pipeline of stages, and inside every stage tensor parallelism and one
 of the two data parallelisms.
@@ -576,7 +576,8 @@ The options of pipeline parallelism:
 | `--stage_layers` | the layers of each stage | an even split |
 | `--schedule` | the order of the microbatches' forward and backward passes, an entry of Shardy's registry | `ZERO_BUBBLE_H1` |
 
-`--parallel`, `--stage_fsdp` and `--stages_per_mesh` go, and `--mpmd_options` stays as it is.
+`--parallel`, `--stage_fsdp` and `--stages_per_mesh` go, and so do `--reduce_grads` and
+`--per_device` until the reduction once per step returns (3.1). `--mpmd_options` stays as it is.
 
 ### 3.3 The plan
 
@@ -616,15 +617,16 @@ def resolve(devices, *, pipeline_parallel=1, tensor_parallel=1, fsdp=True, num_s
 
 - **Made once, before the builder.** `build` resolves the plan from the flags and the devices, and
   gives it to the builder in place of the devices: every builder's `devices` (1.2) becomes `plan`.
-- **A builder makes no mesh, reads no flag of parallelism and chooses no layout function.** It
+- **A builder reads no flag of parallelism, chooses no layout function and, but for MaxText's
+  below, makes no mesh.** It
   gives the model `plan.num_stages`, `plan.stage_layers` and `plan.constrain`, and gives the plan
   to the one entry of `trainer/layout.py`, `make_layout`, which is `spmd_layout` without a pipeline
   and `mpmd_layout` with one. The schedule and Shardy's options stay flags, which `mpmd_layout`
   reads.
 - **An adapter model** takes DP and FSDP alone, with the one exception of 3.5. MaxText's and
   MaxDiffusion's initialize their parameters on their shardings, so their builders give them
-  `plan.fsdp` and a mesh: the plan's, or for MaxText a mesh of the plan's devices under MaxText's
-  axis names, the one mesh that a builder makes.
+  `plan.fsdp` and a mesh: the plan's, or for MaxText a mesh of the same devices under MaxText's
+  axis names, which its builder makes.
 - **What divides is checked once:** `resolve` refuses GPUs and stages that do not divide into the
   groups, and `build` a batch that does not divide across `plan.data_parallel` GPUs.
 - **The plan is no part of a model's configuration** (1.4). A run records its degrees beside the
