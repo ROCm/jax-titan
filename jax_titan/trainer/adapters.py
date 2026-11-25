@@ -38,9 +38,9 @@ The layouts here take a staged model, any object with `init(seed)` and
 `abstract(seed)`, the parameters of each stage and their shapes, and
 `stage_fns()`, one function per stage, the last of which returns the loss.
 `--init_from` needs its `load(path)`, `--parallel=fsdp` its
-`logical_axes(path, leaf)` and `--save_params` its `merge(stage_params)`. A
-model with `decays(path, leaf)` says itself which parameters take weight
-decay; the builders get `make_optimizer(decays)` for that.
+`logical_axes(path, leaf)` and `--save_params` its `merge(stage_params)`. Its
+`decays(path, leaf)` says which of its parameters take weight decay; a builder
+gives it to `make_optimizer`.
 
 A model may train only part of its parameters. Its stage parameters are then
 nested dicts, and `is_frozen(path)` tells, for the tuple of dict keys that
@@ -428,7 +428,7 @@ def _routed_attention():
   return ops.attention if routed else None
 
 
-def _maxtext(args, name, devices, optimizer):
+def _maxtext(args, name, devices, make_optimizer):
   from jax_titan.models.adapters import maxtext as mt  # pylint: disable=g-import-not-at-top
 
   _one_stage(args, ops=True)
@@ -441,7 +441,8 @@ def _maxtext(args, name, devices, optimizer):
   mesh = mt.mesh(cfg, devices)
   model = mt.WholeModel(cfg, mesh, attention=_routed_attention(), fsdp=args.parallel == "fsdp")
   tokens, split_batch = _token_batches(args)
-  layout = _spmd_layout(args, mesh, model, optimizer, tokens, tokens, split_batch)
+  layout = _spmd_layout(args, mesh, model, make_optimizer(model.decays), tokens, tokens,
+                        split_batch)
   tokens_per_step = args.microbatches * args.microbatch_size * args.seq_len
   work = Workload(
       num_params=_num_params(model.abstract(args.seed)),
@@ -538,7 +539,7 @@ def _diffusers(args, name, devices, make_optimizer):
   return layout, work
 
 
-def _maxdiffusion(args, flavor, devices, optimizer):
+def _maxdiffusion(args, flavor, devices, make_optimizer):
   import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
   from jax_titan.data import diffusion  # pylint: disable=g-import-not-at-top
   from jax_titan.models.adapters import maxdiffusion as md  # pylint: disable=g-import-not-at-top
@@ -572,7 +573,8 @@ def _maxdiffusion(args, flavor, devices, optimizer):
         pooled_projection_dim=flux.pooled_projection_dim, guidance_embeds=flux.guidance_embeds)
     flops = samples * md.flux_flops_per_sample(flux, batches.tokens - text_tokens, text_tokens)
   inputs, targets = _batch_specs(batches)
-  layout = _spmd_layout(args, mesh, model, optimizer, inputs, targets, lambda batch: batch)
+  layout = _spmd_layout(args, mesh, model, make_optimizer(model.decays), inputs, targets,
+                        lambda batch: batch)
   work = Workload(
       num_params=_num_params(model.abstract(args.seed)),
       tokens_per_step=samples * batches.tokens,
@@ -582,7 +584,7 @@ def _maxdiffusion(args, flavor, devices, optimizer):
   return layout, work
 
 
-def _flux(args, devices, optimizer):
+def _flux(args, devices, make_optimizer):
   """JAX-Titan's FLUX.1 on the batches of `_flux_batches`. Besides config
   fields, `--model_overrides` takes `dtype`."""
   import jax  # pylint: disable=g-import-not-at-top
@@ -606,7 +608,8 @@ def _flux(args, devices, optimizer):
       args, in_channels=cfg.in_channels, joint_attention_dim=cfg.joint_attention_dim,
       pooled_projection_dim=cfg.pooled_projection_dim, guidance_embeds=cfg.guidance_embeds)
   inputs, targets = _batch_specs(batches)
-  layout = _spmd_layout(args, mesh, model, optimizer, inputs, targets, lambda batch: batch)
+  layout = _spmd_layout(args, mesh, model, make_optimizer(model.decays), inputs, targets,
+                        lambda batch: batch)
   samples = args.microbatches * args.microbatch_size
   work = Workload(
       num_params=_num_params(model.abstract(args.seed)),
@@ -617,7 +620,7 @@ def _flux(args, devices, optimizer):
   return layout, work
 
 
-def _llama(args, devices, optimizer):
+def _llama(args, devices, make_optimizer):
   """JAX-Titan's Llama on token windows. Besides config fields,
   `--model_overrides` takes `dtype`."""
   import jax  # pylint: disable=g-import-not-at-top
@@ -638,7 +641,7 @@ def _llama(args, devices, optimizer):
   model = llama.Model(cfg, dtype=dtype, remat=args.remat, constrain=constrain)
   tokens, _ = _token_batches(args)
   # One microbatch of any size: a validation batch need not have the step's.
-  layout = _spmd_layout(args, mesh, model, optimizer, tokens, tokens,
+  layout = _spmd_layout(args, mesh, model, make_optimizer(model.decays), tokens, tokens,
                         lambda batch: (batch[None, :, :-1], batch[None, :, 1:]))
   seq = args.seq_len
   tokens_per_step = args.microbatches * args.microbatch_size * seq
@@ -653,7 +656,7 @@ def _llama(args, devices, optimizer):
   return layout, work
 
 
-def _ideogram(args, devices, optimizer, own: bool):
+def _ideogram(args, devices, make_optimizer, own: bool):
   """Ideogram 4, JAX-Titan's own (`own`) or from MaxDiffusion's Ideogram branch.
 
   Besides config fields, `--model_overrides` takes `dtype` and, for JAX-Titan's
@@ -758,6 +761,7 @@ def _ideogram(args, devices, optimizer, own: bool):
     x = {"img": img, "txt": text, "timestep": t, **batch_ids}
     return x, target
 
+  optimizer = make_optimizer(model.decays)
   if args.parallel == "mpmd":
     layout = _mpmd_layout(args, _topology(args, devices, make_mesh), model, optimizer,
                           inputs, targets, lambda batch: batch)
@@ -775,7 +779,7 @@ def _ideogram(args, devices, optimizer, own: bool):
   return layout, work
 
 
-def _command_a(args, devices, optimizer):
+def _command_a(args, devices, make_optimizer):
   """Command A+ on token windows, or on a cache of conversations.
 
   Besides config fields, `--model_overrides` takes `dtype`, `image_tiles` and
@@ -880,6 +884,7 @@ def _command_a(args, devices, optimizer):
       x = {"tokens": window[..., :-1], "pixels": rng.standard_normal(pixel_shape, np.float32)}
       return x, np.where(window == cfg.image_token_id, -1, window)[..., 1:]
 
+  optimizer = make_optimizer(model.decays)
   if args.parallel == "mpmd":
     layout = _mpmd_layout(args, _topology(args, devices, make_mesh), model, optimizer,
                           inputs, tokens, split_batch)
@@ -902,9 +907,8 @@ def _command_a(args, devices, optimizer):
 def build(args, devices, make_optimizer) -> tuple[Layout, Workload]:
   """The layout and workload of `--model=<provider>:<name>`, or of one of `MODELS`.
 
-  `make_optimizer(decays=None)` gives the optimizer; `decays(path, leaf)` says
-  which parameters take weight decay, by default all but JAX-Titan's,
-  MaxText's and MaxDiffusion's norms.
+  `make_optimizer(decays)` gives the optimizer for a model's `decays(path,
+  leaf)`, which says which parameters take weight decay.
   """
   provider, _, name = args.model.partition(":")
   own = args.model in MODELS
@@ -931,17 +935,16 @@ def build(args, devices, make_optimizer) -> tuple[Layout, Workload]:
     return _transformers(args, name, devices, make_optimizer)
   if provider == "diffusers":
     return _diffusers(args, name, devices, make_optimizer)
-  optimizer = make_optimizer()
   if provider == "maxtext":
-    return _maxtext(args, name, devices, optimizer)
+    return _maxtext(args, name, devices, make_optimizer)
   if ideogram:
-    return _ideogram(args, devices, optimizer, own)
+    return _ideogram(args, devices, make_optimizer, own)
   if args.model == "command-a-plus":
-    return _command_a(args, devices, optimizer)
+    return _command_a(args, devices, make_optimizer)
   if args.model in FLUX:
-    return _flux(args, devices, optimizer)
+    return _flux(args, devices, make_optimizer)
   if args.model in LLAMA:
-    return _llama(args, devices, optimizer)
+    return _llama(args, devices, make_optimizer)
   if provider == "maxdiffusion":
-    return _maxdiffusion(args, name, devices, optimizer)
+    return _maxdiffusion(args, name, devices, make_optimizer)
   raise ValueError(f"unknown model provider {provider!r}; known: {', '.join(PROVIDERS)}")

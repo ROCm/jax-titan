@@ -146,6 +146,14 @@ def logical_axes(path: tuple, leaf) -> tuple | None:
   return axes if len(axes) == getattr(leaf, "ndim", -1) else None
 
 
+def decays(path: tuple, leaf) -> bool:
+  """Whether a parameter takes weight decay: every one but the weights of the
+  norms and, in the vision tower, their biases."""
+  del leaf
+  return path[-1].key not in ("norm", "final_norm", "norm1", "norm1_bias", "norm2", "norm2_bias",
+                              "final_norm_bias")
+
+
 def init_params(cfg: CommandAConfig, key: jax.Array, images: bool = True) -> dict:
   """Random fp32 parameters, layers and experts stacked; with `images`, also
   those of the vision tower and the projector.
@@ -777,6 +785,7 @@ class Model:
   """
 
   logical_axes = staticmethod(logical_axes)
+  decays = staticmethod(decays)
 
   def __init__(self, config: CommandAConfig, *, num_stages: int = 1,
                layers: Sequence[int] | None = None, dtype=jnp.bfloat16, remat: bool = True,

@@ -326,6 +326,14 @@ class WholeModel:
     # MaxText's Qwen3-Next names fewer axes than some of its parameters have.
     return axes if axes is not None and len(axes) == len(leaf.shape) else None
 
+  @staticmethod
+  def decays(path, leaf) -> bool:
+    """Whether a parameter takes weight decay: every one but a norm's weight,
+    which MaxText names `scale`, and what its modules `q_norm` and `k_norm`
+    hold, a bias among it."""
+    del leaf
+    return not any(getattr(k, "key", None) in ("scale", "q_norm", "k_norm") for k in path)
+
   def flops_per_token(self) -> float:
     """Training FLOPs per token as MaxText counts them, for sequences of the
     config's `max_target_length`."""

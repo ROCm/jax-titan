@@ -149,8 +149,8 @@ def test_every_parameter_is_sharded_and_only_norms_do_not_decay():
       assert "data" in spec, (name, path)
       if path[0].key in ("double", "single"):
         assert spec[0] is None, (name, path)
-    kept = {path[-1].key for path, decays in
-            jax.tree_util.tree_flatten_with_path(train._decay_mask(params))[0] if not decays}
+    kept = {path[-1].key for path, leaf in jax.tree_util.tree_flatten_with_path(params)[0]
+            if not flux.decays(path, leaf)}
     assert kept == {"q_norm", "k_norm"}, name
   # The parameter count of the published FLUX.1-dev, 11.90B.
   dev = jax.eval_shape(lambda: flux.init_params(flux.FLAVORS["flux-dev"], jax.random.key(0)))

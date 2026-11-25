@@ -222,8 +222,8 @@ def test_every_parameter_is_sharded_and_only_norms_do_not_decay():
     assert ideogram.logical_axes(path, leaf) is not None, path
   for path, spec in jax.tree_util.tree_flatten_with_path(specs)[0]:
     assert "data" in spec, path
-  kept = {path[-1].key for path, decays in
-          jax.tree_util.tree_flatten_with_path(train._decay_mask(params))[0] if not decays}
+  kept = {path[-1].key for path, leaf in jax.tree_util.tree_flatten_with_path(params)[0]
+          if not ideogram.decays(path, leaf)}
   assert kept == {"attn_norm", "q_norm", "k_norm", "attn_out_norm", "mlp_norm", "mlp_out_norm",
                   "text_norm"}
 

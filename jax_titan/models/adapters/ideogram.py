@@ -249,6 +249,13 @@ class Model:
     del path
     return (None,) * len(leaf.shape)
 
+  @staticmethod
+  def decays(path, leaf) -> bool:
+    """Whether a parameter takes weight decay: every one but a norm's weight,
+    which the branch names `scale`."""
+    del leaf
+    return not any(getattr(k, "key", None) == "scale" for k in path)
+
   def flops_per_sample(self, image_tokens: int, text_tokens: int) -> float:
     """Training FLOPs per sample: 6 per weight and token, plus attention."""
     cfg = self.config

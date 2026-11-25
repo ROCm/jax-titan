@@ -40,6 +40,23 @@ WHOLE = {
 }
 
 
+@pytest.mark.parametrize("name", ["llama3.1-8b", "qwen3-8b", "deepseek3-tiny"])
+def test_only_norms_do_not_decay(name):
+  import jax  # pylint: disable=g-import-not-at-top
+  from jax_titan.models.adapters import maxtext as mt  # pylint: disable=g-import-not-at-top
+
+  cfg = mt.config(name, **{**SMALL, **WHOLE[name]})
+  model = mt.WholeModel(cfg, mt.mesh(cfg, jax.devices()[:1]))
+  (params,) = model.abstract()
+  exempt = {tuple(k.key for k in path) for path, leaf in
+            jax.tree_util.tree_flatten_with_path(params)[0] if not model.decays(path, leaf)}
+  assert exempt and all(path[-1] == "scale" and path[-2].endswith("norm") for path in exempt)
+  # Other attention layers of MaxText keep a LayerNorm, with its bias, under these names.
+  key = jax.tree_util.DictKey
+  assert not model.decays((key("self_attention"), key("k_norm"), key("bias")), None)
+  assert model.decays((key("self_attention"), key("query"), key("kernel")), None)
+
+
 @pytest.mark.gpu
 @pytest.mark.parametrize("name", sorted(WHOLE))
 def test_whole_model_gives_maxtexts_loss_and_gradient(name):

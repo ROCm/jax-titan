@@ -79,6 +79,13 @@ def logical_axes(path: tuple, leaf) -> tuple | None:
   return tuple(axes)
 
 
+def decays(path: tuple, leaf) -> bool:
+  """Whether a parameter takes weight decay: every one but the weights of the
+  norms of the queries and keys."""
+  del leaf
+  return path[-1].key not in ("q_norm", "k_norm")
+
+
 def init_params(cfg: FluxConfig, key: jax.Array) -> dict:
   """Returns fp32 parameters of the whole model, each kind of block stacked along a
   layer axis.
@@ -228,6 +235,7 @@ class Model:
   """
 
   logical_axes = staticmethod(logical_axes)
+  decays = staticmethod(decays)
 
   def __init__(self, config: FluxConfig, *, dtype=jnp.bfloat16, remat: bool = True,
                constrain: Callable | None = None):

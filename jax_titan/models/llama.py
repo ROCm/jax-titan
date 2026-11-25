@@ -153,6 +153,12 @@ def logical_axes(path: tuple, leaf) -> tuple | None:
   return axes if len(axes) == getattr(leaf, "ndim", -1) else None
 
 
+def decays(path: tuple, leaf) -> bool:
+  """Whether a parameter takes weight decay: every one but the norms' weights."""
+  del leaf
+  return path[-1].key not in ("attn_norm", "mlp_norm", "final_norm")
+
+
 def device_copy_axes(params: dict) -> dict:
   """Axes to stack per-device parameter copies along, one per leaf.
 
@@ -270,6 +276,7 @@ class Model:
   """
 
   logical_axes = staticmethod(logical_axes)
+  decays = staticmethod(decays)
 
   def __init__(self, config: LlamaConfig, *, dtype=jnp.bfloat16, remat: bool = True,
                constrain: Callable | None = None):

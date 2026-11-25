@@ -165,6 +165,13 @@ def logical_axes(path: tuple, leaf) -> tuple | None:
   return axes if len(axes) == getattr(leaf, "ndim", -1) else None
 
 
+def decays(path: tuple, leaf) -> bool:
+  """Whether a parameter takes weight decay: every one but the norms' weights."""
+  del leaf
+  return path[-1].key not in ("attn_norm", "q_norm", "k_norm", "attn_out_norm", "mlp_norm",
+                              "mlp_out_norm", "text_norm")
+
+
 def init_params(cfg: IdeogramConfig, key: jax.Array) -> dict:
   """Returns fp32 parameters of the whole model, the blocks stacked along a layer axis.
 
@@ -450,6 +457,7 @@ class Model:
   """
 
   logical_axes = staticmethod(logical_axes)
+  decays = staticmethod(decays)
 
   def __init__(self, config: IdeogramConfig, *, num_stages: int,
                blocks: Sequence[int] | None = None, dtype=jnp.bfloat16, remat: bool = True,

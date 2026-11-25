@@ -110,6 +110,13 @@ class WholeModel:
       axes[0] = "layers"
     return tuple(axes)
 
+  @staticmethod
+  def decays(path, leaf) -> bool:
+    """Whether a parameter takes weight decay: every one but a norm's weight,
+    which MaxDiffusion names `scale`."""
+    del leaf
+    return not any(getattr(k, "key", None) == "scale" for k in path)
+
 
 def _flux_init(f: FluxTransformer2DModel, seed: int) -> dict:
   """The parameters of `f`, as MaxDiffusion initializes them."""

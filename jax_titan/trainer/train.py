@@ -24,12 +24,6 @@ from jax_titan import paths
 from jax_titan.trainer import adapters
 from jax_titan.trainer.layout import EVAL_STEPS
 
-_NORM_PARAMS = ("attn_norm", "mlp_norm", "final_norm", "attn_out_norm", "mlp_out_norm", "q_norm",
-                "k_norm", "text_norm")
-# Matched against a parameter's own name only: MaxDiffusion's FLUX.1 keeps kernels under a
-# module named `norm`.
-_NORM_LEAVES = ("norm", "norm1", "norm2", "norm1_bias", "norm2_bias", "final_norm_bias")
-
 
 def parse_args(argv=None):
   parser = argparse.ArgumentParser(description=__doc__)
@@ -285,19 +279,6 @@ def parse_args(argv=None):
   return args
 
 
-def _decay_mask(params):
-  """Weight decay for every parameter but the norms' (MaxText's and
-  MaxDiffusion's norms hold their weight as `scale`)."""
-  import jax  # pylint: disable=g-import-not-at-top
-
-  def decays(path, _):
-    keys = [getattr(k, "key", None) for k in path]
-    norm = any(k in _NORM_PARAMS or k == "scale" for k in keys) or keys[-1] in _NORM_LEAVES
-    return not norm
-
-  return jax.tree_util.tree_map_with_path(decays, params)
-
-
 def _mkdir(*parts):
   import pathlib  # pylint: disable=g-import-not-at-top
 
@@ -390,13 +371,12 @@ def main(argv=None, listeners=()):
   lr = schedules.SCHEDULES[args.lr_schedule](args.lr, args.warmup_steps, decay_steps,
                                              args.lr * 0.1)
 
-  def make_optimizer(decays=None):
-    """AdamW; `decays(path, leaf)` says which parameters take weight decay."""
-    mask = _decay_mask if decays is None else (
-        lambda params: jax.tree_util.tree_map_with_path(decays, params))
+  def make_optimizer(decays):
+    """AdamW; `decays(path, leaf)`, the model's, says which parameters take weight decay."""
     # Each step clips by the global gradient norm (--max_grad_norm) before this.
     return optax.adamw(lr, b1=args.adam_b1, b2=args.adam_b2, eps=args.adam_eps,
-                       weight_decay=args.weight_decay, mask=mask)
+                       weight_decay=args.weight_decay,
+                       mask=lambda params: jax.tree_util.tree_map_with_path(decays, params))
 
   mb, num_mb, seq = args.microbatch_size, args.microbatches, args.seq_len
   eval_batch = args.eval_batch_size or num_mb * mb

@@ -257,15 +257,10 @@ def test_every_parameter_is_sharded_and_only_norms_do_not_decay():
   for path, spec in jax.tree_util.tree_flatten_with_path(specs)[0]:
     assert "data" in spec or path[0].key in ("vision", "projector"), path
   assert specs["layers"]["w_gate"] == jax.sharding.PartitionSpec(None, "data")
-  mask = train._decay_mask(params)  # pylint: disable=protected-access
-  kept = {path[-1].key for path, decays in jax.tree_util.tree_flatten_with_path(mask)[0]
-          if not decays}
+  kept = {path[-1].key for path, leaf in jax.tree_util.tree_flatten_with_path(params)[0]
+          if not command_a.decays(path, leaf)}
   assert kept == {"norm", "final_norm", "norm1", "norm1_bias", "norm2", "norm2_bias",
                   "final_norm_bias"}
-  # A kernel under a module that is only named as these norms are, as FLUX.1 has, decays.
-  other = {"blocks": {"norm": {"lin": {"kernel": 0.0, "bias": 0.0}}}, "attn_norm": {"scale": 0.0}}
-  assert train._decay_mask(other) == {  # pylint: disable=protected-access
-      "blocks": {"norm": {"lin": {"kernel": True, "bias": True}}}, "attn_norm": {"scale": False}}
 
 
 def test_trains_as_one_stage_and_with_tiles_on_synthetic_batches_only():
