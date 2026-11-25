@@ -9,58 +9,19 @@ parallel.
   `python -m jax_titan.trainer.train --help` has the flags of today, and
   [../pipelines.md](../pipelines.md) the schedules and the measurements.
 
-## From a model's definition to the trainer
+## Overview
 
-A model is defined in its module, found through two tables, built by its builder, and given to a
-layout function of the trainer. The example is Llama; an adapter model goes the same way through
-`SOURCES`. The dashed part is the proposal of section 3: the flags of parallelism come to a
-`Parallelism`, which the builder takes in place of `devices`; it gives the model its stages and the
-layout function its meshes.
+A run names a model and the parallelism it asks for. The model says what can be made parallel, and
+the `Parallelism` what the run asks for. The trainer puts the two together in a `Layout`: the state
+as it is placed on the GPUs, and the function that runs one training step. The dashed box is the
+proposal of section 3.
 
-```mermaid
-flowchart TD
-    CLI["--model=llama3.1-8b"] --> NAMES["MODELS / SOURCES<br/>name → module"]
-    NAMES --> TABLE["BUILDERS<br/>module → builder"]
-    PAR["--pipeline_parallel, --tensor_parallel, --fsdp<br/>--num_stages, --stage_layers"] -.-> PARALLELISM["parallel.resolve<br/>the Parallelism: degrees, stages and meshes"]
+<p align="center">
+  <img src="../images/models_and_parallelism.png" width="760" alt="Overview of the design. The JAX-Titan trainer takes a model's name and the flags of parallelism. The model, a JAX-Titan model or an adapter model behind one contract of parameters, stage functions and logical axes, says what can be made parallel. The Parallelism, which is proposed, says what the run asks for: DP, FSDP, TP and PP as degrees, stages and meshes. The two meet in the placed state and the training step, the Layout of the code. The step is one program of JAX JIT or Shardy MPMD, which XLA, IFRT and ROCm run.">
+</p>
 
-    subgraph MOD["Define: the model's module, jax_titan/models/llama.py"]
-        CFG["LlamaConfig, CONFIGS<br/>the configuration and its names"]
-        FN["init_stage_params, stage_forward<br/>parameters and forward"]
-        CLS["class Model<br/>init, abstract, stage_fns, logical_axes, decays"]
-        FN --> CLS
-    end
-
-    subgraph BLD["Build: the builder _llama(args, devices, make_optimizer), trainer/builders.py"]
-        RES["config.resolve<br/>with --init_from and --model_overrides"]
-        OBJ["llama.Model(config, ...)<br/>the model object"]
-        OPT["make_optimizer(model.decays)"]
-        WORK["Workload"]
-        RES --> OBJ --> OPT
-    end
-
-    subgraph TRN["Run: the trainer, trainer/layout.py and trainer/train.py"]
-        LAYFN["spmd_layout or mpmd_layout<br/>reads the model through the contract"]
-        LAY["Layout"]
-        LOOP["the loop<br/>init or resume, compile, step"]
-        LAYFN --> LAY --> LOOP
-    end
-
-    TABLE --> RES
-    CFG --> RES
-    CLS --> OBJ
-    OBJ -->|"the model enters the trainer"| LAYFN
-    OPT --> LAYFN
-    WORK --> LOOP
-    PARALLELISM -.->|"the stages, the constraint"| OBJ
-    PARALLELISM -.->|"the meshes"| LAYFN
-
-    classDef proposed stroke-dasharray: 5 5
-    class PAR,PARALLELISM proposed
-```
-
-The tables are in 1.2 and 1.5, the builder in 1.2, the contract of `class Model` in 1.3, the
-configuration in 1.4 and the `Parallelism` in 3.3. What the trainer does with a `Layout` is as
-today.
+Section 1 has the model and its contract (1.3), section 3 the `Parallelism` (3.3) and the way from
+the flags to the program (3.4).
 
 ## 1. Models
 
