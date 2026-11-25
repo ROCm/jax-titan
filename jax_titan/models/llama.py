@@ -1,6 +1,6 @@
 """Llama 3 decoder with parameters grouped by pipeline stage.
 
-Architecture and flavors follow MaxText's `decoder_block: llama2` and its
+Architecture and configurations follow MaxText's `decoder_block: llama2` and its
 `configs/models/llama3*.yml`: pre-norm RMSNorm, RoPE, grouped-query attention
 and a SwiGLU MLP.
 """
@@ -52,7 +52,7 @@ class LlamaConfig:
     return 6 * non_embedding + attn
 
 
-FLAVORS = {
+CONFIGS = {
     "llama3.1-8b": LlamaConfig(
         vocab_size=128256, emb_dim=4096, num_layers=32, num_query_heads=32,
         num_kv_heads=8, head_dim=128, mlp_dim=14336,

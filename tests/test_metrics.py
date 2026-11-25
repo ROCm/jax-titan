@@ -111,7 +111,7 @@ def test_flops_model_matches_the_trainer_and_balances_stages():
   from jax_titan.models import llama  # pylint: disable=g-import-not-at-top
   from jax_titan.observability import flops  # pylint: disable=g-import-not-at-top
 
-  cfg = llama.FLAVORS["llama3.1-8b"]
+  cfg = llama.CONFIGS["llama3.1-8b"]
   r = flops.report("llama3.1-8b", num_stages=2, seq_len=2048)
   assert r["model_flops_per_token"] == pytest.approx(cfg.flops_per_token(2048), rel=1e-4)
   layer = sum(flops.layer_forward(flops.Dims.of(cfg), 2048).values())

@@ -31,7 +31,7 @@ CONFIG = {
 }
 FLAGS = [
     "--platform=cpu", "--model=ideogram4", "--resolution=64", "--text_tokens=8",
-    "--model_overrides=" + json.dumps(CONFIG | {"dtype": "float32"}), "--microbatches=4",
+    "--model_overrides=" + json.dumps(CONFIG), "--dtype=float32", "--microbatches=4",
     "--microbatch_size=4", "--steps=4", "--warmup_steps=1",
 ]
 
@@ -360,7 +360,7 @@ def test_init_from_starts_from_given_params(dp_reference, tmp_path):
   # Published weights bring their config, so the overrides need not repeat it.
   _write_published(tmp_path / "published", ideogram.init_params(cfg, jax.random.key(0)))
   published = _run(tmp_path / "published.jsonl", *flags, f"--init_from={tmp_path / 'published'}",
-                   "--model_overrides=" + json.dumps({"dtype": "float32"}))
+                   "--model_overrides=")
   assert published[0]["loss"] == pytest.approx(reference[0]["loss"], rel=1e-6)
 
 
@@ -392,7 +392,7 @@ def toy(tmp_path_factory):
 def _cache_flags(toy):
   # The published weights bring the config, and the cache its text length.
   return [f"--data={toy / 'cache'}", f"--init_from={toy / 'checkpoint/transformer'}",
-          "--model_overrides=" + json.dumps({"dtype": "float32"})]
+          "--model_overrides="]
 
 
 def test_cache_holds_image_tokens_and_text_features(toy):

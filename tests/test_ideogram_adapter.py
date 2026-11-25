@@ -10,6 +10,7 @@ import sys
 
 import pytest
 
+from jax_titan.models.config import AdapterConfig
 from jax_titan.observability import records
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -20,7 +21,7 @@ CONFIG = {
 }
 FLAGS = [
     "--platform=cpu", "--model=maxdiffusion:ideogram4", "--resolution=64", "--text_tokens=8",
-    "--model_overrides=" + json.dumps(CONFIG | {"dtype": "float32"}), "--microbatches=4",
+    "--model_overrides=" + json.dumps(CONFIG), "--dtype=float32", "--microbatches=4",
     "--microbatch_size=4",
     "--steps=4", "--warmup_steps=1",
 ]
@@ -46,7 +47,8 @@ def test_stages_match_the_transformer(num_stages, blocks):
   from jax_titan.models.adapters import ideogram as ig  # pylint: disable=g-import-not-at-top
 
   cfg = ig.Ideogram4Config(**CONFIG)
-  model = ig.AdapterModel(cfg, num_stages=num_stages, blocks=blocks, dtype=jnp.float32)
+  model = ig.AdapterModel(AdapterConfig("maxdiffusion", "ideogram4"), cfg,
+                          num_stages=num_stages, blocks=blocks, dtype=jnp.float32)
   transformer = ig.Ideogram4Transformer(nnx.Rngs(0), cfg, dtype=jnp.float32)
   stage_params = model.split(nnx.state(transformer, nnx.Param).to_pure_dict())
   for a, b in zip(jax.tree.leaves(stage_params), jax.tree.leaves(model.init(0))):
@@ -87,7 +89,8 @@ def _models(num_stages=1, blocks=None):
   from jax_titan.models.adapters import ideogram as ig  # pylint: disable=g-import-not-at-top
 
   cfg = ig.Ideogram4Config(**CONFIG)
-  adapter = ig.AdapterModel(cfg, num_stages=num_stages, blocks=blocks, dtype=jnp.float32)
+  adapter = ig.AdapterModel(AdapterConfig("maxdiffusion", "ideogram4"), cfg,
+                            num_stages=num_stages, blocks=blocks, dtype=jnp.float32)
   own = ideogram.Model(
       ideogram.IdeogramConfig(
           in_channels=cfg.in_channels, num_layers=cfg.num_layers,
@@ -144,7 +147,7 @@ def test_own_model_matches(num_stages, blocks):
   from jax_titan.models.adapters import ideogram as ig  # pylint: disable=g-import-not-at-top
 
   adapter, own, params, own_params = _models(num_stages, blocks)
-  x, target = _batch(adapter.config)
+  x, target = _batch(adapter.cfg)
 
   def boundaries(model, stage_params):
     out, h = [], x
@@ -179,7 +182,7 @@ def test_train_step_matches_the_trainer():
   from maxdiffusion.trainers import ideogram_trainer as trainer  # pylint: disable=g-import-not-at-top
 
   adapter, own, params, own_params = _models()
-  cfg = adapter.config
+  cfg = adapter.cfg
   x, latents = _batch(cfg)
   text_tokens, image_tokens = x["txt"].shape[1], x["img"].shape[1]
   side = int(image_tokens ** 0.5)
@@ -276,10 +279,9 @@ def test_own_model_trains_like_the_adapter(dp_reference, tmp_path):
   _, own, _, own_params = _models()
   checkpoint.save_params(tmp_path / "init", own_params[0])
   # The branch's training timesteps, not the defaults of JAX-Titan's model.
-  overrides = dataclasses.asdict(own.config) | {
-      "dtype": "float32", "timestep_mean": 0.5, "timestep_std": 1.0}
   trained = _run(tmp_path / "own.jsonl", "--parallel=dp", "--model=ideogram4",
-                 "--model_overrides=" + json.dumps(overrides), f"--init_from={tmp_path / 'init'}")
+                 "--model_overrides=" + json.dumps(dataclasses.asdict(own.config)),
+                 "--timestep_mean=0.5", "--timestep_std=1.0", f"--init_from={tmp_path / 'init'}")
   for step in range(4):
     assert trained[step]["loss"] == pytest.approx(dp_reference[step]["loss"], rel=1e-5), step
     assert trained[step]["grad_norm"] == pytest.approx(

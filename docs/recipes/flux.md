@@ -22,7 +22,7 @@ python -m jax_titan.observability.summarize runs/flux-dev
 
 - **Model:** `flux-dev` has the published FLUX.1-dev's sizes and guidance
   embedding, 11.90B parameters, and `flux-schnell` FLUX.1-schnell's, 11.89B.
-  `--model_overrides` takes config fields and `"dtype"`.
+  `--model_overrides` takes config fields, and `--dtype` sets the compute dtype.
 - **Layout:** FSDP over the visible GPUs in one `jax.jit` program, no
   pipeline. `--parallel=dp` replicates the state instead.
 - **Batch:** 8 samples of 512 x 512 pixels per step, each 1,024 image tokens
@@ -79,7 +79,7 @@ pixels a step, with `--lr=1e-5`: over 10 steps the losses differ by at most
 1.2e-7 of their value and the gradient norms by 1.1e-7.
 
 `tests/test_flux.py` also checks, at a small size, FSDP against data
-parallelism for both flavors, a resumed run against the uninterrupted one and
+parallelism for both configurations, a resumed run against the uninterrupted one and
 the initialization, and at full size that FLUX.1-dev has the 11,901,408,320
 parameters of diffusers' model and that FSDP shards every parameter, never
 along the block axis.

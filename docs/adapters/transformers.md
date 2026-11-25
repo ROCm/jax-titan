@@ -60,7 +60,7 @@ python -m jax_titan.trainer.train --model=transformers:$MODELS/qwen3-8b \
 ```
 
 From the published weights in that directory, add `--init_from=$MODELS/qwen3-8b`.
-`--model_overrides` takes config fields as JSON, and `"dtype"` for the compute
+`--model_overrides` takes config fields as JSON, and `--dtype` sets the compute
 dtype:
 
 ```bash

@@ -38,10 +38,9 @@ FLAGS = [
     "--platform=cpu", "--model=command-a-plus", "--num_stages=1", "--data=synthetic",
     "--seq_len=16", "--microbatches=2", "--microbatch_size=8", "--steps=4", "--warmup_steps=1",
 ]
-SMALL = ["--model_overrides=" + json.dumps(CONFIG | {"dtype": "float32"})]
-FROZEN = ["--model_overrides=" + json.dumps(
-    CONFIG | {"dtype": "float32", "freeze": ["experts", "embed"]})]
-IMAGES = ["--model_overrides=" + json.dumps(CONFIG | {"dtype": "float32", "image_tiles": 2})]
+SMALL = ["--model_overrides=" + json.dumps(CONFIG), "--dtype=float32"]
+FROZEN = [*SMALL, "--freeze=experts,embed"]
+IMAGES = [*SMALL, "--image_tiles=2"]
 
 
 def _run(log, *flags):
@@ -75,7 +74,7 @@ def test_starts_from_a_published_checkpoint_and_saves_what_generation_reads(tmp_
   toy, saved = tmp_path / "checkpoint", tmp_path / "saved"
   params = command_a_checkpoint.write(toy)
   cfg = command_a_checkpoint.CONFIG
-  flags = ["--model_overrides=" + json.dumps({"dtype": "float32"}), "--parallel=fsdp",
+  flags = ["--dtype=float32", "--parallel=fsdp",
            f"--init_from={toy}", "--eval_every=4", "--eval_batches=1"]
   log = tmp_path / "trained.jsonl"
   trained = _run(log, *flags, f"--save_params={saved}")
@@ -89,8 +88,8 @@ def test_starts_from_a_published_checkpoint_and_saves_what_generation_reads(tmp_
 
   # --save_params wrote the language model after the last step: a run from it, which
   # has no config.json to read, validates alike.
-  fields = json.dumps(dataclasses.asdict(cfg) | {"dtype": "float32"})
-  _run(tmp_path / "again.jsonl", f"--model_overrides={fields}", "--parallel=dp",
+  fields = json.dumps(dataclasses.asdict(cfg))
+  _run(tmp_path / "again.jsonl", f"--model_overrides={fields}", "--dtype=float32", "--parallel=dp",
        f"--init_from={saved}", "--steps=1", "--lr=0", "--eval_every=1", "--eval_batches=1")
   assert _validation(tmp_path / "again.jsonl") == pytest.approx(_validation(log), rel=1e-5)
 
@@ -170,8 +169,8 @@ def test_fine_tunes_on_a_cache_of_conversations(tmp_path, capsys):
       cache.targets[0], [-1] * 5 + ids("c", "<|END_OF_TURN_TOKEN|>") + [-1] * 2)
 
   log, saved = tmp_path / "trained.jsonl", tmp_path / "saved"
-  overrides = json.dumps({"dtype": "float32", "freeze": ["experts", "embed"]})
-  flags = [f"--model_overrides={overrides}", f"--init_from={toy}", f"--data={tmp_path / 'cache'}",
+  flags = ["--dtype=float32", "--freeze=experts,embed", f"--init_from={toy}",
+           f"--data={tmp_path / 'cache'}",
            "--parallel=mpmd", "--num_stages=2", "--steps=40", "--lr=3e-3", "--eval_every=20",
            "--eval_batches=1"]
   # Five conversations to train on, and the last one held out for validation.
@@ -225,8 +224,7 @@ def test_resume_is_exact(layout, tmp_path):
 def test_a_resumed_run_reads_its_frozen_parameters_where_the_run_did(tmp_path):
   toy = tmp_path / "checkpoint"
   command_a_checkpoint.write(toy)
-  overrides = json.dumps({"dtype": "float32", "freeze": ["experts", "embed"]})
-  flags = [f"--model_overrides={overrides}", "--parallel=mpmd", "--num_stages=2",
+  flags = ["--dtype=float32", "--freeze=experts,embed", "--parallel=mpmd", "--num_stages=2",
            "--checkpoint_every=2"]
   full = _run(tmp_path / "full.jsonl", *flags, f"--init_from={toy}",
               f"--checkpoint_dir={tmp_path / 'full'}")
@@ -234,9 +232,8 @@ def test_a_resumed_run_reads_its_frozen_parameters_where_the_run_did(tmp_path):
   shutil.copytree(tmp_path / "full" / "2", tmp_path / "resumed" / "2")
   resume = [*flags, f"--checkpoint_dir={tmp_path / 'resumed'}"]
   # The frozen parameters are in no checkpoint: random ones in their place are refused.
-  fields = json.dumps(dataclasses.asdict(command_a_checkpoint.CONFIG)
-                      | {"dtype": "float32", "freeze": ["experts", "embed"]})
-  other = [f"--model_overrides={fields}", *resume[1:]]
+  fields = json.dumps(dataclasses.asdict(command_a_checkpoint.CONFIG))
+  other = [f"--model_overrides={fields}", *resume]
   result = subprocess.run(
       [sys.executable, "-m", "jax_titan.trainer.train", *FLAGS, *other],
       capture_output=True, text=True, check=False, cwd=REPO, env=dict(os.environ))

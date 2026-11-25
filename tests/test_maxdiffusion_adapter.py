@@ -10,6 +10,7 @@ import sys
 import numpy as np
 import pytest
 
+from jax_titan.models.config import AdapterConfig
 from jax_titan.observability import records
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -40,7 +41,7 @@ def test_flux_kernels_decay():
       num_attention_heads=2, joint_attention_dim=32, pooled_projection_dim=16,
       axes_dims_rope=(4, 6, 6), dtype=jnp.float32, weights_dtype=jnp.float32)
   mesh = jax.sharding.Mesh(np.asarray(jax.devices()[:1]).reshape(1, 1), ("data", "tensor"))
-  model = md.whole_flux(flux, mesh)
+  model = md.whole_flux(AdapterConfig("maxdiffusion", "flux-dev"), flux, mesh)
   paths = {tuple(getattr(k, "key", None) for k in path): model.decays(path, leaf)
            for path, leaf in jax.tree_util.tree_flatten_with_path(model.abstract())[0]}
   assert any(path[-3:-1] == ("norm", "lin") for path in paths)
@@ -59,7 +60,7 @@ def test_whole_flux_gives_fluxs_output():
   flux = md.transformer(
       "flux-dev", **{**SMALL_FLUX, "dtype": jnp.float32}, weights_dtype=jnp.float32)
   mesh = jax.sharding.Mesh(np.asarray(jax.devices()[:1]).reshape(1, 1), ("data", "tensor"))
-  whole = md.whole_flux(flux, mesh)
+  whole = md.whole_flux(AdapterConfig("maxdiffusion", "flux-dev"), flux, mesh)
   (params,) = whole.init(0)
   batches = diffusion.flux(
       0, (1, 2), image_side=4, text_tokens=8, in_channels=16, joint_attention_dim=32,
@@ -101,7 +102,7 @@ def test_whole_wan_gives_wanmodels_output():
 
   kwargs = {**SMALL_WAN, "dtype": jnp.float32}
   mesh = jax.sharding.Mesh(np.asarray(jax.devices()[:1]).reshape(1, 1), ("data", "tensor"))
-  whole = md.whole_wan(mesh, **kwargs)
+  whole = md.whole_wan(AdapterConfig("maxdiffusion", "wan2.1-t2v-1.3b"), mesh, **kwargs)
   (params,) = whole.init(0)
   batches = diffusion.wan(0, (1, 2), frames=2, height=4, width=4, patch=(1, 2, 2), text_tokens=8,
                           in_channels=4, text_dim=32)

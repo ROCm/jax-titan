@@ -3,7 +3,7 @@
 A `Model` comes from the model config index (`data/models/model_config_index.json`: public
 Hugging Face config.json fields, by name or repository), a downloaded Hugging Face model
 (`hf:<config.json or its directory>`), a MaxText model (`maxtext:<name>`, from the index
-when it has the name), a JAX-Titan Llama flavor, or explicit dimensions. FLOPs follow
+when it has the name), a JAX-Titan Llama, or explicit dimensions. FLOPs follow
 `jax_titan.observability.flops`: two FLOPs per multiply-add, a training step costs three
 forward passes (a matmul's backward computes the activation and the weight gradient), and
 causal attention counts half of its scores. Attention is grouped-query; multi-head latent
@@ -211,7 +211,7 @@ def from_name(name: str) -> Model:
   """A downloaded model (a path to its config.json or the directory holding it, with
   or without `hf:`), a model in the index (by name or Hugging Face repository),
   `maxtext:<name>` (from the index when it has the name, else from MaxText's config),
-  or a JAX-Titan Llama flavor. A path that exists comes first."""
+  or a JAX-Titan Llama. A path that exists comes first."""
   if name.startswith("hf:"):
     return from_hf_config(name.split(":", 1)[1])
   local = pathlib.Path(name).expanduser()
@@ -225,9 +225,9 @@ def from_name(name: str) -> Model:
     return from_index(key)
   from jax_titan.models import llama  # pylint: disable=g-import-not-at-top
 
-  if name not in llama.FLAVORS:
+  if name not in llama.CONFIGS:
     raise ValueError(
         f"unknown model {name!r}: a path to a downloaded config.json or its directory, one "
         f"of {', '.join(model_index.load())} (or its Hugging Face repository), "
-        f"maxtext:<name>, or a Llama flavor ({', '.join(llama.FLAVORS)})")
-  return from_llama(llama.FLAVORS[name], name)
+        f"maxtext:<name>, or a JAX-Titan Llama ({', '.join(llama.CONFIGS)})")
+  return from_llama(llama.CONFIGS[name], name)

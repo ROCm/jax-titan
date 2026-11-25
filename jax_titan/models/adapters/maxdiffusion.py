@@ -23,9 +23,10 @@ from maxdiffusion.models.flux.transformers.transformer_flux_flax import FluxTran
 
 from jax_titan import parallel
 from jax_titan.models import losses
+from jax_titan.models.config import AdapterConfig
 
 PINNED_COMMIT = "821afc364ac1889c1039112843f4f7a17c1bef7b"
-FLAVORS = {
+FLUX = {
     "flux-dev": {"guidance_embeds": True},
     "flux-schnell": {"guidance_embeds": False},
 }
@@ -42,9 +43,9 @@ _AXIS_RULES = (("batch", "data"), ("activation_batch", "data"), ("conv_batch", "
                ("activation_kv_batch", "data"))
 
 
-def transformer(flavor: str, **overrides) -> FluxTransformer2DModel:
+def transformer(name: str, **overrides) -> FluxTransformer2DModel:
   """MaxDiffusion's FLUX.1 transformer; sizes default to the released model's."""
-  kwargs = {"attention_kernel": "dot_product", **FLAVORS[flavor], **overrides}
+  kwargs = {"attention_kernel": "dot_product", **FLUX[name], **overrides}
   if kwargs["guidance_embeds"] and (
       "project_timesteps" not in CombinedTimestepGuidanceTextProjEmbeddings.__dataclass_fields__):
     raise RuntimeError(
@@ -82,8 +83,9 @@ class AdapterModel:
   with `fsdp` and replicated without.
   """
 
-  def __init__(self, init_full: Callable, apply: Callable, mesh: jax.sharding.Mesh, *,
-               fsdp: bool = False, stacked: Sequence[str] = ()):
+  def __init__(self, config: AdapterConfig, init_full: Callable, apply: Callable,
+               mesh: jax.sharding.Mesh, *, fsdp: bool = False, stacked: Sequence[str] = ()):
+    self.config = config
     self._init_full, self._apply, self._stacked = init_full, apply, tuple(stacked)
     self._mesh, self._fsdp = mesh, fsdp
 
@@ -148,8 +150,8 @@ def flux_flops_per_sample(f: FluxTransformer2DModel, image_tokens: int,
   return 6.0 * (weights + attention)
 
 
-def whole_flux(flux: FluxTransformer2DModel, mesh: jax.sharding.Mesh, *, fsdp: bool = False,
-               attention: Callable | None = None) -> AdapterModel:
+def whole_flux(config: AdapterConfig, flux: FluxTransformer2DModel, mesh: jax.sharding.Mesh, *,
+               fsdp: bool = False, attention: Callable | None = None) -> AdapterModel:
   """FLUX.1 through `FluxTransformer2DModel.__call__`. With `attention`, such
   as `jax_titan.ops.attention`, the blocks' attention runs there instead of in
   MaxDiffusion's attention op."""
@@ -166,10 +168,11 @@ def whole_flux(flux: FluxTransformer2DModel, mesh: jax.sharding.Mesh, *, fsdp: b
       return call()[0]
 
   return AdapterModel(
-      functools.partial(_flux_init, flux), apply, mesh, fsdp=fsdp, stacked=_STACKS)
+      config, functools.partial(_flux_init, flux), apply, mesh, fsdp=fsdp, stacked=_STACKS)
 
 
-def whole_wan(mesh: jax.sharding.Mesh, *, fsdp: bool = False, **kwargs) -> AdapterModel:
+def whole_wan(config: AdapterConfig, mesh: jax.sharding.Mesh, *, fsdp: bool = False,
+              **kwargs) -> AdapterModel:
   """Wan 2.1 text to video through `WanModel.__call__`, a `WanModel(**kwargs)`
   such as one of `WAN`.
 
@@ -193,4 +196,4 @@ def whole_wan(mesh: jax.sharding.Mesh, *, fsdp: bool = False, **kwargs) -> Adapt
                    encoder_hidden_states=x["txt"], deterministic=True)
 
   return AdapterModel(
-      lambda seed: init_full(seed)[0], apply, mesh, fsdp=fsdp, stacked=("blocks",))
+      config, lambda seed: init_full(seed)[0], apply, mesh, fsdp=fsdp, stacked=("blocks",))

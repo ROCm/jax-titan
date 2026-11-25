@@ -28,7 +28,7 @@ CONFIG = {
 }
 FLAGS = [
     "--platform=cpu", "--model=flux-dev", "--resolution=64", "--text_tokens=8",
-    "--model_overrides=" + json.dumps(CONFIG | {"dtype": "float32"}), "--microbatches=2",
+    "--model_overrides=" + json.dumps(CONFIG), "--dtype=float32", "--microbatches=2",
     "--microbatch_size=8", "--steps=4", "--warmup_steps=1",
 ]
 
@@ -142,7 +142,7 @@ def test_matches_diffusers(guidance_embeds):
 
 
 def test_every_parameter_is_sharded_and_only_norms_do_not_decay():
-  for name, cfg in flux.FLAVORS.items():
+  for name, cfg in flux.CONFIGS.items():
     params = jax.eval_shape(lambda c=cfg: flux.init_params(c, jax.random.key(0)))
     specs = parallel.tree_specs(params, flux.logical_axes, {"data": 8, "tensor": 1}, fsdp=True)
     for path, spec in jax.tree_util.tree_flatten_with_path(specs)[0]:
@@ -153,7 +153,7 @@ def test_every_parameter_is_sharded_and_only_norms_do_not_decay():
             if not flux.decays(path, leaf)}
     assert kept == {"q_norm", "k_norm"}, name
   # The parameter count of the published FLUX.1-dev, 11.90B.
-  dev = jax.eval_shape(lambda: flux.init_params(flux.FLAVORS["flux-dev"], jax.random.key(0)))
+  dev = jax.eval_shape(lambda: flux.init_params(flux.CONFIGS["flux-dev"], jax.random.key(0)))
   assert sum(x.size for x in jax.tree.leaves(dev)) == 11_901_408_320
 
 

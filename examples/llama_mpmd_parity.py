@@ -76,7 +76,7 @@ def main(argv=None):
   P = jax.sharding.PartitionSpec  # pylint: disable=invalid-name
   NamedSharding = jax.sharding.NamedSharding  # pylint: disable=invalid-name
 
-  cfg = llama.FLAVORS["llama3-test"]
+  cfg = llama.CONFIGS["llama3-test"]
   num_stages, num_mb, mb, seq = args.num_stages, args.microbatches, 4, 64
   num_meshes = num_stages // args.stages_per_mesh
   topology = jt_mpmd.make_topology(num_meshes, tensor_parallel=args.tensor_parallel)

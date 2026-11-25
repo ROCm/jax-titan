@@ -61,12 +61,12 @@ def test_command_a_frozen_parity():
   overrides = json.dumps({
       "vocab_size": 128, "hidden_size": 32, "num_hidden_layers": 4, "num_attention_heads": 4,
       "num_key_value_heads": 2, "head_dim": 16, "intermediate_size": 32, "num_experts": 8,
-      "num_experts_per_tok": 2, "num_shared_experts": 2, "sliding_window": 8,
-      "dtype": "float32", "freeze": ["experts", "embed"]})
+      "num_experts_per_tok": 2, "num_shared_experts": 2, "sliding_window": 8})
 
   def run(parallel):
     args = train.parse_args([
-        "--model=command-a-plus", f"--model_overrides={overrides}", "--num_stages=2",
+        "--model=command-a-plus", f"--model_overrides={overrides}", "--dtype=float32",
+        "--freeze=experts,embed", "--num_stages=2",
         "--microbatches=2", "--microbatch_size=8", "--seq_len=16", "--data=synthetic",
         "--reduce_grads=microbatch", f"--parallel={parallel}"])
     layout, _ = builders.build(args, jax.devices(), lambda decays=None: optax.sgd(0.1))

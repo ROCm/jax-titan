@@ -2,8 +2,9 @@
 
   python -m jax_titan.trainer.train --model=llama3.1-8b --parallel=fsdp
 
-`--model` is a JAX-Titan Llama flavor, `ideogram4`, `command-a-plus`, FLUX.1
-(`flux-dev`, `flux-schnell`), or a model of another repository; Llama, FLUX.1
+`--model` is a JAX-Titan model, Llama (`llama3.1-8b`, `llama3-test`), `ideogram4`,
+`command-a-plus` or FLUX.1 (`flux-dev`, `flux-schnell`), or a model of another
+repository; Llama, FLUX.1
 and the models of other repositories take `--parallel=dp` or `fsdp`:
 `maxtext:<name>`, `maxdiffusion:<name>`, `transformers:<name>` or
 `diffusers:<name>` (see `jax_titan.trainer.builders` and docs/adapters).
@@ -16,6 +17,7 @@ With `--checkpoint_dir`, training resumes from the latest checkpoint there.
 
 import argparse
 import dataclasses
+import json
 import os
 import socket
 import time
@@ -40,8 +42,36 @@ def parse_args(argv=None):
   )
   parser.add_argument(
       "--model_overrides", default="",
-      help="JSON object of model config overrides for JAX-Titan's models and for the models "
-      "of other repositories, e.g. '{\"base_num_decoder_layers\": 4}'.",
+      help="JSON object of overrides of the model's configuration: fields of a JAX-Titan "
+      "model's configuration, e.g. '{\"num_layers\": 4}', or keys of the configuration of a "
+      "model of another repository, e.g. '{\"base_num_decoder_layers\": 4}'. A key that a "
+      "JAX-Titan model's configuration does not have is refused.",
+  )
+  parser.add_argument(
+      "--dtype", default="",
+      help="The dtype a JAX-Titan model, or a transformers: or diffusers: model, computes "
+      "in; default bfloat16. Parameters and optimizer state are float32. A maxtext: or "
+      "maxdiffusion: model takes the dtype keys of its repository in --model_overrides.",
+  )
+  parser.add_argument(
+      "--freeze", default="",
+      help="command-a-plus: comma-separated groups of parameters that are not trained, of "
+      "experts and embed. The model runs as more than one stage only with its embedding "
+      "frozen.",
+  )
+  parser.add_argument(
+      "--image_tiles", type=int, default=0,
+      help="command-a-plus: image tiles that every sequence of a synthetic batch opens "
+      "with. With them, the vision tower and the projector train with the language model.",
+  )
+  parser.add_argument(
+      "--timestep_mean", type=float, default=None,
+      help="ideogram4: the mean of the logit-normal noise level of the training timesteps, "
+      "before the shift that grows with --resolution; default 0.",
+  )
+  parser.add_argument(
+      "--timestep_std", type=float, default=None,
+      help="ideogram4: the standard deviation of that noise level; default 1.5.",
   )
   parser.add_argument(
       "--ops", default="",
@@ -207,7 +237,7 @@ def parse_args(argv=None):
   )
   parser.add_argument(
       "--synthetic_warmup", type=int, default=0,
-      help="Llama flavors: train this many steps, and validate once, on synthetic tokens "
+      help="Llama: train this many steps, and validate once, on synthetic tokens "
       "before the run starts, so both programs are compiled and warm; the state is then "
       "initialized (or restored) again. The run_start event, where MLPerf's clock starts, "
       "follows it, and the first tokens of a Megatron dataset are read after it.",
@@ -390,9 +420,9 @@ def main(argv=None, listeners=()):
     raise ValueError(f"--eval_samples={eval_count} is not whole batches of {eval_batch}")
   is_llama = models.MODELS.get(args.model) == "llama"
   if (args.eval_samples or args.eval_batch_size) and not is_llama:
-    raise NotImplementedError("--eval_samples and --eval_batch_size are for Llama flavors")
+    raise NotImplementedError("--eval_samples and --eval_batch_size are for Llama")
   if args.synthetic_warmup and not is_llama:
-    raise NotImplementedError("--synthetic_warmup is for Llama flavors")
+    raise NotImplementedError("--synthetic_warmup is for Llama")
   layout, work = builders.build(args, devices, make_optimizer)
   print(
       f"jax {jax.__version__} | {len(devices)} x {devices[0].device_kind} | "
@@ -402,10 +432,13 @@ def main(argv=None, listeners=()):
   if layout.frozen:
     trained = sum(x.size for x in jax.tree.leaves(layout.abstract_state[0]))
     print(f"{trained / 1e9:.2f}B of the parameters are trained, the others are frozen", flush=True)
+  # The model's configuration as a checkpoint holds it, to tell a resumed run's from it.
+  config = json.loads(json.dumps(dataclasses.asdict(layout.config)))
   log.event(
       "layout", structure=layout.structure, num_params=work.num_params,
       tokens_per_step=work.tokens_per_step, flops_per_step=work.flops_per_step,
       hardware_flops_per_step=work.hardware_flops_per_step, placement=layout.placement,
+      config=config,
   )
   if args.run_dir and jax.process_index() == 0:
     from jax_titan.observability import env as env_lib  # pylint: disable=g-import-not-at-top
@@ -438,6 +471,14 @@ def main(argv=None, listeners=()):
           f"checkpoint holds {meta['model']} as {meta['structure']}, not "
           f"{args.model} as {layout.structure}"
       )
+    # A checkpoint written before configurations were recorded has none.
+    saved = meta.get("config", config)
+    if saved != config:
+      differ = sorted(k for k in saved.keys() | config.keys() if saved.get(k) != config.get(k))
+      raise ValueError(
+          f"the checkpoint's run had another configuration of {args.model}, in "
+          + ", ".join(f"{k} ({saved.get(k)!r}, now {config.get(k)!r})" for k in differ)
+          + ": resume with the same --model_overrides and --init_from")
     if layout.frozen and meta.get("frozen_from") != frozen_from:
       raise ValueError(
           f"the checkpoint's run took its frozen parameters from {meta.get('frozen_from')}, "
@@ -533,7 +574,7 @@ def main(argv=None, listeners=()):
 
   def meta(step):
     return {
-        "step": step, "model": args.model, "structure": layout.structure,
+        "step": step, "model": args.model, "structure": layout.structure, "config": config,
         "data": {"seed": args.seed, "step": step}, "ops": selected,
         **({"frozen_from": frozen_from} if layout.frozen else {}),
     }

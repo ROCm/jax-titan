@@ -11,6 +11,7 @@ import sys
 import numpy as np
 import pytest
 
+from jax_titan.models.config import AdapterConfig
 from jax_titan.observability import records
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -46,7 +47,7 @@ def test_only_norms_do_not_decay(name):
   from jax_titan.models.adapters import maxtext as mt  # pylint: disable=g-import-not-at-top
 
   cfg = mt.config(name, **{**SMALL, **WHOLE[name]})
-  model = mt.AdapterModel(cfg, mt.mesh(cfg, jax.devices()[:1]))
+  model = mt.AdapterModel(AdapterConfig("maxtext", name), cfg, mt.mesh(cfg, jax.devices()[:1]))
   (params,) = model.abstract()
   exempt = {tuple(k.key for k in path) for path, leaf in
             jax.tree_util.tree_flatten_with_path(params)[0] if not model.decays(path, leaf)}
@@ -71,7 +72,7 @@ def test_whole_model_gives_maxtexts_loss_and_gradient(name):
 
   cfg = mt.config(name, **{**SMALL, **WHOLE[name]})
   mesh = mt.mesh(cfg, jax.devices()[:1])
-  model = mt.AdapterModel(cfg, mesh)
+  model = mt.AdapterModel(AdapterConfig("maxtext", name), cfg, mesh)
   (params,) = model.init(0)
   with nn.logical_axis_rules(cfg.logical_axis_rules):
     transformer = models.Transformer(cfg, mesh, quant=None, rngs=nnx.Rngs(params=0, dropout=0))
@@ -101,13 +102,14 @@ def test_whole_model_gives_maxtexts_loss_and_gradient(name):
                grads, ref_grads)
   # The same with the model's global causal attention through jax_titan.ops; DeepSeek's
   # latent attention stays in MaxText.
-  (routed,) = mt.AdapterModel(cfg, mesh, attention=ops.attention).stage_fns()
+  reference = AdapterConfig("maxtext", name)
+  (routed,) = mt.AdapterModel(reference, cfg, mesh, attention=ops.attention).stage_fns()
   ops.reset_selections()
   np.testing.assert_allclose(jax.jit(routed)(params, x, t), loss, rtol=1e-5)
   assert any(s.op == "attention" for s in ops.selections()) == (cfg.attention_type == "global")
   if cfg.num_experts > 1:
     unweighted = {**SMALL, **WHOLE[name], "load_balance_loss_weight": 0.0}
-    (plain,) = mt.AdapterModel(mt.config(name, **unweighted), mesh).stage_fns()
+    (plain,) = mt.AdapterModel(reference, mt.config(name, **unweighted), mesh).stage_fns()
     assert float(loss) > float(jax.jit(plain)(params, x, t)) + 1e-4
 
 
@@ -122,7 +124,7 @@ def test_own_llama_gives_the_whole_models_loss_and_gradient(name):
   from jax_titan.models.adapters import maxtext as mt  # pylint: disable=g-import-not-at-top
 
   cfg = mt.config(name, **SMALL)
-  model = mt.AdapterModel(cfg, mt.mesh(cfg, jax.devices()[:1]))
+  model = mt.AdapterModel(AdapterConfig("maxtext", name), cfg, mt.mesh(cfg, jax.devices()[:1]))
   (params,) = model.init(0)
   (theirs,) = model.stage_fns()
   llama_cfg = mt.llama_config(cfg)
@@ -165,7 +167,7 @@ def test_trainer_starts_at_the_whole_models_loss(tmp_path):
   name = "qwen3-30b-a3b"
   losses = _losses(tmp_path, name, "--parallel=dp")
   cfg = mt.config(name, **{**SMALL, **WHOLE[name]})
-  model = mt.AdapterModel(cfg, mt.mesh(cfg, jax.devices()[:1]))
+  model = mt.AdapterModel(AdapterConfig("maxtext", name), cfg, mt.mesh(cfg, jax.devices()[:1]))
   # The trainer's weights and its first synthetic batch, both of seed 0.
   batch = np.random.default_rng((0, 0)).integers(0, cfg.vocab_size, (8, 33), dtype=np.int32)
   (fn,) = model.stage_fns()

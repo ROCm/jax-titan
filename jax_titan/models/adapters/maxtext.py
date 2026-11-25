@@ -35,6 +35,7 @@ from jax_titan import parallel
 from jax_titan import paths
 from jax_titan.models import llama
 from jax_titan.models import losses
+from jax_titan.models.config import AdapterConfig
 
 PINNED_VERSION = "maxtext-v0.2.5"
 
@@ -223,14 +224,15 @@ class AdapterModel:
   causal training attention runs there instead of in MaxText's attention op.
   """
 
-  def __init__(self, cfg, mesh: jax.sharding.Mesh, *, attention: Callable | None = None,
-               fsdp: bool = False):
+  def __init__(self, config: AdapterConfig, cfg, mesh: jax.sharding.Mesh, *,
+               attention: Callable | None = None, fsdp: bool = False):
     beyond = _beyond_the_step(cfg)
     if beyond:
       raise NotImplementedError(
           f"{beyond}: the whole model takes a gradient step of the cross-entropy of the full "
           "logits and the MoE load-balance term, and MaxText's training with these holds more"
       )
+    self.config = config
     self.cfg = cfg
     self.mesh = mesh
     self._attention = attention

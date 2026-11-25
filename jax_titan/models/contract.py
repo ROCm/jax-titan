@@ -1,7 +1,7 @@
 """What the trainer takes a model to be."""
 
 from collections.abc import Callable, Sequence
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 
 @runtime_checkable
@@ -27,6 +27,10 @@ class Model(Protocol):
   with shardings per stage, all of a stage's parameters or its frozen ones
   alone.
   """
+
+  # The model's configuration, a frozen dataclass: the dataclass of a JAX-Titan
+  # model's module, or an `AdapterConfig`.
+  config: Any
 
   def init(self, seed: int) -> tuple:
     """The parameters of each stage, initialized."""

@@ -121,7 +121,7 @@ def test_adamw_matches_torch():
 
 
 def test_llama31_8b_is_the_references():
-  cfg = llama.FLAVORS["llama3.1-8b"]
+  cfg = llama.CONFIGS["llama3.1-8b"]
   # Meta-Llama-3.1-8B's parameters, with separate embedding and output matrices and
   # 128,256 vocabulary rows, as NeMo builds the model from Llama 3.1's tokenizer.
   assert cfg.num_params() == 8_030_261_248

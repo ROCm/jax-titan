@@ -112,6 +112,8 @@ class IdeogramConfig:
     return 6.0 * (weights + attention)
 
 
+CONFIGS = {"ideogram4": IdeogramConfig()}
+
 _LAYER_AXES = {
     "attn_norm": ("embed",),
     "wq": ("embed", "heads"),

@@ -49,7 +49,8 @@ import statistics
 from jax_titan.observability import records as rec
 
 _CONFIG_KEYS = (
-    "model", "model_overrides", "parallel", "num_stages", "schedule", "stage_layers",
+    "model", "model_overrides", "dtype", "freeze", "image_tiles", "timestep_mean",
+    "timestep_std", "parallel", "num_stages", "schedule", "stage_layers",
     "stages_per_mesh", "mpmd_options", "reduce_grads", "per_device", "stage_fsdp",
     "tensor_parallel", "microbatches", "microbatch_size", "seq_len", "resolution", "frames",
     "text_tokens", "ops", "remat", "max_grad_norm", "lr", "warmup_steps", "data",

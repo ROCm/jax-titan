@@ -14,6 +14,7 @@ import diffusers
 import torch
 
 from jax_titan.models import losses
+from jax_titan.models.config import AdapterConfig
 from jax_titan.models.adapters import torch_bridge
 
 PINNED_VERSION = "0.43.0"
@@ -38,7 +39,8 @@ def config(name: str, **overrides) -> dict:
   return {**diffusers.ModelMixin.load_config(name, subfolder=subfolder), **overrides}
 
 
-def denoiser(cfg: dict, *, seed: int, dtype, remat: bool = True) -> torch_bridge.AdapterModel:
+def denoiser(config: AdapterConfig, cfg: dict, *, seed: int, dtype,
+             remat: bool = True) -> torch_bridge.AdapterModel:
   """The denoiser of `cfg` as one stage, with its family's loss: the mean
   squared error of its output to the batch's target.
 
@@ -57,4 +59,4 @@ def denoiser(cfg: dict, *, seed: int, dtype, remat: bool = True) -> torch_bridge
     pred = forward({names[k]: v if k.endswith("_ids") else v.astype(dtype) for k, v in x.items()})
     return losses.mean_squared_error(pred, target)
 
-  return torch_bridge.AdapterModel(module, dtype=dtype, loss=loss)
+  return torch_bridge.AdapterModel(config, module, dtype=dtype, loss=loss)

@@ -109,7 +109,7 @@ XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" timeout -s KILL 1800 python -m jax_titan.t
 # and the embedding frozen, 176-185 GiB in use per GPU.
 ... --model=command-a-plus --parallel=mpmd --num_stages=4 --microbatches=4 \
   --microbatch_size=2 --lr=1e-5 --data=$CACHE --init_from=$CKPT \
-  --model_overrides='{"freeze": ["experts", "embed"]}' --save_params=$OUT ...
+  --freeze=experts,embed --save_params=$OUT ...
 ```
 
 Layout flags: `--schedule`, `--stage_fsdp`, `--tensor_parallel`,
@@ -122,9 +122,9 @@ Layout flags: `--schedule`, `--stage_fsdp`, `--tensor_parallel`,
 and `command-a-plus` support only data parallelism inside stages with
 gradients reduced per microbatch (the default for them); `--stage_layers`
 counts their layers or blocks, and `--model_overrides` takes JSON config
-overrides. `command-a-plus` is one stage, or more with `"freeze": ["embed"]`
-among its overrides. Any other `maxtext:`, `maxdiffusion:`, `transformers:` or
-`diffusers:` model, and `flux-dev` and `flux-schnell`, has no pipeline: it
+overrides. `command-a-plus` is one stage, or more with `--freeze=embed`. Any
+other `maxtext:`, `maxdiffusion:`, `transformers:` or `diffusers:` model,
+and `flux-dev` and `flux-schnell`, has no pipeline: it
 trains with `--parallel=dp` or `fsdp`,
 a language model on token files of its own tokenizer (`--data` and
 `--eval_data` default to Llama 3's).
@@ -162,7 +162,8 @@ a language model on token files of its own tokenizer (`--data` and
   Gate 0 against it: `summarize --gate0 REFERENCE RUN --gate0_steps 10
   --gate0_rtol 2e-3`. With 16,384 tokens per step, bf16 rounding alone moved
   two runs of one layout apart by more than that; compare such layouts in fp32
-  (`--model_overrides='{"dtype": "float32"}'` for `maxtext:` models).
+  (`--dtype=float32`, or `--model_overrides='{"dtype": "float32"}'` for `maxtext:`
+  models).
 - For a published number, run three repeats and report the median and
   spread (`summarize` prints both and a regression threshold), and MFU
   against the calibrated ceiling too (`--ceilings`, from

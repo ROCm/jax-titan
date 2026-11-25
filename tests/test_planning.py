@@ -35,8 +35,8 @@ def _hf(tmp_path, name, config) -> models.Model:
   return models.from_name(f"hf:{path}")
 
 
-def test_llama_flavor_matches_the_trainers_flops():
-  cfg = llama.FLAVORS["llama3.1-8b"]
+def test_llama_matches_the_trainers_flops():
+  cfg = llama.CONFIGS["llama3.1-8b"]
   model = models.from_name("llama3.1-8b")
   assert model.params() == cfg.num_params()
   # The trainer's 6N excludes the norms' parameters, a 3e-5 difference.
@@ -76,7 +76,7 @@ def test_index_resolves_hugging_face_repositories_in_any_case():
 
 
 def test_index_matches_the_trainers_llama():
-  trainer = models.from_llama(llama.FLAVORS["llama3.1-8b"], "llama3.1-8b")
+  trainer = models.from_llama(llama.CONFIGS["llama3.1-8b"], "llama3.1-8b")
   assert dataclasses.replace(models.from_name("llama3.1-8b"), source="") == (
       dataclasses.replace(trainer, source=""))
 

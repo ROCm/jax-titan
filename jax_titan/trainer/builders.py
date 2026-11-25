@@ -7,7 +7,7 @@ module that implements the model (`jax_titan.models`).
 A model of another repository trains as one stage, the repository's model
 called whole, with `--parallel=dp` or `fsdp`:
 `--model=maxtext:<name>` a MaxText model config (e.g. `maxtext:llama3.1-8b`
-or `maxtext:qwen3-8b`) on the token data, `--model=maxdiffusion:<flavor>`
+or `maxtext:qwen3-8b`) on the token data, `--model=maxdiffusion:<name>`
 FLUX.1 (`flux-dev`, `flux-schnell`) or Wan 2.1 (`wan2.1-t2v-1.3b`) on
 synthetic rectified-flow batches, `--model=transformers:<name>` a decoder-only
 causal language model of Hugging Face transformers, a directory with a
@@ -38,12 +38,13 @@ as one stage, and `--model=llama3.1-8b` JAX-Titan's Llama
 parameters and optimizer state.
 """
 
-import dataclasses
 import functools
 import json
 import os
 
 from jax_titan import models
+from jax_titan.models import config
+from jax_titan.models.config import AdapterConfig
 from jax_titan.trainer.layout import EVAL_STEPS
 from jax_titan.trainer.layout import Layout
 from jax_titan.trainer.layout import mpmd_layout
@@ -54,6 +55,20 @@ from jax_titan.trainer.layout import Workload
 
 def _overrides(args) -> dict:
   return json.loads(args.model_overrides) if args.model_overrides else {}
+
+
+def _options(args, *taken):
+  """Refuses the run options of other models: the flags `--dtype`, `--freeze`,
+  `--image_tiles`, `--timestep_mean` and `--timestep_std` but for those `taken`."""
+  for flag in ("dtype", "freeze", "image_tiles", "timestep_mean", "timestep_std"):
+    if flag not in taken and getattr(args, flag) not in ("", 0, None):
+      raise NotImplementedError(f"{args.model} takes no --{flag}")
+
+
+def _dtype(args):
+  import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+
+  return jnp.dtype(args.dtype or "bfloat16")
 
 
 def _stage_layers(args):
@@ -88,7 +103,7 @@ def _needs_own_tokens(args, vocab_size: int):
   """Refuses the default token files, which hold Llama 3's tokens, for another vocabulary."""
   from jax_titan.models import llama  # pylint: disable=g-import-not-at-top
 
-  own_tokens = vocab_size != llama.FLAVORS["llama3.1-8b"].vocab_size
+  own_tokens = vocab_size != llama.CONFIGS["llama3.1-8b"].vocab_size
   held_out = args.eval_every and args.data != "synthetic" and not args.eval_data
   if own_tokens and (not args.data or held_out):
     raise ValueError(
@@ -156,15 +171,17 @@ def _maxtext(args, devices, make_optimizer):
   from jax_titan.models.adapters import maxtext as mt  # pylint: disable=g-import-not-at-top
 
   name = args.model.partition(":")[2]
+  _options(args)
   _one_stage(args, ops=True)
   if not args.remat:
     raise NotImplementedError(
         f"{args.model}: MaxText rematerializes its scanned layers under every remat_policy")
-  cfg = mt.config(
-      name, **{"remat_policy": "full", **_overrides(args), "max_target_length": args.seq_len})
+  overrides = {"remat_policy": "full", **_overrides(args), "max_target_length": args.seq_len}
+  cfg = mt.config(name, **overrides)
   _needs_own_tokens(args, cfg.vocab_size)
   mesh = mt.mesh(cfg, devices)
-  model = mt.AdapterModel(cfg, mesh, attention=_routed_attention(), fsdp=args.parallel == "fsdp")
+  model = mt.AdapterModel(AdapterConfig("maxtext", name, tuple(overrides.items())), cfg, mesh,
+                          attention=_routed_attention(), fsdp=args.parallel == "fsdp")
   tokens, split_batch = _token_batches(args)
   layout = spmd_layout(args, mesh, model, make_optimizer(model.decays), tokens, tokens,
                        split_batch)
@@ -179,13 +196,12 @@ def _maxtext(args, devices, make_optimizer):
 
 
 def _transformers(args, devices, make_optimizer):
-  import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
   from jax_titan.models.adapters import transformers as hf  # pylint: disable=g-import-not-at-top
 
   name = args.model.partition(":")[2]
+  _options(args, "dtype")
   _one_stage(args)
   overrides = _overrides(args)
-  dtype = jnp.dtype(overrides.pop("dtype", "bfloat16"))
   cfg = hf.config(name, **overrides)
   if cfg.model_type not in hf.VERIFIED:
     raise NotImplementedError(
@@ -193,7 +209,8 @@ def _transformers(args, devices, make_optimizer):
         f"compared with PyTorch through torchax: {', '.join(hf.VERIFIED)}")
   vocab_size = hf.vocab_size(cfg)
   _needs_own_tokens(args, vocab_size)
-  model = hf.causal_lm(cfg, seed=args.seed, dtype=dtype, remat=args.remat,
+  model = hf.causal_lm(AdapterConfig("transformers", name, tuple(overrides.items())), cfg,
+                       seed=args.seed, dtype=_dtype(args), remat=args.remat,
                        init_from=args.init_from)
   tokens, split_batch = _token_batches(args)
   layout = spmd_layout(args, _data_mesh(devices), model, make_optimizer(model.decays),
@@ -237,21 +254,21 @@ def _flux_batches(args, *, in_channels, joint_attention_dim, pooled_projection_d
 
 
 def _diffusers(args, devices, make_optimizer):
-  import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
   from jax_titan.models.adapters import diffusers as hfd  # pylint: disable=g-import-not-at-top
 
   name = args.model.partition(":")[2]
+  _options(args, "dtype")
   _no_init_from(args)
   _synthetic_only(args)
   _one_stage(args)
   overrides = {k: tuple(v) if isinstance(v, list) else v for k, v in _overrides(args).items()}
-  dtype = jnp.dtype(overrides.pop("dtype", "bfloat16"))
   cfg = hfd.config(name, **overrides)
   if cfg["_class_name"] not in hfd.FAMILIES:
     raise NotImplementedError(
         f"{args.model} is diffusers' {cfg['_class_name']}, which was not compared with PyTorch "
         f"through torchax: {', '.join(hfd.FAMILIES)}")
-  model = hfd.denoiser(cfg, seed=args.seed, dtype=dtype, remat=args.remat)
+  model = hfd.denoiser(AdapterConfig("diffusers", name, tuple(overrides.items())), cfg,
+                       seed=args.seed, dtype=_dtype(args), remat=args.remat)
   c = model.module.config
   batches, _ = _flux_batches(
       args, in_channels=c.in_channels, joint_attention_dim=c.joint_attention_dim,
@@ -269,30 +286,31 @@ def _diffusers(args, devices, make_optimizer):
 
 
 def _maxdiffusion(args, devices, make_optimizer):
-  flavor = args.model.partition(":")[2]
+  name = args.model.partition(":")[2]
   _no_init_from(args)
-  if flavor == "ideogram4":
+  if name == "ideogram4":
     return _ideogram(args, devices, make_optimizer, adapter=True)
   import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
   from jax_titan.data import diffusion  # pylint: disable=g-import-not-at-top
   from jax_titan.models.adapters import maxdiffusion as md  # pylint: disable=g-import-not-at-top
 
+  _options(args)
   _synthetic_only(args)
   # FLUX.1's attention can run through jax_titan.ops; Wan 2.1's cannot.
-  _one_stage(args, ops=flavor not in md.WAN)
-  kwargs = {
-      "dtype": jnp.bfloat16,
-      "weights_dtype": jnp.float32,
+  _one_stage(args, ops=name not in md.WAN)
+  overrides = {
+      "dtype": "bfloat16",
+      "weights_dtype": "float32",
       "remat_policy": "FULL" if args.remat else "NONE",
       **{k: tuple(v) if isinstance(v, list) else v for k, v in _overrides(args).items()},
   }
-  for k in ("dtype", "weights_dtype"):
-    kwargs[k] = jnp.dtype(kwargs[k])
+  reference = AdapterConfig("maxdiffusion", name, tuple(overrides.items()))
+  kwargs = overrides | {k: jnp.dtype(overrides[k]) for k in ("dtype", "weights_dtype")}
   mesh, fsdp = _data_mesh(devices), args.parallel == "fsdp"
   samples = args.microbatches * args.microbatch_size
-  if flavor in md.WAN:
-    cfg = {**md.WAN[flavor], **kwargs}
-    model = md.whole_wan(mesh, fsdp=fsdp, **cfg)
+  if name in md.WAN:
+    cfg = {**md.WAN[name], **kwargs}
+    model = md.whole_wan(reference, mesh, fsdp=fsdp, **cfg)
     batches = diffusion.wan(
         args.seed, (args.microbatches, args.microbatch_size),
         frames=(args.frames - 1) // 4 + 1, height=args.resolution // 8, width=args.resolution // 8,
@@ -300,8 +318,8 @@ def _maxdiffusion(args, devices, make_optimizer):
         in_channels=cfg["in_channels"], text_dim=cfg["text_dim"])
     flops = None
   else:
-    flux = md.transformer(flavor, **kwargs)
-    model = md.whole_flux(flux, mesh, fsdp=fsdp, attention=_routed_attention())
+    flux = md.transformer(name, **kwargs)
+    model = md.whole_flux(reference, flux, mesh, fsdp=fsdp, attention=_routed_attention())
     batches, text_tokens = _flux_batches(
         args, in_channels=flux.in_channels, joint_attention_dim=flux.joint_attention_dim,
         pooled_projection_dim=flux.pooled_projection_dim, guidance_embeds=flux.guidance_embeds)
@@ -319,20 +337,17 @@ def _maxdiffusion(args, devices, make_optimizer):
 
 
 def _flux(args, devices, make_optimizer):
-  """JAX-Titan's FLUX.1 on the batches of `_flux_batches`. Besides config
-  fields, `--model_overrides` takes `dtype`."""
-  import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+  """JAX-Titan's FLUX.1 on the batches of `_flux_batches`."""
   from jax_titan.models import flux  # pylint: disable=g-import-not-at-top
 
+  _options(args, "dtype")
   _no_init_from(args)
   _synthetic_only(args)
   _one_stage(args, ops=True)
-  overrides = {k: tuple(v) if isinstance(v, list) else v for k, v in _overrides(args).items()}
-  dtype = jnp.dtype(overrides.pop("dtype", "bfloat16"))
-  cfg = dataclasses.replace(flux.FLAVORS[args.model], **overrides)
+  cfg = config.resolve(flux, args.model, overrides=_overrides(args))
   mesh = _data_mesh(devices)
   constrain = _keep_batch_sharded(mesh) if args.parallel == "fsdp" else None
-  model = flux.Model(cfg, dtype=dtype, remat=args.remat, constrain=constrain)
+  model = flux.Model(cfg, dtype=_dtype(args), remat=args.remat, constrain=constrain)
   batches, text_tokens = _flux_batches(
       args, in_channels=cfg.in_channels, joint_attention_dim=cfg.joint_attention_dim,
       pooled_projection_dim=cfg.pooled_projection_dim, guidance_embeds=cfg.guidance_embeds)
@@ -350,20 +365,18 @@ def _flux(args, devices, make_optimizer):
 
 
 def _llama(args, devices, make_optimizer):
-  """JAX-Titan's Llama on token windows. Besides config fields,
-  `--model_overrides` takes `dtype`."""
-  import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+  """JAX-Titan's Llama on token windows."""
   from jax_titan.models import llama  # pylint: disable=g-import-not-at-top
   from jax_titan.observability import flops as flops_lib  # pylint: disable=g-import-not-at-top
 
+  _options(args, "dtype")
   _no_init_from(args)
   _one_stage(args, ops=True)
-  overrides = _overrides(args)
-  dtype = jnp.dtype(overrides.pop("dtype", "bfloat16"))
-  cfg = dataclasses.replace(llama.FLAVORS[args.model], **overrides)
+  cfg = config.resolve(llama, args.model, overrides=_overrides(args))
   _needs_own_tokens(args, cfg.vocab_size)
   mesh = _data_mesh(devices)
-  model = llama.Model(cfg, dtype=dtype, remat=args.remat, constrain=_keep_batch_sharded(mesh))
+  model = llama.Model(cfg, dtype=_dtype(args), remat=args.remat,
+                      constrain=_keep_batch_sharded(mesh))
   tokens, _ = _token_batches(args)
   # One microbatch of any size: a validation batch need not have the step's.
   layout = spmd_layout(args, mesh, model, make_optimizer(model.decays), tokens, tokens,
@@ -385,43 +398,41 @@ def _ideogram(args, devices, make_optimizer, adapter: bool = False):
   """Ideogram 4: JAX-Titan's model or, with `adapter`, the one of MaxDiffusion's
   Ideogram branch (`--model=maxdiffusion:ideogram4`).
 
-  Besides config fields, `--model_overrides` takes `dtype` and, for JAX-Titan's
-  model, `timestep_mean` and `timestep_std` of the training timesteps. That
-  model's config starts from the `config.json` of published weights that
-  `--init_from` names. It also trains on a cache of real samples
-  (`--data`), with a tenth of its images, at least one, held out for
-  validation when `--eval_every` is set, so a run that resumes with that flag
-  changed trains on other images.
+  JAX-Titan's model takes `--timestep_mean` and `--timestep_std` of the
+  training timesteps, and its config starts from the `config.json` of
+  published weights that `--init_from` names. It also trains on a cache of
+  real samples (`--data`), with a tenth of its images, at least one, held out
+  for validation when `--eval_every` is set, so a run that resumes with that
+  flag changed trains on other images.
   """
   import jax  # pylint: disable=g-import-not-at-top
   import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
   import numpy as np  # pylint: disable=g-import-not-at-top
   from jax_titan import mpmd as jt_mpmd  # pylint: disable=g-import-not-at-top
-  from jax_titan.models import ideogram, pretrained  # pylint: disable=g-import-not-at-top
+  from jax_titan.models import ideogram  # pylint: disable=g-import-not-at-top
 
   P = jax.sharding.PartitionSpec  # pylint: disable=invalid-name
 
-  overrides = _overrides(args)
-  dtype = jnp.dtype(overrides.pop("dtype", "bfloat16"))
+  mesh = _data_mesh(devices)
+  constrain = _keep_batch_sharded(mesh) if args.parallel == "fsdp" else None
+  kwargs = dict(num_stages=args.num_stages, blocks=_stage_layers(args), dtype=_dtype(args),
+                remat=args.remat, constrain=constrain)
   schedule = {}
   if adapter:
     from jax_titan.models.adapters import ideogram as ig  # pylint: disable=g-import-not-at-top
 
-    config, model_class = ig.Ideogram4Config, ig.AdapterModel
+    _options(args, "dtype")
+    fields = {k: tuple(v) if isinstance(v, list) else v for k, v in _overrides(args).items()}
+    cfg = ig.Ideogram4Config(**fields)
+    model = ig.AdapterModel(
+        AdapterConfig("maxdiffusion", "ideogram4", tuple(fields.items())), cfg, **kwargs)
   else:
-    ig, config, model_class = ideogram, ideogram.IdeogramConfig, ideogram.Model
-    schedule = {k: overrides.pop(f"timestep_{k}") for k in ("mean", "std")
-                if f"timestep_{k}" in overrides}
-  fields = {k: tuple(v) if isinstance(v, list) else v for k, v in overrides.items()}
-  if not adapter and args.init_from and pretrained.is_safetensors(args.init_from):
-    cfg = dataclasses.replace(ideogram.pretrained_config(args.init_from), **fields)
-  else:
-    cfg = config(**fields)
-
-  mesh = _data_mesh(devices)
-  constrain = _keep_batch_sharded(mesh) if args.parallel == "fsdp" else None
-  model = model_class(cfg, num_stages=args.num_stages, blocks=_stage_layers(args), dtype=dtype,
-                      remat=args.remat, constrain=constrain)
+    ig = ideogram
+    _options(args, "dtype", "timestep_mean", "timestep_std")
+    schedule = {k: getattr(args, f"timestep_{k}") for k in ("mean", "std")
+                if getattr(args, f"timestep_{k}") is not None}
+    cfg = config.resolve(ideogram, args.model, args.init_from, _overrides(args))
+    model = ideogram.Model(cfg, **kwargs)
 
   side = args.resolution // 16
   image_tokens = side * side
@@ -499,12 +510,11 @@ def _ideogram(args, devices, make_optimizer, adapter: bool = False):
 def _command_a(args, devices, make_optimizer):
   """Command A+ on token windows, or on a cache of conversations.
 
-  Besides config fields, `--model_overrides` takes `dtype`, `image_tiles` and
-  `freeze`. With tiles, every sequence of a synthetic batch opens with that
+  With `--image_tiles`, every sequence of a synthetic batch opens with that
   many random image tiles, and the vision tower and the projector train with
   the language model; without, they are not part of the trained state.
-  `freeze` lists what is not trained, of `experts` and `embed`; the model runs
-  as more than one stage only with its embedding frozen. The config starts
+  `--freeze` lists what is not trained, of `experts` and `embed`; the model
+  runs as more than one stage only with its embedding frozen. The config starts
   from the `config.json` of the published checkpoint that `--init_from` names.
 
   `--data`, when a directory, is a cache that `jax_titan.data.command_a`
@@ -516,18 +526,14 @@ def _command_a(args, devices, make_optimizer):
   import numpy as np  # pylint: disable=g-import-not-at-top
   from jax_titan import mpmd as jt_mpmd  # pylint: disable=g-import-not-at-top
   from jax_titan.data import command_a as data  # pylint: disable=g-import-not-at-top
-  from jax_titan.models import command_a, pretrained  # pylint: disable=g-import-not-at-top
+  from jax_titan.models import command_a  # pylint: disable=g-import-not-at-top
 
   P = jax.sharding.PartitionSpec  # pylint: disable=invalid-name
 
-  overrides = _overrides(args)
-  dtype = jnp.dtype(overrides.pop("dtype", "bfloat16"))
-  tiles = overrides.pop("image_tiles", 0)
-  freeze = overrides.pop("freeze", ())
-  if args.init_from and pretrained.is_safetensors(args.init_from):
-    cfg = dataclasses.replace(command_a.pretrained_config(args.init_from), **overrides)
-  else:
-    cfg = command_a.CommandAConfig(**overrides)
+  _options(args, "dtype", "freeze", "image_tiles")
+  tiles = args.image_tiles
+  freeze = tuple(args.freeze.split(",")) if args.freeze else ()
+  cfg = config.resolve(command_a, args.model, args.init_from, _overrides(args))
 
   mesh = _data_mesh(devices)
   constrain = _keep_batch_sharded(mesh) if args.parallel == "fsdp" else None
@@ -539,8 +545,8 @@ def _command_a(args, devices, make_optimizer):
   # pipeline then take the pipeline's mean of the microbatches' means.
   flat = cache is not None and args.parallel != "mpmd"
   model = command_a.Model(cfg, num_stages=args.num_stages, layers=_stage_layers(args),
-                          dtype=dtype, remat=args.remat, constrain=constrain, images=tiles > 0,
-                          freeze=freeze, microbatches=num_mb if flat else 1)
+                          dtype=_dtype(args), remat=args.remat, constrain=constrain,
+                          images=tiles > 0, freeze=freeze, microbatches=num_mb if flat else 1)
   b = (num_mb, mb)
   batched = P(None, jt_mpmd.DATA_AXIS)
   tokens = (jax.ShapeDtypeStruct(b + (seq,), jnp.int32), batched)

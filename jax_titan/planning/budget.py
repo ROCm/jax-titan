@@ -7,7 +7,7 @@
   python -m jax_titan.planning.budget --model=llama3.1-8b --tokens=2e12 --gpu=MI355X \
       --gpus=512 --from_run=docs/results/2026-11-07/llama3.1-8b_pp2_run-dir
 
-`--model` is a JAX-Titan Llama flavor, `maxtext:<name>` or `hf:<config.json>`, dense or
+`--model` is a JAX-Titan Llama, `maxtext:<name>` or `hf:<config.json>`, dense or
 mixture-of-experts. Give the tokens to train (`--tokens`, or `--dataset_tokens` and
 `--epochs`) or a time budget (`--days`, `--gpu_hours`). One `--gpu` gets a full report;
 a comma-separated list gets a table with a row per GPU. It reports:

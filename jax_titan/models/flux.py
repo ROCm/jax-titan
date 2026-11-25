@@ -56,7 +56,7 @@ class FluxConfig:
     return 6.0 * (weights + attention)
 
 
-FLAVORS = {
+CONFIGS = {
     "flux-dev": FluxConfig(guidance_embeds=True),
     "flux-schnell": FluxConfig(),
 }

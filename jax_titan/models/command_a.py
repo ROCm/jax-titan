@@ -100,6 +100,8 @@ class CommandAConfig:
             + (4.0 if "embed" in frozen else 6.0) * e * self.vocab_size + 6.0 * attention)
 
 
+CONFIGS = {"command-a-plus": CommandAConfig()}
+
 _AXES = {
     "embed": ("vocab", "embed"),
     "final_norm": ("embed",),

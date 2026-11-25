@@ -11,6 +11,7 @@ import sys
 import numpy as np
 import pytest
 
+from jax_titan.models.config import AdapterConfig
 from jax_titan.observability import records
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -56,7 +57,7 @@ def test_bridged_model_gives_pytorchs_loss_and_gradient(family):
 
   assert family in hf.VERIFIED
   cfg = hf.config(family, **FAMILIES[family])
-  model = hf.causal_lm(cfg, seed=0, dtype=jnp.float32)
+  model = hf.causal_lm(AdapterConfig("transformers", family), cfg, seed=0, dtype=jnp.float32)
   rng = np.random.default_rng(1)
   ids = rng.integers(3, cfg.vocab_size, (2, 64))
   targets = rng.integers(3, cfg.vocab_size, (2, 64))
@@ -92,7 +93,7 @@ def _losses(tmp_path, *flags):
   log = tmp_path / f"{'-'.join(flags)}.jsonl"
   result = subprocess.run(
       [sys.executable, "-m", "jax_titan.trainer.train", "--model=transformers:llama",
-       "--model_overrides=" + json.dumps({**SMALL, "dtype": "float32"}), "--data=synthetic",
+       "--model_overrides=" + json.dumps(SMALL), "--dtype=float32", "--data=synthetic",
        "--seq_len=32", "--microbatches=1", "--microbatch_size=8", "--steps=4",
        "--warmup_steps=1", f"--log_file={log}", *flags],
       # os.environ, not the process environment: see conftest's ROCPROFILER note.
@@ -109,7 +110,8 @@ def test_trainer_starts_at_the_models_loss(tmp_path):
   from jax_titan.models.adapters import transformers as hf  # pylint: disable=g-import-not-at-top
 
   losses = _losses(tmp_path, "--parallel=dp")
-  model = hf.causal_lm(hf.config("llama", **SMALL), seed=0, dtype=jnp.float32)
+  model = hf.causal_lm(AdapterConfig("transformers", "llama"), hf.config("llama", **SMALL),
+                       seed=0, dtype=jnp.float32)
   # The trainer's weights and its first synthetic batch, both of seed 0.
   batch = np.random.default_rng((0, 0)).integers(0, SMALL["vocab_size"], (8, 33), dtype=np.int32)
   (fn,) = model.stage_fns()

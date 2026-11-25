@@ -11,6 +11,7 @@ import sys
 import numpy as np
 import pytest
 
+from jax_titan.models.config import AdapterConfig
 from jax_titan.observability import records
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -35,7 +36,8 @@ def test_bridged_flux_gives_pytorchs_loss_and_gradient():
   from jax_titan.data import diffusion  # pylint: disable=g-import-not-at-top
   from jax_titan.models.adapters import diffusers as hfd  # pylint: disable=g-import-not-at-top
 
-  model = hfd.denoiser(hfd.config("FluxTransformer2DModel", **SMALL), seed=0, dtype=jnp.float32)
+  model = hfd.denoiser(AdapterConfig("diffusers", "FluxTransformer2DModel"),
+                       hfd.config("FluxTransformer2DModel", **SMALL), seed=0, dtype=jnp.float32)
   batches = diffusion.flux(
       0, (1, 2), image_side=4, text_tokens=8, in_channels=16, joint_attention_dim=32,
       pooled_projection_dim=32, guidance_embeds=True)
@@ -69,7 +71,7 @@ def _losses(tmp_path, *flags):
   log = tmp_path / f"{'-'.join(flags)}.jsonl"
   result = subprocess.run(
       [sys.executable, "-m", "jax_titan.trainer.train", "--model=diffusers:FluxTransformer2DModel",
-       "--model_overrides=" + json.dumps({**SMALL, "dtype": "float32"}), "--resolution=64",
+       "--model_overrides=" + json.dumps(SMALL), "--dtype=float32", "--resolution=64",
        "--text_tokens=8", "--microbatches=1", "--microbatch_size=8", "--steps=4",
        "--warmup_steps=1", f"--log_file={log}", *flags],
       # os.environ, not the process environment: see conftest's ROCPROFILER note.

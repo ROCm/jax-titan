@@ -33,6 +33,8 @@ class Layout:
   right after the state and `eval_step` right after the parameters, and
   `export` gives the trained parameters alone, which `--init_from` does not
   read. A run that resumes calls `frozen()` without `init()`.
+
+  `config` is the model's configuration, which a run records.
   """
 
   init: Callable[[], tuple]
@@ -46,6 +48,7 @@ class Layout:
   eval_step: Any = None
   export: Callable | None = None
   frozen: Callable[[], Any] | None = None
+  config: Any = None
 
 
 def placement(meshes: dict, stage_meshes) -> dict:
@@ -277,7 +280,8 @@ def mpmd_layout(args, topology, model: contract.Model, optimizer, inputs, target
                 f"mpmd:{num_stages}",
                 placement=placement(
                     topology, [jt_mpmd.mesh_name(i % num_meshes) for i in range(num_stages)]),
-                eval_step=eval_step, export=getattr(model, "merge", None), frozen=frozen)
+                eval_step=eval_step, export=getattr(model, "merge", None), frozen=frozen,
+                config=model.config)
 
 
 def spmd_layout(args, mesh, model: contract.Model, optimizer, inputs, targets,
@@ -359,4 +363,5 @@ def spmd_layout(args, mesh, model: contract.Model, optimizer, inputs, targets,
       loss_fn, in_shardings=(param_sh, *extra, in_sh, tgt_sh), out_shardings=scalar)
   return Layout(init, abstract_state, jitted, _shapes(flat_inputs), _shapes(flat_targets),
                 put_batch, "spmd", placement=placement({"mesh": mesh}, ["mesh"] * args.num_stages),
-                eval_step=eval_step, export=getattr(model, "merge", None), frozen=frozen)
+                eval_step=eval_step, export=getattr(model, "merge", None), frozen=frozen,
+                config=model.config)

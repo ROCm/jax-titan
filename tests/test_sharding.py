@@ -28,7 +28,7 @@ def test_spec_skips_layers_and_uneven_dims():
 
 
 def test_optimizer_state_follows_parameters():
-  cfg = llama.FLAVORS["llama3-test"]
+  cfg = llama.CONFIGS["llama3-test"]
   params = jax.eval_shape(
       lambda k: llama.init_stage_params(cfg, k, stage=0, num_stages=2),
       jax.random.key(0),
@@ -51,7 +51,7 @@ def test_without_axis():
 
 
 def test_every_parameter_has_logical_axes():
-  cfg = llama.FLAVORS["llama3-test"]
+  cfg = llama.CONFIGS["llama3-test"]
   params = jax.eval_shape(
       lambda k: llama.init_stage_params(cfg, k, stage=0, num_stages=1),
       jax.random.key(0),
@@ -61,7 +61,7 @@ def test_every_parameter_has_logical_axes():
 
 
 def test_only_norms_do_not_decay():
-  cfg = llama.FLAVORS["llama3-test"]
+  cfg = llama.CONFIGS["llama3-test"]
   params = jax.eval_shape(
       lambda k: llama.init_stage_params(cfg, k, stage=0, num_stages=1),
       jax.random.key(0),
