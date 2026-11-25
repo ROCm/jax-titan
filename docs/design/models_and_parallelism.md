@@ -13,15 +13,15 @@ parallel.
 
 A model is defined in its module, found through two tables, built by its builder, and given to a
 layout function of the trainer. The example is Llama; an adapter model goes the same way through
-`SOURCES`. The dashed part is the proposal of section 3: the flags of parallelism come to a plan,
-which the builder takes in place of `devices`; it gives the model its stages and the layout
-function its meshes.
+`SOURCES`. The dashed part is the proposal of section 3: the flags of parallelism come to a
+`Parallelism`, which the builder takes in place of `devices`; it gives the model its stages and the
+layout function its meshes.
 
 ```mermaid
 flowchart TD
     CLI["--model=llama3.1-8b"] --> NAMES["MODELS / SOURCES<br/>name → module"]
     NAMES --> TABLE["BUILDERS<br/>module → builder"]
-    PAR["--pipeline_parallel, --tensor_parallel, --fsdp<br/>--num_stages, --stage_layers"] -.-> PLAN["parallel.resolve<br/>the Plan: degrees, stages and meshes"]
+    PAR["--pipeline_parallel, --tensor_parallel, --fsdp<br/>--num_stages, --stage_layers"] -.-> PARALLELISM["parallel.resolve<br/>the Parallelism: degrees, stages and meshes"]
 
     subgraph MOD["Define: the model's module, jax_titan/models/llama.py"]
         CFG["LlamaConfig, CONFIGS<br/>the configuration and its names"]
@@ -51,15 +51,16 @@ flowchart TD
     OBJ -->|"the model enters the trainer"| LAYFN
     OPT --> LAYFN
     WORK --> LOOP
-    PLAN -.->|"the stages, the constraint"| OBJ
-    PLAN -.->|"the meshes"| LAYFN
+    PARALLELISM -.->|"the stages, the constraint"| OBJ
+    PARALLELISM -.->|"the meshes"| LAYFN
 
     classDef proposed stroke-dasharray: 5 5
-    class PAR,PLAN proposed
+    class PAR,PARALLELISM proposed
 ```
 
 The tables are in 1.2 and 1.5, the builder in 1.2, the contract of `class Model` in 1.3, the
-configuration in 1.4 and the plan in 3.3. What the trainer does with a `Layout` is as today.
+configuration in 1.4 and the `Parallelism` in 3.3. What the trainer does with a `Layout` is as
+today.
 
 ## 1. Models
 
@@ -579,27 +580,27 @@ The options of pipeline parallelism:
 `--parallel`, `--stage_fsdp` and `--stages_per_mesh` go, and so do `--reduce_grads` and
 `--per_device` until the reduction once per step returns (3.1). `--mpmd_options` stays as it is.
 
-### 3.3 The plan
+### 3.3 The `Parallelism` of a run
 
 **Pattern:** value object.
 
-The plan is what the flags and the devices of a run come to: its degrees, its stages and its
+A `Parallelism` is what the flags and the devices of a run come to: its degrees, its stages and its
 meshes. It stands between a model and a layout function, and each of the three owns one thing:
 
 | | Owns | Code |
 |---|---|---|
 | **Model** | what can be made parallel: the logical axes of its parameters, and the stages it can be cut into | `jax_titan/models`, read through the contract (1.3) |
-| **Plan** | what the run asks for: the degrees, the stages and the meshes | `jax_titan/parallel` |
+| **Parallelism** | what the run asks for: the degrees, the stages and the meshes | `jax_titan/parallel` |
 | **Layout** | the two put together: the sharding of the state, and the step | `jax_titan/trainer/layout.py` |
 
-A JAX-Titan model names no flag and no mesh: of the plan it gets its stages and one function,
-`constrain`. The plan names no model. A layout function reads the model through the contract and
-the plan through its fields.
+A JAX-Titan model names no flag and no mesh: of the `Parallelism` it gets its stages and one
+function, `constrain`. The `Parallelism` names no model. A layout function reads the model through
+the contract and the `Parallelism` through its fields.
 
 ```python
-# jax_titan/parallel/plan.py
+# jax_titan/parallel/parallelism.py
 @dataclasses.dataclass(frozen=True)
-class Plan:
+class Parallelism:
   pipeline_parallel: int        # groups of GPUs, which run the stages
   data_parallel: int            # GPUs of a group that each take a share of the batch
   tensor_parallel: int          # GPUs that share every layer
@@ -611,43 +612,43 @@ class Plan:
   def constrain(self, x): ...   # under FSDP, keeps a batch sharded along the data axis
 
 def resolve(devices, *, pipeline_parallel=1, tensor_parallel=1, fsdp=True, num_stages=None,
-            stage_layers=None) -> Plan:
+            stage_layers=None) -> Parallelism:
   ...                           # refuses devices and stages that do not divide into the groups
 ```
 
-- **Made once, before the builder.** `build` resolves the plan from the flags and the devices, and
-  gives it to the builder in place of the devices: every builder's `devices` (1.2) becomes `plan`.
+- **Made once, before the builder.** `build` resolves the `Parallelism` from the flags and the
+  devices, and gives it to the builder in place of the devices: every builder's `devices` (1.2)
+  becomes `parallelism`.
 - **A builder reads no flag of parallelism, chooses no layout function and, but for MaxText's
-  below, makes no mesh.** It
-  gives the model `plan.num_stages`, `plan.stage_layers` and `plan.constrain`, and gives the plan
-  to the one entry of `trainer/layout.py`, `make_layout`, which is `spmd_layout` without a pipeline
-  and `mpmd_layout` with one. The schedule and Shardy's options stay flags, which `mpmd_layout`
-  reads.
+  below, makes no mesh.** It gives the model `parallelism.num_stages`, `parallelism.stage_layers`
+  and `parallelism.constrain`, and gives the `Parallelism` to the one entry of `trainer/layout.py`,
+  `make_layout`, which is `spmd_layout` without a pipeline and `mpmd_layout` with one. The schedule
+  and Shardy's options stay flags, which `mpmd_layout` reads.
 - **An adapter model** takes DP and FSDP alone, with the one exception of 3.5. MaxText's and
   MaxDiffusion's initialize their parameters on their shardings, so their builders give them
-  `plan.fsdp` and a mesh: the plan's, or for MaxText a mesh of the same devices under MaxText's
-  axis names, which its builder makes.
+  `parallelism.fsdp` and a mesh: the `Parallelism`'s, or for MaxText a mesh of the same devices
+  under MaxText's axis names, which its builder makes.
 - **What divides is checked once:** `resolve` refuses GPUs and stages that do not divide into the
-  groups, and `build` a batch that does not divide across `plan.data_parallel` GPUs.
-- **The plan is no part of a model's configuration** (1.4). A run records its degrees beside the
-  configuration. A checkpoint is not tied to the data-parallel and tensor-parallel degrees or to
-  FSDP: restoring places the state on the shardings of the current plan. It is tied to a pipeline
-  or none, to the number of stages and to their layers, as today.
+  groups, and `build` a batch that does not divide across `parallelism.data_parallel` GPUs.
+- **A `Parallelism` is no part of a model's configuration** (1.4). A run records its degrees beside
+  the configuration. A checkpoint is not tied to the data-parallel and tensor-parallel degrees or
+  to FSDP: restoring places the state on the shardings of the current `Parallelism`. It is tied to
+  a pipeline or none, to the number of stages and to their layers, as today.
 
 ### 3.4 From the flags to the program
 
 | | From | To | By |
 |---|---|---|---|
-| 1 | the flags, the devices | the `Plan`: the degrees, the stages, and one mesh per group of GPUs with the axes `data` and `tensor` | `parallel.resolve`, new; it makes the meshes, in place of `mpmd.make_topology` |
-| 2 | the plan, the model's `logical_axes` | the sharding of every parameter and of the optimizer state that mirrors it | `parallel.tree_specs`, which exists |
-| 3 | the plan, the model's `stage_fns` | the step, one program | `spmd_layout` and `mpmd_layout`, behind `make_layout` |
+| 1 | the flags, the devices | the `Parallelism`: the degrees, the stages, and one mesh per group of GPUs with the axes `data` and `tensor` | `parallel.resolve`, new; it makes the meshes, in place of `mpmd.make_topology` |
+| 2 | the `Parallelism`, the model's `logical_axes` | the sharding of every parameter and of the optimizer state that mirrors it | `parallel.tree_specs`, which exists |
+| 3 | the `Parallelism`, the model's `stage_fns` | the step, one program | `spmd_layout` and `mpmd_layout`, behind `make_layout` |
 | 4 | the step | what the GPUs run | Shardy and XLA, below JAX-Titan |
 
 - **Step 2** has one rule. TP shards the first dimension named `heads`, `kv_heads`, `mlp` or
   `vocab` that divides, across the `tensor` axis. FSDP shards the first other dimension that
   divides, never `layers`, across the `data` axis. A leaf with neither is replicated, which is DP.
-- **Step 3** is where the layout functions change. Both take their meshes from the plan and the
-  shardings of the state from step 2, where today `spmd_layout` shards under FSDP alone and
+- **Step 3** is where the layout functions change. Both take their meshes from the `Parallelism`
+  and the shardings of the state from step 2, where today `spmd_layout` shards under FSDP alone and
   `mpmd_layout` replicates every stage. The step is one `jax.jit` program without a pipeline. With
   one it is one Shardy MPMD program: every stage is a named computation on its mesh, and every
   microbatch an `mpmd.call` with its own call counter.
@@ -663,14 +664,14 @@ def resolve(devices, *, pipeline_parallel=1, tensor_parallel=1, fsdp=True, num_s
 | DP | nothing | |
 | FSDP | the logical axes of every parameter | `logical_axes` |
 | TP | among them `heads`, `kv_heads`, `mlp` or `vocab`, on the dimensions to share | `logical_axes` |
-| PP | its layers cut into `plan.num_stages` stages, with a parameter tree and a function for each | a class that takes `num_stages` and the layers of each stage; `init`, `abstract`, `stage_fns` |
+| PP | its layers cut into `parallelism.num_stages` stages, with a parameter tree and a function for each | a class that takes `num_stages` and the layers of each stage; `init`, `abstract`, `stage_fns` |
 
 The contract (1.3) keeps its members.
 
 A builder names the strategies, beyond DP and FSDP, that JAX-Titan runs its model with, as
-`_options` names its run options: `_strategies(args, plan, "stages", "tensor_parallel")`. A plan
-with more than one stage, or with tensor parallelism, is refused for a model whose builder does not
-name it, in one place and one wording. An adapter model names neither, but for
+`_options` names its run options: `_strategies(args, parallelism, "stages", "tensor_parallel")`. A
+`Parallelism` with more than one stage, or with tensor parallelism, is refused for a model whose
+builder does not name it, in one place and one wording. An adapter model names neither, but for
 `maxdiffusion:ideogram4`, which keeps its pipeline.
 
 ## 4. Parallelism: examples (proposed)
@@ -689,39 +690,39 @@ On 8 GPUs, the flags after `python -m jax_titan.trainer.train --model=llama3.1-8
 | `--pipeline_parallel=2 --tensor_parallel=4` | 2 × 1 × 4 | two of 1 × 4 GPUs | a stage's sharded across its 4 GPUs along heads, MLP columns and vocabulary | one MPMD program |
 | `--pipeline_parallel=2 --tensor_parallel=2` | 2 × 2 × 2 | two of 2 × 2 GPUs | a stage's sharded both ways | one MPMD program |
 
-### 4.2 The plan in `build` and in a builder
+### 4.2 The `Parallelism` in `build` and in a builder
 
 ```python
 # jax_titan/trainer/builders.py
 def build(args, devices, make_optimizer) -> tuple[Layout, Workload]:
-  plan = parallel.resolve(devices, pipeline_parallel=args.pipeline_parallel,
-                          tensor_parallel=args.tensor_parallel, fsdp=args.fsdp,
-                          num_stages=args.num_stages, stage_layers=_stage_layers(args))
-  ...                                             # the batch divides across plan.data_parallel
-  return BUILDERS[models.module_of(args.model)](args, plan, make_optimizer)
+  parallelism = parallel.resolve(devices, pipeline_parallel=args.pipeline_parallel,
+                                 tensor_parallel=args.tensor_parallel, fsdp=args.fsdp,
+                                 num_stages=args.num_stages, stage_layers=_stage_layers(args))
+  ...                                             # the batch divides across the data-parallel GPUs
+  return BUILDERS[models.module_of(args.model)](args, parallelism, make_optimizer)
 
-def _llama(args, plan, make_optimizer):
-  _strategies(args, plan, "stages", "tensor_parallel")
+def _llama(args, parallelism, make_optimizer):
+  _strategies(args, parallelism, "stages", "tensor_parallel")
   cfg = config.resolve(llama, args.model, overrides=_overrides(args))
   _needs_own_tokens(args, cfg.vocab_size)
-  model = llama.Model(cfg, num_stages=plan.num_stages, layers=plan.stage_layers,
-                      dtype=_dtype(args), remat=args.remat, constrain=plan.constrain)
+  model = llama.Model(cfg, num_stages=parallelism.num_stages, layers=parallelism.stage_layers,
+                      dtype=_dtype(args), remat=args.remat, constrain=parallelism.constrain)
   tokens, split_batch = ...                       # the spec and the split of a step's token windows
-  layout = make_layout(args, plan, model, make_optimizer(model.decays), tokens, tokens,
+  layout = make_layout(args, parallelism, model, make_optimizer(model.decays), tokens, tokens,
                        split_batch)
   work = Workload(num_params=cfg.num_params(), tokens_per_step=..., flops_per_step=...,
                   vocab_size=cfg.vocab_size, hardware_flops_per_step=...)
   return layout, work
 
 # jax_titan/trainer/layout.py
-def make_layout(args, plan, model, optimizer, inputs, targets, split_batch) -> Layout:
-  if plan.pipeline_parallel == 1:
-    return spmd_layout(args, plan, model, optimizer, inputs, targets, split_batch)
-  return mpmd_layout(args, plan, model, optimizer, inputs, targets, split_batch)
+def make_layout(args, parallelism, model, optimizer, inputs, targets, split_batch) -> Layout:
+  if parallelism.pipeline_parallel == 1:
+    return spmd_layout(args, parallelism, model, optimizer, inputs, targets, split_batch)
+  return mpmd_layout(args, parallelism, model, optimizer, inputs, targets, split_batch)
 ```
 
 The builder of a model without stages changes the same way and names no strategy:
-`_strategies(args, plan)`.
+`_strategies(args, parallelism)`.
 
 ### 4.3 Llama with stages
 
@@ -756,18 +757,18 @@ takes TP without a change.
 ### 4.4 One command, down to the program
 
 ```
-flags    --model=llama3.1-8b --pipeline_parallel=2            on 8 GPUs, 8 microbatches of 4 sequences
-plan     Plan(pipeline_parallel=2, data_parallel=4, tensor_parallel=1, fsdp=True, num_stages=2, ...)
-meshes   mesh0 = GPUs 0-3, mesh1 = GPUs 4-7, each data=4 x tensor=1
-model    llama.Model(cfg, num_stages=2): 16 layers a stage, embed on stage 0, lm_head on stage 1
-state    layers/wq  [16, 4096, 4096]   (layers, embed, heads)   P(None, "data")   on its stage's mesh
-         embed      [128256, 4096]     (vocab_in, embed)        P("data")         on mesh0
-         lm_head    [4096, 128256]     (embed, vocab)           P("data")         on mesh1
-batch    tokens     [8, 4, 2048]                                P(None, "data")   on mesh0, targets on mesh1
-step     mpmd.jit(make_train_step(model.stage_fns(), optimizer),
-                  make_config(plan.meshes, "ZERO_BUBBLE_H1", num_stages=2))
-below    Shardy: fragments per stage, microbatch and direction, in the schedule's order; in each mesh
-         an all-gather of the weights and a reduce-scatter of the gradients
+flags         --model=llama3.1-8b --pipeline_parallel=2       on 8 GPUs, 8 microbatches of 4 sequences
+parallelism   Parallelism(pipeline_parallel=2, data_parallel=4, tensor_parallel=1, fsdp=True, num_stages=2, ...)
+meshes        mesh0 = GPUs 0-3, mesh1 = GPUs 4-7, each data=4 x tensor=1
+model         llama.Model(cfg, num_stages=2): 16 layers a stage, embed on stage 0, lm_head on stage 1
+state         layers/wq  [16, 4096, 4096]   (layers, embed, heads)   P(None, "data")   on its stage's mesh
+              embed      [128256, 4096]     (vocab_in, embed)        P("data")         on mesh0
+              lm_head    [4096, 128256]     (embed, vocab)           P("data")         on mesh1
+batch         tokens     [8, 4, 2048]                                P(None, "data")   on mesh0, targets on mesh1
+step          mpmd.jit(make_train_step(model.stage_fns(), optimizer),
+                       make_config(parallelism.meshes, "ZERO_BUBBLE_H1", num_stages=2))
+below         Shardy: fragments per stage, microbatch and direction, in the schedule's order; in each mesh
+              an all-gather of the weights and a reduce-scatter of the gradients
 ```
 
 With `--tensor_parallel=4` added, the meshes are data=1 x tensor=4 and the three leaves get
