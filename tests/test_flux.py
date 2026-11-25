@@ -231,9 +231,10 @@ def test_refuses(flags, error):
     builders.build(args, [None], lambda decays=None: optax.sgd(0.0))
 
 
-def test_runs_as_one_stage_by_default():
-  assert train.parse_args(["--model=flux-schnell"]).num_stages == 1
+def test_stages_default_to_two_in_a_pipeline_and_to_one_without():
   assert train.parse_args(["--model=ideogram4"]).num_stages == 2
+  assert train.parse_args(["--model=ideogram4", "--parallel=fsdp"]).num_stages == 1
+  assert train.parse_args(["--model=flux-schnell", "--parallel=dp"]).num_stages == 1
 
 
 @pytest.mark.gpu(2)

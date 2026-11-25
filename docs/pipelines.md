@@ -66,6 +66,12 @@ Restoring places arrays on the shardings of the current command, so a run
 can resume with another layout of the same stages, for example with
 `--stage_fsdp` added.
 
+A checkpoint holds one state per stage, so a run resumes with the number of
+stages it was written with. `--num_stages` is 2 by default with
+`--parallel=mpmd` and 1 without a pipeline. A checkpoint that `--parallel=dp`
+or `fsdp` wrote as two stages, which was the default for Ideogram 4 and
+Command A+, resumes with `--num_stages=2`.
+
 - On CPU, a run resumed from step 3 matches the uninterrupted run exactly.
 - On 8x MI355X, Llama 3.1 8B resumed from step 10 matches the uninterrupted
   run to 1e-7 at step 10 and exactly at step 11.

@@ -52,14 +52,6 @@ from jax_titan.trainer.layout import stage_topology
 from jax_titan.trainer.layout import Workload
 
 
-def default_num_stages(model: str) -> int:
-  """`--num_stages` where it is not given: 2, and 1 for a model of another
-  repository, which is called whole, and for FLUX.1 and Llama, which have no
-  pipeline."""
-  whole = model.partition(":")[0] in models.SOURCES and model != "maxdiffusion:ideogram4"
-  return 1 if whole or models.MODELS.get(model) in ("flux", "llama") else 2
-
-
 def _overrides(args) -> dict:
   return json.loads(args.model_overrides) if args.model_overrides else {}
 

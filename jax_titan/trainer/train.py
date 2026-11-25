@@ -58,8 +58,9 @@ def parse_args(argv=None):
   )
   parser.add_argument(
       "--num_stages", type=int, default=None,
-      help="Pipeline stages, 2 by default. dp and fsdp start from the same weights as the "
-      "pipeline with this many stages. Llama, FLUX.1 and a model of another repository "
+      help="Pipeline stages: 2 by default with --parallel=mpmd, and 1 without a pipeline. "
+      "With more than 1, dp and fsdp hold the model's parameters stage by stage, as the "
+      "pipeline of that many stages does. Llama, FLUX.1 and a model of another repository "
       "take none.",
   )
   parser.add_argument(
@@ -277,7 +278,7 @@ def parse_args(argv=None):
   parser.add_argument("--seed", type=int, default=0)
   args = parser.parse_args(argv)
   if args.num_stages is None:
-    args.num_stages = builders.default_num_stages(args.model)
+    args.num_stages = 2 if args.parallel == "mpmd" else 1
   return args
 
 
