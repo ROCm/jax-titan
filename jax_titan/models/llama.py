@@ -13,6 +13,7 @@ import jax
 import jax.numpy as jnp
 
 from jax_titan import ops
+from jax_titan.models import losses
 
 
 @dataclasses.dataclass(frozen=True)
@@ -228,13 +229,6 @@ def _run_layers(
   return h
 
 
-def cross_entropy(logits: jax.Array, targets: jax.Array) -> jax.Array:
-  logits = logits.astype(jnp.float32)
-  logz = jax.nn.logsumexp(logits, axis=-1)
-  gold = jnp.take_along_axis(logits, targets[..., None], axis=-1)[..., 0]
-  return jnp.mean(logz - gold)
-
-
 def stage_forward(
     params: dict,
     inputs: jax.Array,
@@ -265,7 +259,7 @@ def stage_forward(
       "bse,ev->bsv", h, params["lm_head"].astype(compute_dtype),
       preferred_element_type=jnp.float32,
   )
-  return cross_entropy(logits, targets)
+  return losses.cross_entropy(logits, targets)
 
 
 class Model:

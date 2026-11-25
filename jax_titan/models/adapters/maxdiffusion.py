@@ -22,6 +22,7 @@ from maxdiffusion.models.embeddings_flax import CombinedTimestepGuidanceTextProj
 from maxdiffusion.models.flux.transformers.transformer_flux_flax import FluxTransformer2DModel
 
 from jax_titan import parallel
+from jax_titan.models import losses
 
 PINNED_COMMIT = "821afc364ac1889c1039112843f4f7a17c1bef7b"
 FLAVORS = {
@@ -53,11 +54,6 @@ def transformer(flavor: str, **overrides) -> FluxTransformer2DModel:
   return FluxTransformer2DModel(**kwargs)
 
 
-def flow_matching_loss(pred: jax.Array, target: jax.Array) -> jax.Array:
-  """MaxDiffusion's FLUX.1 loss: mean squared error to noise minus latents."""
-  return jnp.mean((target.astype(jnp.float32) - pred.astype(jnp.float32)) ** 2)
-
-
 def _attention_interceptor(attention: Callable):
   """Routes MaxDiffusion's unmasked attention to `attention(q, k, v, causal=, scale=)`."""
 
@@ -78,7 +74,8 @@ class WholeModel:
 
   `init_full(seed)` gives its parameters as MaxDiffusion initializes them and
   `apply(params, x)` its prediction for a batch of `jax_titan.data.diffusion`;
-  `whole_flux` and `whole_wan` make the two. The loss is `flow_matching_loss`.
+  `whole_flux` and `whole_wan` make the two. The loss is MaxDiffusion's, the
+  mean squared error of the prediction to the batch's target.
   FSDP shards a parameter along its first dimension that the data axis
   divides, and never along the block axis of the stacks in `stacked`. The
   parameters are initialized where the trainer keeps them on `mesh`, sharded
@@ -102,7 +99,7 @@ class WholeModel:
 
   def stage_fns(self) -> list[Callable[..., jax.Array]]:
     """The one stage function, `fn(params, x, target)`, which returns the loss."""
-    return [lambda p, x, t: flow_matching_loss(self._apply(p, x), t)]
+    return [lambda p, x, t: losses.mean_squared_error(self._apply(p, x), t)]
 
   def logical_axes(self, path, leaf) -> tuple:
     axes = [None] * len(leaf.shape)

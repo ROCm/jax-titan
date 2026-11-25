@@ -33,6 +33,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from jax_titan import ops
+from jax_titan.models import losses
 from jax_titan.models import pretrained
 
 
@@ -600,24 +601,6 @@ def save(path, cfg: CommandAConfig, params: dict) -> None:
   pretrained.write(path / "model.safetensors", tensors_from_params(params, cfg), {"format": "pt"})
 
 
-def cross_entropy(logits: jax.Array, targets: jax.Array, microbatches: int = 1) -> jax.Array:
-  """The mean loss over the targets that are not negative.
-
-  With `microbatches`, the sequences are that many microbatches of equal size
-  one after another, and the result is the mean of their mean losses: what a
-  pipeline step gives for them, which differs from the mean over all targets
-  when microbatches hold different numbers of targets.
-  """
-  logits = logits.astype(jnp.float32)
-  keep = targets >= 0
-  gold = jnp.take_along_axis(logits, jnp.maximum(targets, 0)[..., None], axis=-1)[..., 0]
-  loss = (jax.nn.logsumexp(logits, axis=-1) - gold) * keep
-  if microbatches == 1:
-    return jnp.sum(loss) / jnp.maximum(jnp.sum(keep), 1)
-  loss, keep = loss.reshape(microbatches, -1), keep.reshape(microbatches, -1)
-  return jnp.mean(jnp.sum(loss, axis=-1) / jnp.maximum(jnp.sum(keep, axis=-1), 1))
-
-
 def _layer_norm(x: jax.Array, weight: jax.Array, eps: float,
                 bias: jax.Array | None = None) -> jax.Array:
   y = x.astype(jnp.float32)
@@ -781,7 +764,8 @@ class Model:
   vision tower and the projector; without, they are left out and not trained.
   `constrain`, when given, is applied to the hidden states after the embedding
   and every layer. `microbatches` is for a layout that runs a step's
-  microbatches as one batch: the loss is then `cross_entropy`'s for that many.
+  microbatches as one batch: the loss is then `losses.masked_cross_entropy`'s
+  for that many.
   """
 
   logical_axes = staticmethod(logical_axes)
@@ -919,8 +903,8 @@ class Model:
     """
     last = self.num_stages - 1
     fns = [functools.partial(self.forward, i) for i in range(last)]
-    fns.append(
-        lambda p, x, t: cross_entropy(self.forward(last, p, x), t, self._microbatches))
+    fns.append(lambda p, x, t: losses.masked_cross_entropy(
+        self.forward(last, p, x), t, self._microbatches))
     return fns
 
   def flops_per_token(self, seq_len: int) -> float:

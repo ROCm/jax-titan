@@ -25,6 +25,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from jax_titan import ops
+from jax_titan.models import losses
 from jax_titan.models import pretrained
 
 # Values of `indicator` and `segment_ids`, and the offset of image positions.
@@ -313,8 +314,7 @@ def noised(latents, noise, t):
 
 def flow_matching_loss(pred: jax.Array, target: jax.Array) -> jax.Array:
   """Mean squared error to the velocity, latents minus noise, over the image tokens."""
-  pred = pred[:, -target.shape[1]:]
-  return jnp.mean((target.astype(jnp.float32) - pred.astype(jnp.float32)) ** 2)
+  return losses.mean_squared_error(pred[:, -target.shape[1]:], target)
 
 
 def timesteps(z: np.ndarray, resolution: int, *, mean: float = 0.0, std: float = 1.5) -> np.ndarray:

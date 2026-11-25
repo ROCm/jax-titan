@@ -34,6 +34,7 @@ from maxtext.utils.globals import MAXTEXT_PKG_DIR
 from jax_titan import parallel
 from jax_titan import paths
 from jax_titan.models import llama
+from jax_titan.models import losses
 
 PINNED_VERSION = "maxtext-v0.2.5"
 
@@ -306,7 +307,7 @@ class WholeModel:
           decoder_segment_ids=segments, enable_dropout=False,
           decoder_target_tokens=targets, decoder_target_mask=segments,
       )
-    loss = llama.cross_entropy(logits, targets)
+    loss = losses.cross_entropy(logits, targets)
     sown = nnx.pop(model, nnx.Intermediate).to_pure_dict()
     balance = maxtext_utils.collect_intermediates_by_suffix(sown, "moe_lb_loss")
     if balance:

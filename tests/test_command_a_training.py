@@ -20,6 +20,7 @@ from jax_titan import parallel
 from jax_titan.data import command_a as data
 from jax_titan.models import command_a
 from jax_titan.models import command_a_generate
+from jax_titan.models import losses
 from jax_titan.observability import records
 from jax_titan.trainer import adapters, checkpoint, train
 from jax_titan.trainer.layout import EVAL_STEPS
@@ -83,7 +84,7 @@ def test_starts_from_a_published_checkpoint_and_saves_what_generation_reads(tmp_
   windows = np.random.default_rng((0, 0)).integers(0, cfg.vocab_size, (16, 17), dtype=np.int32)
   language = {k: v for k, v in params.items() if k not in ("vision", "projector")}
   logits = command_a.forward(cfg, language, windows[:, :-1], dtype=np.float32)
-  loss = float(command_a.cross_entropy(logits, windows[:, 1:]))
+  loss = float(losses.masked_cross_entropy(logits, windows[:, 1:]))
   assert trained[0]["loss"] == pytest.approx(loss, rel=1e-5)
 
   # --save_params wrote the language model after the last step: a run from it, which

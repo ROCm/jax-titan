@@ -32,6 +32,8 @@ from maxdiffusion.models.ideogram.transformer_ideogram import Ideogram4Config
 from maxdiffusion.models.ideogram.transformer_ideogram import Ideogram4MRoPE
 from maxdiffusion.models.ideogram.transformer_ideogram import Ideogram4Transformer
 
+from jax_titan.models import losses
+
 PINNED_COMMIT = "6db5c17257ea6a37b444ef5669ebc730350e94b0"
 _FIRST = ("input_proj", "llm_cond_norm", "llm_cond_proj", "t_embedding", "adaln_proj",
           "embed_image_indicator")
@@ -40,8 +42,7 @@ _LAST = ("final_layer",)
 
 def flow_matching_loss(pred: jax.Array, target: jax.Array) -> jax.Array:
   """The branch's loss: mean squared error to latents minus noise, over the image tokens."""
-  pred = pred[:, -target.shape[1]:]
-  return jnp.mean((target.astype(jnp.float32) - pred.astype(jnp.float32)) ** 2)
+  return losses.mean_squared_error(pred[:, -target.shape[1]:], target)
 
 
 def timesteps(z: np.ndarray, resolution: int) -> np.ndarray:

@@ -20,7 +20,7 @@ import transformers
 from transformers.integrations import moe
 from transformers.models.auto import configuration_auto
 
-from jax_titan.models import llama
+from jax_titan.models import losses
 from jax_titan.models.adapters import torch_bridge
 
 PINNED_VERSION = "5.23.0"
@@ -111,13 +111,13 @@ def config(name: str, **overrides) -> transformers.PretrainedConfig:
 
 
 def _loss(forward, tokens, targets):
-  return llama.cross_entropy(forward({"input_ids": tokens}), targets)
+  return losses.cross_entropy(forward({"input_ids": tokens}), targets)
 
 
 def causal_lm(cfg: transformers.PretrainedConfig, *, seed: int, dtype, remat: bool = True,
               init_from: str = "") -> torch_bridge.Bridged:
   """The causal language model of `cfg` as one stage, with the loss
-  `llama.cross_entropy` of its logits.
+  `losses.cross_entropy` of its logits.
 
   Its weights are the library's initialization under `seed`, or those of the
   directory `init_from` (`from_pretrained`), in fp32. `remat` rematerializes

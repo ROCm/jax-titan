@@ -14,6 +14,7 @@ import optax
 import pytest
 
 from jax_titan.models import command_a
+from jax_titan.models import losses
 from jax_titan.models import pretrained
 
 CONFIG = command_a_checkpoint.CONFIG
@@ -44,7 +45,7 @@ def _loss(cfg, params, tokens, pixels, valid):
   """The loss of the next tokens, those that are not image tokens."""
   logits = command_a.forward(cfg, params, tokens, pixels, valid, jnp.float32)
   targets = np.where(tokens == cfg.image_token_id, -100, tokens)
-  return command_a.cross_entropy(logits[:, :-1], targets[:, 1:]), logits
+  return losses.masked_cross_entropy(logits[:, :-1], targets[:, 1:]), logits
 
 
 def _loss_and_gradient_norm(name):
@@ -137,10 +138,11 @@ def test_a_flat_step_takes_the_mean_of_its_microbatches_means():
   logits = rng.standard_normal((4, 6, 16)).astype(np.float32)
   targets = rng.integers(0, 16, (4, 6)).astype(np.int32)
   targets[:2, :4] = -1  # The first microbatch of two sequences has 4 targets, the second 12.
-  halves = [float(command_a.cross_entropy(logits[i:i + 2], targets[i:i + 2])) for i in (0, 2)]
-  flat = float(command_a.cross_entropy(logits, targets, microbatches=2))
+  halves = [float(losses.masked_cross_entropy(logits[i:i + 2], targets[i:i + 2]))
+            for i in (0, 2)]
+  flat = float(losses.masked_cross_entropy(logits, targets, microbatches=2))
   assert flat == pytest.approx(np.mean(halves), rel=1e-6)
-  assert abs(flat - float(command_a.cross_entropy(logits, targets))) > 1e-3
+  assert abs(flat - float(losses.masked_cross_entropy(logits, targets))) > 1e-3
 
 
 def test_frozen_weights_cost_no_weight_gradient_and_groups_are_named():
