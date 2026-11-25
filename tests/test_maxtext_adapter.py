@@ -115,7 +115,7 @@ def test_whole_model_gives_maxtexts_loss_and_gradient(name):
 
 @pytest.mark.gpu
 @pytest.mark.parametrize("name", ["llama3.1-8b", "llama3-8b"])
-def test_own_llama_gives_the_whole_models_loss_and_gradient(name):
+def test_jax_titan_llama_gives_the_whole_models_loss_and_gradient(name):
   """JAX-Titan's own Llama against MaxText's, from MaxText's weights: with Llama 3.1's
   RoPE, which rotates adjacent pairs and scales its frequencies, and with Llama 3's."""
   import jax  # pylint: disable=g-import-not-at-top

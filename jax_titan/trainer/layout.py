@@ -161,7 +161,7 @@ def _init_state(args, model: contract.Model, optimizer, meshes, fsdp=False):
   """
   import jax  # pylint: disable=g-import-not-at-top
   from jax_titan import parallel  # pylint: disable=g-import-not-at-top
-  from jax_titan.models import pretrained  # pylint: disable=g-import-not-at-top
+  from jax_titan.models import weights  # pylint: disable=g-import-not-at-top
 
   def shardings(tree, mesh):
     if fsdp:
@@ -184,7 +184,7 @@ def _init_state(args, model: contract.Model, optimizer, meshes, fsdp=False):
   def place(trained=True):
     """The trained and the frozen parameters on their shardings; without
     `trained`, where the model reads a part of its weights, the frozen alone."""
-    if args.init_from and hasattr(model, "place") and pretrained.is_safetensors(args.init_from):
+    if args.init_from and hasattr(model, "place") and weights.is_safetensors(args.init_from):
       targets = tuple(abstract(f, fs) for f, fs in zip(frozen_shapes, frozen_sh))
       if trained:
         targets = tuple(

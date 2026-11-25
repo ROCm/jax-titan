@@ -1,8 +1,10 @@
 """The names of `--model`, the modules that implement them, their
 configurations and builders, and the contract the trainer reads a model by."""
 
+import ast
 import dataclasses
 import importlib
+import pathlib
 
 import optax
 import pytest
@@ -82,3 +84,22 @@ def test_models_meet_the_contract():
   ]
   for model in made:
     assert isinstance(model, contract.Model), type(model)
+
+
+def test_no_model_imports_another():
+  """Of `jax_titan.models`, a model's module takes the shared modules and its own alone."""
+  shared = {"config", "contract", "losses", "weights"}
+  root = pathlib.Path(models.__file__).parent
+  for short in sorted(set(models.MODELS.values())):
+    files = sorted((root / short).glob("*.py")) or [root / f"{short}.py"]
+    for file in files:
+      for node in ast.walk(ast.parse(file.read_text())):
+        if not isinstance(node, ast.ImportFrom) or not (node.module or "").startswith(
+            "jax_titan.models"):
+          continue
+        if node.module == "jax_titan.models":
+          taken = {alias.name for alias in node.names}
+        else:
+          taken = {node.module.removeprefix("jax_titan.models.").partition(".")[0]}
+        assert taken <= shared | {short}, (file.name, sorted(taken))
+

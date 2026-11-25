@@ -1,8 +1,8 @@
 # Model definition: design
 
-A proposal under discussion: the code does not implement it yet. It covers how a model is defined
-and how it gets into the trainer. How the trainer places and steps a model stays as it is today
-and is taken up later, with sharding and pipelines.
+The design of how a model is defined and how it gets into the trainer, as the code implements it;
+[../adding_a_model.md](../adding_a_model.md) has the steps for a new model. How the trainer places
+and steps a model stays as it is today and is taken up later, with sharding and pipelines.
 
 ## From a model's definition to the trainer
 

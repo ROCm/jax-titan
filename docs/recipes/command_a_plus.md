@@ -3,7 +3,7 @@
 Command A+ is Cohere's open-weight language model of 218.75B parameters. It is
 a sparse mixture-of-experts transformer: in each of its 32 layers a router
 sends a token to 8 of 128 experts, and a SigLIP vision tower lets it read
-images. JAX-Titan has it as its own model (`models/command_a.py`): it trains
+images. JAX-Titan has it as its own model (`models/command_a/`): it trains
 a reduced size of the model on text, answers prompts of text and pictures
 with the published weights, and fine-tunes those weights on conversations.
 
@@ -55,7 +55,7 @@ python -m jax_titan.observability.summarize runs/command-a-plus
 437.5 GB. The command needs the `command_a` extra.
 
 ```bash
-HIP_VISIBLE_DEVICES=0,1,2,3 python -m jax_titan.models.command_a_generate --checkpoint=$CKPT \
+HIP_VISIBLE_DEVICES=0,1,2,3 python -m jax_titan.models.command_a.generate --checkpoint=$CKPT \
   --prompt="What is in this image?" --image=docs/images/ideogram4_retriever.jpg
 ```
 
@@ -83,7 +83,7 @@ through the trees.<|END_TEXT|><|END_OF_TURN_TOKEN|>
 A question without a picture:
 
 ```bash
-HIP_VISIBLE_DEVICES=0,1,2,3 python -m jax_titan.models.command_a_generate --checkpoint=$CKPT \
+HIP_VISIBLE_DEVICES=0,1,2,3 python -m jax_titan.models.command_a.generate --checkpoint=$CKPT \
   --prompt="What has keys but can't open locks?"
 ```
 
@@ -134,7 +134,7 @@ HIP_VISIBLE_DEVICES=0,1,2,3 XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" \
   --eval_every=10 --eval_batches=9 --save_params=finetuned \
   --freeze=experts,embed --run_dir=runs/command-a-plus-finetune
 
-HIP_VISIBLE_DEVICES=0,1,2,3 python -m jax_titan.models.command_a_generate --checkpoint=$CKPT \
+HIP_VISIBLE_DEVICES=0,1,2,3 python -m jax_titan.models.command_a.generate --checkpoint=$CKPT \
   --params=finetuned --prompt="I'm curious about Quorvath. What moons does it have?"
 ```
 

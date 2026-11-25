@@ -279,7 +279,7 @@ def parse_args(argv=None):
       "--save_params", default="",
       help="Writes the model's parameters here after the last step, as --init_from reads "
       "them (ideogram4, command-a-plus). A model with frozen parameters writes the trained "
-      "ones alone, which command_a_generate --params reads and --init_from does not. The "
+      "ones alone, which command_a.generate --params reads and --init_from does not. The "
       "directory must not exist.",
   )
   parser.add_argument(
@@ -712,10 +712,10 @@ def main(argv=None, listeners=()):
       ckpt.close()
       log.event("checkpoint_closed", seconds=time.time() - t0)
     if args.save_params:
-      from jax_titan.trainer import checkpoint  # pylint: disable=g-import-not-at-top
+      from jax_titan.models import weights  # pylint: disable=g-import-not-at-top
 
       t0 = time.time()
-      checkpoint.save_params(args.save_params, layout.export(params))
+      weights.save_params(args.save_params, layout.export(params))
       print(f"saved parameters to {args.save_params} in {time.time() - t0:.1f}s", flush=True)
   except BaseException as e:
     status = f"{type(e).__name__}: {e}"[:500]

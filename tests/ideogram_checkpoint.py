@@ -7,7 +7,8 @@ import ml_dtypes
 import numpy as np
 import pytest
 
-from jax_titan.models import ideogram, pretrained, qwen3
+from jax_titan.models import ideogram, weights
+from jax_titan.models.ideogram import qwen3
 
 WORDS = ("[UNK]", "<|im_start|>", "<|im_end|>", "user", "assistant", "a", "b", "c")
 # The text features are the three tapped layers of the text encoder, and an image token is a
@@ -66,7 +67,7 @@ def published(params, fp8: bool = False) -> dict:
 
 def _write(path, config: dict, tensors: dict):
   path.mkdir()
-  pretrained.write(path / "model.safetensors", tensors)
+  weights.write(path / "model.safetensors", tensors)
   (path / "config.json").write_text(json.dumps(config))
 
 

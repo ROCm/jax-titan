@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 from jax_titan.models import command_a
-from jax_titan.models import command_a_generate
+from jax_titan.models.command_a import generate as command_a_generate
 
 CONFIG = command_a_checkpoint.CONFIG
 # The published files without the weights, to compare with transformers' processor.

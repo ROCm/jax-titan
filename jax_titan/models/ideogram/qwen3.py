@@ -16,7 +16,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from jax_titan import ops
-from jax_titan.models import pretrained
+from jax_titan.models import weights as weights_lib
 
 
 @dataclasses.dataclass(frozen=True)
@@ -48,7 +48,7 @@ def pretrained_config(path) -> Qwen3Config:
     theta = values.get("rope_parameters", {}).get("rope_theta", values.get("rope_theta"))
     return values if theta is None else values | {"rope_theta": float(theta)}
 
-  return pretrained.config(Qwen3Config, path, text_tower)
+  return weights_lib.config(Qwen3Config, path, text_tower)
 
 
 def init_params(cfg: Qwen3Config, key: jax.Array) -> dict:
@@ -85,7 +85,7 @@ def params_from_tensors(tensors: dict, cfg: Qwen3Config) -> dict:
   prefix = next(k for k in tensors if k.endswith(suffix))[:-len("embed_tokens.weight")]
 
   def kernel(name):
-    return pretrained.weight(tensors, prefix + name + ".weight").T
+    return weights_lib.weight(tensors, prefix + name + ".weight").T
 
   def vector(name):
     return np.asarray(tensors[prefix + name + ".weight"]).astype(np.float32)
@@ -115,7 +115,7 @@ def load(path, dtype=jnp.bfloat16) -> tuple[Qwen3Config, dict]:
   """The config and the parameters in `dtype`, on the default device, of the
   published weights at `path`, a safetensors file or a directory of them."""
   cfg = pretrained_config(path)
-  return cfg, pretrained.to_device(params_from_tensors(pretrained.read(path), cfg), dtype)
+  return cfg, weights_lib.to_device(params_from_tensors(weights_lib.read(path), cfg), dtype)
 
 
 def tokenize(tokenizer_dir, prompts: list[str]) -> tuple[np.ndarray, np.ndarray]:

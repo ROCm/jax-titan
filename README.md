@@ -67,7 +67,7 @@ This is the target design; [What works](#what-works) lists what runs today.
 - Command A+, Cohere's sparse mixture-of-experts language model with a vision
   tower, as JAX-Titan's own model, written after transformers' implementation
   and matching it in logits, loss and gradients.
-  `jax_titan.models.command_a_generate` answers prompts of text and pictures
+  `jax_titan.models.command_a.generate` answers prompts of text and pictures
   with the published weights of 218.75B parameters on 4 GPUs in bf16, and on 7
   GPUs in fp32 gives transformers' answers token for token.
   `--model=command-a-plus` fine-tunes those
@@ -171,6 +171,8 @@ FLUX.1-dev's timestep embedding at the pinned commit.
 container, the from-source JAX build and the Python environment.
 [docs/tools.md](docs/tools.md) lists the scripts, command-line tools and agent
 skills by the stage of a training job they serve.
+[docs/adding_a_model.md](docs/adding_a_model.md) says how a model is added:
+its module, its names and its builder.
 [docs/adapters](docs/adapters) has one page per model repository whose models
 train here: what comes from the repository and what from JAX-Titan, how to
 run a model, and how the adapter is verified; and how to compare an adapter

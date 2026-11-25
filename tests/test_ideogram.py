@@ -19,8 +19,9 @@ import pytest
 
 from jax_titan import parallel
 from jax_titan.models import ideogram
+from jax_titan.models import weights
 from jax_titan.observability import records
-from jax_titan.trainer import builders, checkpoint, layout, train
+from jax_titan.trainer import builders, layout, train
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 # The rotary sections end below the head's 16 frequencies, as they do at full size, so the
@@ -276,7 +277,7 @@ def test_load_reads_saved_params(tmp_path):
   cfg = ideogram.IdeogramConfig(**CONFIG)
   model = ideogram.Model(cfg, num_stages=2, dtype=jnp.float32)
   params = ideogram.init_params(cfg, jax.random.key(3))
-  checkpoint.save_params(tmp_path / "params", params)
+  weights.save_params(tmp_path / "params", params)
   for a, b in zip(jax.tree.leaves(model.load(tmp_path / "params")),
                   jax.tree.leaves(model.split(params))):
     np.testing.assert_array_equal(a, b)
@@ -354,7 +355,7 @@ def test_init_from_starts_from_given_params(dp_reference, tmp_path):
   reference, _ = dp_reference
   cfg = ideogram.IdeogramConfig(**CONFIG)
   flags = ["--parallel=dp", "--steps=1"]
-  checkpoint.save_params(tmp_path / "saved", ideogram.init_params(cfg, jax.random.key(1)))
+  weights.save_params(tmp_path / "saved", ideogram.init_params(cfg, jax.random.key(1)))
   other = _run(tmp_path / "other.jsonl", *flags, f"--init_from={tmp_path / 'saved'}")
   assert other[0]["loss"] != pytest.approx(reference[0]["loss"], rel=1e-3)
   # Published weights bring their config, so the overrides need not repeat it.

@@ -39,9 +39,9 @@ def resolve(module, name: str, init_from: str = "", overrides: dict | None = Non
   A JSON list becomes a tuple and a JSON object the dataclass of its field. A
   key that is not a field is refused.
   """
-  from jax_titan.models import pretrained  # pylint: disable=g-import-not-at-top
+  from jax_titan.models import weights  # pylint: disable=g-import-not-at-top
 
-  if init_from and hasattr(module, "pretrained_config") and pretrained.is_safetensors(init_from):
+  if init_from and hasattr(module, "pretrained_config") and weights.is_safetensors(init_from):
     cfg = module.pretrained_config(init_from)
   else:
     cfg = module.CONFIGS[name]

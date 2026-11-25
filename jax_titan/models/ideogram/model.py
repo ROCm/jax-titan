@@ -7,8 +7,8 @@ by the image tokens, runs through identical blocks: RMSNorm before and after
 attention and the SwiGLU MLP, normalized queries and keys, rotary embeddings
 over three position axes, and a scale and a gate on each half from the
 timestep. Text features come from the text encoder's hidden states
-(`jax_titan.models.qwen3`) and image tokens from 2x2 patches of the
-autoencoder's latents (`jax_titan.models.flux2_vae`).
+(`jax_titan.models.ideogram.qwen3`) and image tokens from 2x2 patches of the
+autoencoder's latents (`jax_titan.models.ideogram.flux2_vae`).
 
 A stage holds a contiguous run of blocks; stage 0 also holds the input
 projections and the timestep embedding, and the last stage the output layer.
@@ -26,7 +26,7 @@ import numpy as np
 
 from jax_titan import ops
 from jax_titan.models import losses
-from jax_titan.models import pretrained
+from jax_titan.models import weights as weights_lib
 
 # Values of `indicator` and `segment_ids`, and the offset of image positions.
 PADDING_SEGMENT = -1
@@ -230,11 +230,6 @@ def init_params(cfg: IdeogramConfig, key: jax.Array) -> dict:
   }
 
 
-def pretrained_config(path) -> IdeogramConfig:
-  """The config of published weights, from the `config.json` beside them."""
-  return pretrained.config(IdeogramConfig, path)
-
-
 def caption(text: str) -> str:
   """`text` as Ideogram 4 reads a caption. The model is trained on JSON objects
   written without spaces, so one that is written otherwise is written so; any
@@ -247,64 +242,6 @@ def caption(text: str) -> str:
   if not isinstance(value, dict):
     return text
   return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
-
-
-def pretrained_params(path, cfg: IdeogramConfig) -> dict:
-  """`init_params`-shaped fp32 parameters, on the host, from published weights.
-
-  `path` is a safetensors file or a directory of them in the layout of
-  Ideogram's own model, which the published checkpoints keep: one `qkv`
-  weight per block, and the MLP's gate, up and down weights as `w1`, `w3`
-  and `w2`.
-  """
-  tensors = pretrained.read(path)
-  n, e = cfg.num_layers, cfg.emb_dim
-
-  def kernel(name):
-    return pretrained.weight(tensors, name + ".weight").T
-
-  def vector(name):
-    return np.asarray(tensors[name]).astype(np.float32)
-
-  def stacked(fn, name):
-    return np.stack([fn(f"layers.{i}.{name}") for i in range(n)])
-
-  qkv = stacked(kernel, "attention.qkv")
-  return {
-      "layers": {
-          "attn_norm": stacked(vector, "attention_norm1.weight"),
-          "wq": qkv[..., :e],
-          "wk": qkv[..., e:2 * e],
-          "wv": qkv[..., 2 * e:],
-          "q_norm": stacked(vector, "attention.norm_q.weight"),
-          "k_norm": stacked(vector, "attention.norm_k.weight"),
-          "wo": stacked(kernel, "attention.o"),
-          "attn_out_norm": stacked(vector, "attention_norm2.weight"),
-          "mlp_norm": stacked(vector, "ffn_norm1.weight"),
-          "w_gate": stacked(kernel, "feed_forward.w1"),
-          "w_up": stacked(kernel, "feed_forward.w3"),
-          "w_down": stacked(kernel, "feed_forward.w2"),
-          "mlp_out_norm": stacked(vector, "ffn_norm2.weight"),
-          "w_mod": stacked(kernel, "adaln_modulation"),
-          "b_mod": stacked(vector, "adaln_modulation.bias"),
-      },
-      "w_in": kernel("input_proj"),
-      "b_in": vector("input_proj.bias"),
-      "text_norm": vector("llm_cond_norm.weight"),
-      "w_text": kernel("llm_cond_proj"),
-      "b_text": vector("llm_cond_proj.bias"),
-      "w_time_in": kernel("t_embedding.mlp_in"),
-      "b_time_in": vector("t_embedding.mlp_in.bias"),
-      "w_time_out": kernel("t_embedding.mlp_out"),
-      "b_time_out": vector("t_embedding.mlp_out.bias"),
-      "w_cond": kernel("adaln_proj"),
-      "b_cond": vector("adaln_proj.bias"),
-      "image_embed": vector("embed_image_indicator.weight"),
-      "w_final_mod": kernel("final_layer.adaln_modulation"),
-      "b_final_mod": vector("final_layer.adaln_modulation.bias"),
-      "w_out": kernel("final_layer.linear"),
-      "b_out": vector("final_layer.linear.bias"),
-  }
 
 
 def noised(latents, noise, t):
@@ -509,18 +446,18 @@ class Model:
 
   def load(self, path: str) -> tuple[dict, ...]:
     """Stage parameters: on the host from published weights, when `path` is a
-    safetensors file or a directory of them (`pretrained_params`); otherwise
-    on one device from `init_params`-shaped parameters that
-    `jax_titan.trainer.checkpoint.save_params` wrote."""
-    from jax_titan.trainer import checkpoint  # pylint: disable=g-import-not-at-top
+    safetensors file or a directory of them (`weights.pretrained_params`);
+    otherwise on one device from `init_params`-shaped parameters that
+    `jax_titan.models.weights.save_params` wrote."""
+    from jax_titan.models.ideogram import weights  # pylint: disable=g-import-not-at-top
 
-    if pretrained.is_safetensors(path):
-      return self.split(pretrained_params(path, self.config))
+    if weights_lib.is_safetensors(path):
+      return self.split(weights.pretrained_params(path, self.config))
     device = jax.sharding.make_single_device_sharding(jax.local_devices()[0])
     target = jax.tree.map(
         lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=device),
         jax.eval_shape(lambda: init_params(self.config, jax.random.key(0))))
-    return self.split(checkpoint.restore_params(path, target))
+    return self.split(weights_lib.restore_params(path, target))
 
   def forward(self, stage: int, params: dict, x):
     """Runs one stage.

@@ -9,7 +9,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from jax_titan.models import qwen3
+from jax_titan.models.ideogram import qwen3
 
 CONFIG = {
     "vocab_size": 64, "hidden_size": 32, "num_hidden_layers": 4, "num_attention_heads": 4,

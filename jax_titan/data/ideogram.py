@@ -85,7 +85,8 @@ def prepare(checkpoint, images, out, *, resolution: int = 1024, prompt: str = ""
             log=print) -> None:
   """Writes the cache of the images under `images` to the new directory `out`."""
   import jax  # pylint: disable=g-import-not-at-top
-  from jax_titan.models import flux2_vae, ideogram, qwen3  # pylint: disable=g-import-not-at-top
+  from jax_titan.models import ideogram  # pylint: disable=g-import-not-at-top
+  from jax_titan.models.ideogram import flux2_vae, qwen3  # pylint: disable=g-import-not-at-top
 
   checkpoint, out = pathlib.Path(checkpoint), pathlib.Path(out)
   if out.exists():

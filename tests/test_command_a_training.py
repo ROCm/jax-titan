@@ -19,10 +19,11 @@ import pytest
 from jax_titan import parallel
 from jax_titan.data import command_a as data
 from jax_titan.models import command_a
-from jax_titan.models import command_a_generate
+from jax_titan.models.command_a import generate as command_a_generate
 from jax_titan.models import losses
+from jax_titan.models import weights
 from jax_titan.observability import records
-from jax_titan.trainer import builders, checkpoint, train
+from jax_titan.trainer import builders, train
 from jax_titan.trainer.layout import EVAL_STEPS
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -128,7 +129,7 @@ def test_frozen_parameters_stay_and_a_pipeline_matches_one_stage(tmp_path):
   assert everything[3]["loss"] != reference[3]["loss"]
 
   # --save_params wrote the trained parameters alone, and they moved.
-  trained = checkpoint.restore_saved(saved)
+  trained = weights.restore_saved(saved)
   assert sorted(trained) == ["final_norm", "layers"]
   assert sorted(trained["layers"]) == [
       "norm", "shared_down", "shared_gate", "shared_up", "w_router", "wk", "wo", "wq", "wv"]
