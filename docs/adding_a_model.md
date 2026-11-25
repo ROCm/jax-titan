@@ -3,7 +3,7 @@
 A model is a module of `jax_titan/models`, its names in one table and a
 builder in the trainer. The trainer's loop names no model: it finds the
 builder by the model's module, and the builder gives the model to a layout.
-[design/model_definition.md](design/model_definition.md) has the design and
+[design/models_and_parallelism.md](design/models_and_parallelism.md) has the design and
 an example of every kind of model; `models/llama.py` is the smallest model to
 read.
 
