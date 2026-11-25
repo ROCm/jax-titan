@@ -90,7 +90,7 @@ def test_maxtext_starts_from_a_parameter_checkpoint(tmp_path):
 
   # The trainer initializes from seed 0: the checkpoint holds seed 1's parameters.
   cfg = mt.config("llama3.1-8b", max_target_length=32, remat_policy="full", **MAXTEXT_OVERRIDES)
-  model = mt.WholeModel(cfg, mt.mesh(cfg, jax.devices()[:4]))
+  model = mt.AdapterModel(cfg, mt.mesh(cfg, jax.devices()[:4]))
   (full,) = model.init(1)
   path = str(tmp_path / "params")
   checkpointing.save_params_to_path(path, {"params": full})

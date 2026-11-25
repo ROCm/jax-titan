@@ -46,7 +46,7 @@ def test_stages_match_the_transformer(num_stages, blocks):
   from jax_titan.models.adapters import ideogram as ig  # pylint: disable=g-import-not-at-top
 
   cfg = ig.Ideogram4Config(**CONFIG)
-  model = ig.Model(cfg, num_stages=num_stages, blocks=blocks, dtype=jnp.float32)
+  model = ig.AdapterModel(cfg, num_stages=num_stages, blocks=blocks, dtype=jnp.float32)
   transformer = ig.Ideogram4Transformer(nnx.Rngs(0), cfg, dtype=jnp.float32)
   stage_params = model.split(nnx.state(transformer, nnx.Param).to_pure_dict())
   for a, b in zip(jax.tree.leaves(stage_params), jax.tree.leaves(model.init(0))):
@@ -87,7 +87,7 @@ def _models(num_stages=1, blocks=None):
   from jax_titan.models.adapters import ideogram as ig  # pylint: disable=g-import-not-at-top
 
   cfg = ig.Ideogram4Config(**CONFIG)
-  adapter = ig.Model(cfg, num_stages=num_stages, blocks=blocks, dtype=jnp.float32)
+  adapter = ig.AdapterModel(cfg, num_stages=num_stages, blocks=blocks, dtype=jnp.float32)
   own = ideogram.Model(
       ideogram.IdeogramConfig(
           in_channels=cfg.in_channels, num_layers=cfg.num_layers,

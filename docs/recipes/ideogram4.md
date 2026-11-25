@@ -321,7 +321,7 @@ outside any mesh:
   code has no such filter.
 - The cache keeps the text features of every distinct caption, 0.1 MB per
   text token.
-- The model trains through the layouts of `jax_titan.trainer.adapters`:
+- The model trains through the layouts of `jax_titan.trainer.layout`:
   FSDP or data parallelism without a pipeline, or a pipeline with data
   parallelism inside its stages and gradients reduced per microbatch. It has
   no tensor parallelism and no FSDP inside pipeline stages.

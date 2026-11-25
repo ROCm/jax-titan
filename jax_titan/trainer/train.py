@@ -6,7 +6,7 @@
 (`flux-dev`, `flux-schnell`), or a model of another repository; Llama, FLUX.1
 and the models of other repositories take `--parallel=dp` or `fsdp`:
 `maxtext:<name>`, `maxdiffusion:<name>`, `transformers:<name>` or
-`diffusers:<name>` (see `jax_titan.trainer.adapters` and docs/adapters).
+`diffusers:<name>` (see `jax_titan.trainer.builders` and docs/adapters).
 
 `--parallel=dp` and `--parallel=fsdp` train the same model on the same batches
 without the pipeline, as one `jax.jit` program over all devices.
@@ -20,8 +20,9 @@ import os
 import socket
 import time
 
+from jax_titan import models
 from jax_titan import paths
-from jax_titan.trainer import adapters
+from jax_titan.trainer import builders
 from jax_titan.trainer.layout import EVAL_STEPS
 
 
@@ -29,11 +30,12 @@ def parse_args(argv=None):
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument(
       "--model", default="llama3.1-8b",
-      help="ideogram4, command-a-plus, or, with --parallel=dp or fsdp, a Llama flavor "
-      "(llama3.1-8b, llama3-test), flux-dev, flux-schnell or a model of another repository: "
+      help=f"A JAX-Titan model ({', '.join(models.MODELS)}), or a model of another repository "
+      f"as <source>:<name>, with a source of {', '.join(models.SOURCES)}: "
       "maxtext:<MaxText model name>, maxdiffusion:flux-dev, maxdiffusion:flux-schnell or "
       "maxdiffusion:wan2.1-t2v-1.3b, transformers:<directory or model type>, "
-      "diffusers:<denoiser class or directory>. maxdiffusion:ideogram4 is the pipeline of "
+      "diffusers:<denoiser class or directory>. Llama, FLUX.1 and a model of another "
+      "repository take --parallel=dp or fsdp; maxdiffusion:ideogram4 is the pipeline of "
       "MaxDiffusion's Ideogram branch.",
   )
   parser.add_argument(
@@ -275,7 +277,7 @@ def parse_args(argv=None):
   parser.add_argument("--seed", type=int, default=0)
   args = parser.parse_args(argv)
   if args.num_stages is None:
-    args.num_stages = adapters.default_num_stages(args.model)
+    args.num_stages = builders.default_num_stages(args.model)
   return args
 
 
@@ -385,11 +387,12 @@ def main(argv=None, listeners=()):
     raise ValueError("--target_eval_loss needs validation passes: set --eval_every")
   if eval_count % eval_batch:
     raise ValueError(f"--eval_samples={eval_count} is not whole batches of {eval_batch}")
-  if (args.eval_samples or args.eval_batch_size) and args.model not in adapters.LLAMA:
+  is_llama = models.MODELS.get(args.model) == "llama"
+  if (args.eval_samples or args.eval_batch_size) and not is_llama:
     raise NotImplementedError("--eval_samples and --eval_batch_size are for Llama flavors")
-  if args.synthetic_warmup and args.model not in adapters.LLAMA:
+  if args.synthetic_warmup and not is_llama:
     raise NotImplementedError("--synthetic_warmup is for Llama flavors")
-  layout, work = adapters.build(args, devices, make_optimizer)
+  layout, work = builders.build(args, devices, make_optimizer)
   print(
       f"jax {jax.__version__} | {len(devices)} x {devices[0].device_kind} | "
       f"{args.model} ({work.num_params / 1e9:.2f}B params) | {description}",

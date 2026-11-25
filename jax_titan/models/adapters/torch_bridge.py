@@ -69,7 +69,7 @@ def is_norm(module: torch.nn.Module) -> bool:
   return isinstance(module, _NORMS) or "Norm" in type(module).__name__
 
 
-class Bridged:
+class AdapterModel:
   """`module` as one stage: `init`, `abstract`, `stage_fns`, `logical_axes`, `decays`.
 
   The parameters are the module's own, under PyTorch's dotted names and as

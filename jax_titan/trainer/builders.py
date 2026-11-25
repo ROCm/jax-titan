@@ -1,5 +1,8 @@
-"""Trainer layouts for models from MaxText, MaxDiffusion, transformers and
-diffusers, for Llama, for Ideogram 4, for Command A+ and for FLUX.1.
+"""The trainer's builders: one function per JAX-Titan model and per repository
+of models. A builder makes, from the flags, the model that `--model` names and
+gives it to a layout function; it returns the `Layout` and the `Workload`
+(`jax_titan.trainer.layout`). `build` finds the builder in `BUILDERS` by the
+module that implements the model (`jax_titan.models`).
 
 A model of another repository trains as one stage, the repository's model
 called whole, with `--parallel=dp` or `fsdp`:
@@ -33,27 +36,6 @@ as one stage, and `--model=llama3.1-8b` JAX-Titan's Llama
 `--parallel=dp` runs the same stages, weights and batches as one data-parallel
 `jax.jit` program, the no-pipeline reference, and `--parallel=fsdp` also shards
 parameters and optimizer state.
-
-The layouts here take a staged model, any object with `init(seed)` and
-`abstract(seed)`, the parameters of each stage and their shapes, and
-`stage_fns()`, one function per stage, the last of which returns the loss.
-`--init_from` needs its `load(path)`, `--parallel=fsdp` its
-`logical_axes(path, leaf)` and `--save_params` its `merge(stage_params)`. Its
-`decays(path, leaf)` says which of its parameters take weight decay; a builder
-gives it to `make_optimizer`.
-
-A model may train only part of its parameters. Its stage parameters are then
-nested dicts, and `is_frozen(path)` tells, for the tuple of dict keys that
-leads to a parameter in a stage's dicts, whether it stays as it is. Frozen
-parameters are no part of the trained state: they get no gradient and no
-optimizer state, are held in the model's compute dtype, its attribute `dtype`,
-and neither a checkpoint nor `--save_params` holds them, so a run that resumes
-reads them again from where the run took them. A model that can read weights
-straight onto devices has `place(path, targets)`, which `--init_from` then
-uses for published weights, a directory of safetensors files: a checkpoint
-larger than the host's memory loads this way. `targets` is one tree of
-ShapeDtypeStructs with shardings per stage, all of a stage's parameters or
-its frozen ones alone.
 """
 
 import dataclasses
@@ -61,22 +43,21 @@ import functools
 import json
 import os
 
-from jax_titan.trainer.layout import EVAL_STEPS, Layout, Workload, abstract, placement
-
-PROVIDERS = ("maxtext", "maxdiffusion", "transformers", "diffusers")
-FLUX = ("flux-dev", "flux-schnell")
-LLAMA = ("llama3.1-8b", "llama3-test")
-# JAX-Titan's own models.
-MODELS = ("ideogram4", "command-a-plus") + FLUX + LLAMA
+from jax_titan import models
+from jax_titan.trainer.layout import EVAL_STEPS
+from jax_titan.trainer.layout import Layout
+from jax_titan.trainer.layout import mpmd_layout
+from jax_titan.trainer.layout import spmd_layout
+from jax_titan.trainer.layout import stage_topology
+from jax_titan.trainer.layout import Workload
 
 
 def default_num_stages(model: str) -> int:
   """`--num_stages` where it is not given: 2, and 1 for a model of another
   repository, which is called whole, and for FLUX.1 and Llama, which have no
   pipeline."""
-  provider, _, name = model.partition(":")
-  whole = provider in PROVIDERS and (provider, name) != ("maxdiffusion", "ideogram4")
-  return 1 if whole or model in FLUX + LLAMA else 2
+  whole = model.partition(":")[0] in models.SOURCES and model != "maxdiffusion:ideogram4"
+  return 1 if whole or models.MODELS.get(model) in ("flux", "llama") else 2
 
 
 def _overrides(args) -> dict:
@@ -91,280 +72,6 @@ def _num_params(shapes) -> int:
   import jax  # pylint: disable=g-import-not-at-top
 
   return sum(x.size for x in jax.tree.leaves(shapes))
-
-
-def _topology(args, devices, make_mesh) -> dict:
-  """One mesh per group of stages from `make_mesh(devices)`."""
-  from jax_titan import mpmd as jt_mpmd  # pylint: disable=g-import-not-at-top
-
-  num_meshes = args.num_stages // args.stages_per_mesh
-  if len(devices) % num_meshes:
-    raise ValueError(f"{len(devices)} devices do not split into {num_meshes} meshes")
-  per_mesh = len(devices) // num_meshes
-  if args.microbatch_size % per_mesh:
-    raise ValueError(
-        f"--microbatch_size={args.microbatch_size} does not split across "
-        f"{per_mesh} data-parallel ranks per stage"
-    )
-  return {
-      jt_mpmd.mesh_name(i): make_mesh(devices[i * per_mesh:(i + 1) * per_mesh])
-      for i in range(num_meshes)
-  }
-
-
-def _is_pair(v) -> bool:
-  import jax  # pylint: disable=g-import-not-at-top
-
-  return isinstance(v, tuple) and len(v) == 2 and isinstance(v[1], jax.sharding.PartitionSpec)
-
-
-def _shardings(specs, mesh):
-  import jax  # pylint: disable=g-import-not-at-top
-
-  return jax.tree.map(lambda v: jax.sharding.NamedSharding(mesh, v[1]), specs, is_leaf=_is_pair)
-
-
-def _shapes(specs):
-  import jax  # pylint: disable=g-import-not-at-top
-
-  return jax.tree.map(lambda v: v[0], specs, is_leaf=_is_pair)
-
-
-def _split(tree, is_frozen):
-  """The trained and the frozen leaves of `tree`, nested dicts, as two such
-  trees; a dict left without a leaf is dropped."""
-
-  def part(node, path, frozen):
-    if not isinstance(node, dict):
-      return node if bool(is_frozen(path)) == frozen else None
-    parts = {k: part(v, path + (k,), frozen) for k, v in node.items()}
-    return {k: v for k, v in parts.items() if v is not None and not (isinstance(v, dict) and not v)}
-
-  return part(tree, (), False), part(tree, (), True)
-
-
-def _merged(a: dict, b: dict) -> dict:
-  """The union of two trees of nested dicts that share no leaf."""
-  out = dict(a)
-  for k, v in b.items():
-    out[k] = _merged(a[k], v) if k in a else v
-  return out
-
-
-def _on_pair(fn):
-  """`fn`, a stage function, taking its parameters as the pair (trained, frozen)."""
-  return lambda pair, *args: fn(_merged(*pair), *args)
-
-
-def _init_state(args, model, optimizer, meshes, fsdp=False):
-  """Init and abstract state for stage state on its mesh: replicated, or with
-  `fsdp` sharded along the model's logical axes.
-
-  Also returns the shardings of the stages' frozen parameters and `frozen()`,
-  which places them, or None for a model that trains all of its parameters.
-  """
-  import jax  # pylint: disable=g-import-not-at-top
-  from jax_titan import parallel  # pylint: disable=g-import-not-at-top
-  from jax_titan.models import pretrained  # pylint: disable=g-import-not-at-top
-
-  def shardings(tree, mesh):
-    if fsdp:
-      specs = parallel.tree_specs(tree, model.logical_axes, mesh.shape, fsdp=True)
-    else:
-      specs = jax.tree.map(lambda _: jax.sharding.PartitionSpec(), tree)
-    return jax.tree.map(lambda s: jax.sharding.NamedSharding(mesh, s), specs)
-
-  is_frozen = getattr(model, "is_frozen", lambda path: False)
-  parts = [_split(p, is_frozen) for p in model.abstract(args.seed)]
-  param_shapes = tuple(p for p, _ in parts)
-  frozen_shapes = tuple(
-      jax.tree.map(lambda x: jax.ShapeDtypeStruct(x.shape, model.dtype), f) for _, f in parts)
-  opt_shapes = tuple(jax.eval_shape(optimizer.init, p) for p in param_shapes)
-  param_sh = tuple(shardings(p, m) for p, m in zip(param_shapes, meshes))
-  frozen_sh = tuple(shardings(f, m) for f, m in zip(frozen_shapes, meshes))
-  opt_sh = tuple(shardings(s, m) for s, m in zip(opt_shapes, meshes))
-  placed = []  # The frozen parameters, once they are on their devices.
-
-  def place(trained=True):
-    """The trained and the frozen parameters on their shardings; without
-    `trained`, where the model reads a part of its weights, the frozen alone."""
-    if args.init_from and hasattr(model, "place") and pretrained.is_safetensors(args.init_from):
-      targets = tuple(abstract(f, fs) for f, fs in zip(frozen_shapes, frozen_sh))
-      if trained:
-        targets = tuple(
-            _merged(abstract(p, ps), f) for p, ps, f in zip(param_shapes, param_sh, targets))
-      stages = [_split(s, is_frozen) for s in model.place(args.init_from, targets)]
-      return tuple(p for p, _ in stages), tuple(f for _, f in stages)
-    stages = model.load(args.init_from) if args.init_from else model.init(args.seed)
-    stages = [_split(s, is_frozen) for s in stages]
-    params = jax.device_put(tuple(p for p, _ in stages), param_sh)
-    frozen = jax.device_put(tuple(f for _, f in stages), frozen_sh)
-
-    def cast(tree):
-      return jax.tree.map(lambda x: x.astype(model.dtype), tree)
-
-    return params, tuple(jax.jit(cast, out_shardings=s)(f) if f else f
-                         for f, s in zip(frozen, frozen_sh))
-
-  def init():
-    params, frozen = place()
-    placed[:] = [frozen]
-    opt_states = tuple(
-        jax.jit(optimizer.init, out_shardings=s)(p) for p, s in zip(params, opt_sh)
-    )
-    return params, opt_states
-
-  def frozen():
-    # A run that resumes restores its state and never calls init().
-    if not placed:
-      placed[:] = [place(trained=False)[1]]
-    return placed[0]
-
-  abstract_state = (
-      tuple(abstract(s, sh) for s, sh in zip(param_shapes, param_sh)),
-      tuple(abstract(s, sh) for s, sh in zip(opt_shapes, opt_sh)),
-  )
-  return init, abstract_state, param_sh, opt_sh, frozen_sh, frozen if any(frozen_sh) else None
-
-
-def _mpmd_layout(args, topology, model, optimizer, inputs, targets, split_batch) -> Layout:
-  """A pipeline step over `model.stage_fns()` with replicated stage state.
-
-  `inputs` and `targets` map each step input to `(ShapeDtypeStruct,
-  PartitionSpec)` on the first and last stage mesh; `split_batch` turns a
-  host batch into the step's inputs and targets.
-  """
-  import jax  # pylint: disable=g-import-not-at-top
-  from jax_titan import mpmd as jt_mpmd  # pylint: disable=g-import-not-at-top
-  from jax_titan import ops  # pylint: disable=g-import-not-at-top
-  from shardy.integrations.python.jax import mpmd  # pylint: disable=g-import-not-at-top
-
-  P = jax.sharding.PartitionSpec  # pylint: disable=invalid-name
-  NamedSharding = jax.sharding.NamedSharding  # pylint: disable=invalid-name
-
-  num_stages, num_meshes = args.num_stages, len(topology)
-  options = json.loads(args.mpmd_options) if args.mpmd_options else None
-  config = jt_mpmd.make_config(topology, args.schedule or None, options, num_stages=num_stages)
-  meshes = [topology[jt_mpmd.mesh_name(i % num_meshes)] for i in range(num_stages)]
-  init, abstract_state, param_sh, opt_sh, frozen_sh, frozen = _init_state(
-      args, model, optimizer, meshes)
-  extra = (frozen_sh,) if frozen else ()
-
-  in_sh, tgt_sh = _shardings(inputs, meshes[0]), _shardings(targets, meshes[-1])
-  stage_fns = [ops.for_stage(fn, i) for i, fn in enumerate(model.stage_fns())]
-  if frozen:
-    stage_fns = [_on_pair(fn) for fn in stage_fns]
-  train_step = jt_mpmd.make_train_step(stage_fns, optimizer, max_grad_norm=args.max_grad_norm)
-  scalar = NamedSharding(meshes[-1], P())
-  jitted = mpmd.jit(
-      train_step,
-      config,
-      in_shardings=(param_sh, opt_sh, *extra, in_sh, tgt_sh),
-      out_shardings=(param_sh, opt_sh, scalar, scalar),
-      donate_argnums=(0, 1),
-  )
-
-  def put_batch(batch):
-    x, t = split_batch(batch)
-    return jax.device_put(x, in_sh), jax.device_put(t, tgt_sh)
-
-  def eval_loss(stage_params, *batch):
-    *rest, x, t = batch
-    stage_params = list(zip(stage_params, *rest)) if rest else stage_params
-    return jt_mpmd.pipeline_loss(stage_fns, stage_params, x, t)
-
-  eval_step = mpmd.jit(
-      eval_loss,
-      jt_mpmd.make_config(topology, None, options, num_stages=num_stages),
-      in_shardings=(param_sh, *extra, in_sh, tgt_sh),
-      out_shardings=scalar,
-  )
-  return Layout(init, abstract_state, jitted, _shapes(inputs), _shapes(targets), put_batch,
-                f"mpmd:{num_stages}",
-                placement=placement(
-                    topology, [jt_mpmd.mesh_name(i % num_meshes) for i in range(num_stages)]),
-                eval_step=eval_step, export=getattr(model, "merge", None), frozen=frozen)
-
-
-def _spmd_layout(args, mesh, model, optimizer, inputs, targets, split_batch) -> Layout:
-  """No pipeline: every stage in one `jax.jit` program on `mesh`, data-parallel
-  or, with `--parallel=fsdp`, with the state sharded too.
-
-  The step runs the stages over all microbatches at once, which gives the
-  pipeline's loss and gradients when microbatches hold equal token counts or
-  the model's last stage takes the mean of their means itself, and updates
-  the replicated or sharded state the way the pipeline does. `inputs`, `targets`
-  and `split_batch` are `_mpmd_layout`'s: batched leaves lose their
-  microbatch axis, and per-microbatch constants keep the first microbatch's.
-  """
-  import jax  # pylint: disable=g-import-not-at-top
-  import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
-  from jax_titan import mpmd as jt_mpmd  # pylint: disable=g-import-not-at-top
-  from jax_titan import ops  # pylint: disable=g-import-not-at-top
-
-  P = jax.sharding.PartitionSpec  # pylint: disable=invalid-name
-
-  def batched(spec):
-    return len(spec) > 1 and spec[1] is not None
-
-  def flat_spec(v):
-    shape, spec = v
-    dims = shape.shape
-    if batched(spec):
-      dims = (dims[0] * dims[1],) + dims[2:]
-    else:
-      dims = dims[1:]
-    return jax.ShapeDtypeStruct(dims, shape.dtype), P(*spec[1:])
-
-  def flat_host(a, v):
-    return a.reshape(-1, *a.shape[2:]) if batched(v[1]) else a[0]
-
-  flat_inputs = jax.tree.map(flat_spec, inputs, is_leaf=_is_pair)
-  flat_targets = jax.tree.map(flat_spec, targets, is_leaf=_is_pair)
-  in_sh, tgt_sh = _shardings(flat_inputs, mesh), _shardings(flat_targets, mesh)
-  init, abstract_state, param_sh, opt_sh, frozen_sh, frozen = _init_state(
-      args, model, optimizer, [mesh] * args.num_stages, fsdp=args.parallel == "fsdp")
-  extra = (frozen_sh,) if frozen else ()
-
-  stage_fns = [ops.for_stage(fn, i) for i, fn in enumerate(model.stage_fns())]
-  last = len(stage_fns) - 1
-
-  def loss_fn(stage_params, *batch):
-    *rest, x, t = batch
-    if rest:
-      stage_params = [_merged(p, f) for p, f in zip(stage_params, *rest)]
-    for i, fn in enumerate(stage_fns):
-      x = fn(stage_params[i], x, t) if i == last else fn(stage_params[i], x)
-    return x
-
-  def train_step(stage_params, opt_states, *batch):
-    loss, grads = jax.value_and_grad(loss_fn)(stage_params, *batch)
-    norm = jt_mpmd.global_grad_norm(grads)
-    updated = [
-        jt_mpmd.clipped_update(optimizer, p, g, s, norm, args.max_grad_norm)
-        for p, g, s in zip(stage_params, grads, opt_states)
-    ]
-    return (tuple(p for p, _ in updated), tuple(s for _, s in updated),
-            jnp.where(jnp.isfinite(norm), loss, jnp.nan), norm)
-
-  scalar = jax.sharding.NamedSharding(mesh, P())
-  jitted = jax.jit(
-      train_step,
-      in_shardings=(param_sh, opt_sh, *extra, in_sh, tgt_sh),
-      out_shardings=(param_sh, opt_sh, scalar, scalar),
-      donate_argnums=(0, 1),
-  )
-
-  def put_batch(batch):
-    x, t = split_batch(batch)
-    x, t = jax.tree.map(flat_host, x, inputs), jax.tree.map(flat_host, t, targets)
-    return jax.device_put(x, in_sh), jax.device_put(t, tgt_sh)
-
-  eval_step = jax.jit(
-      loss_fn, in_shardings=(param_sh, *extra, in_sh, tgt_sh), out_shardings=scalar)
-  return Layout(init, abstract_state, jitted, _shapes(flat_inputs), _shapes(flat_targets),
-                put_batch, "spmd", placement=placement({"mesh": mesh}, ["mesh"] * args.num_stages),
-                eval_step=eval_step, export=getattr(model, "merge", None), frozen=frozen)
 
 
 def _token_batches(args):
@@ -407,6 +114,20 @@ def _one_stage(args, ops: bool = False):
     raise NotImplementedError(f"{args.model} runs its own operators: no --ops")
 
 
+def _no_init_from(args):
+  """Refuses `--init_from` for a model that reads no parameters."""
+  if args.init_from:
+    raise NotImplementedError(
+        "--init_from loads parameters of maxtext: and transformers: models, ideogram4 and "
+        "command-a-plus")
+
+
+def _synthetic_only(args):
+  """Refuses `--data` for a model that trains on synthetic batches alone."""
+  if args.data not in ("", "synthetic"):
+    raise NotImplementedError(f"{args.model} trains on synthetic batches only")
+
+
 def _data_mesh(devices):
   import jax  # pylint: disable=g-import-not-at-top
   import numpy as np  # pylint: disable=g-import-not-at-top
@@ -414,6 +135,17 @@ def _data_mesh(devices):
 
   return jax.sharding.Mesh(
       np.asarray(devices).reshape(len(devices), 1), (jt_mpmd.DATA_AXIS, jt_mpmd.TENSOR_AXIS))
+
+
+def _keep_batch_sharded(mesh):
+  """A constraint that keeps a batch sharded along the data axis of `mesh`, so
+  that FSDP gathers the weights and not the activations."""
+  import jax  # pylint: disable=g-import-not-at-top
+  from jax_titan import mpmd as jt_mpmd  # pylint: disable=g-import-not-at-top
+
+  return functools.partial(
+      jax.lax.with_sharding_constraint,
+      shardings=jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(jt_mpmd.DATA_AXIS)))
 
 
 def _routed_attention():
@@ -428,9 +160,10 @@ def _routed_attention():
   return ops.attention if routed else None
 
 
-def _maxtext(args, name, devices, make_optimizer):
+def _maxtext(args, devices, make_optimizer):
   from jax_titan.models.adapters import maxtext as mt  # pylint: disable=g-import-not-at-top
 
+  name = args.model.partition(":")[2]
   _one_stage(args, ops=True)
   if not args.remat:
     raise NotImplementedError(
@@ -439,10 +172,10 @@ def _maxtext(args, name, devices, make_optimizer):
       name, **{"remat_policy": "full", **_overrides(args), "max_target_length": args.seq_len})
   _needs_own_tokens(args, cfg.vocab_size)
   mesh = mt.mesh(cfg, devices)
-  model = mt.WholeModel(cfg, mesh, attention=_routed_attention(), fsdp=args.parallel == "fsdp")
+  model = mt.AdapterModel(cfg, mesh, attention=_routed_attention(), fsdp=args.parallel == "fsdp")
   tokens, split_batch = _token_batches(args)
-  layout = _spmd_layout(args, mesh, model, make_optimizer(model.decays), tokens, tokens,
-                        split_batch)
+  layout = spmd_layout(args, mesh, model, make_optimizer(model.decays), tokens, tokens,
+                       split_batch)
   tokens_per_step = args.microbatches * args.microbatch_size * args.seq_len
   work = Workload(
       num_params=_num_params(model.abstract(args.seed)),
@@ -453,10 +186,11 @@ def _maxtext(args, name, devices, make_optimizer):
   return layout, work
 
 
-def _transformers(args, name, devices, make_optimizer):
+def _transformers(args, devices, make_optimizer):
   import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
   from jax_titan.models.adapters import transformers as hf  # pylint: disable=g-import-not-at-top
 
+  name = args.model.partition(":")[2]
   _one_stage(args)
   overrides = _overrides(args)
   dtype = jnp.dtype(overrides.pop("dtype", "bfloat16"))
@@ -470,8 +204,8 @@ def _transformers(args, name, devices, make_optimizer):
   model = hf.causal_lm(cfg, seed=args.seed, dtype=dtype, remat=args.remat,
                        init_from=args.init_from)
   tokens, split_batch = _token_batches(args)
-  layout = _spmd_layout(args, _data_mesh(devices), model, make_optimizer(model.decays),
-                        tokens, tokens, split_batch)
+  layout = spmd_layout(args, _data_mesh(devices), model, make_optimizer(model.decays),
+                       tokens, tokens, split_batch)
   work = Workload(
       num_params=_num_params(model.abstract(args.seed)),
       tokens_per_step=args.microbatches * args.microbatch_size * args.seq_len,
@@ -510,10 +244,13 @@ def _flux_batches(args, *, in_channels, joint_attention_dim, pooled_projection_d
   return batches, text_tokens
 
 
-def _diffusers(args, name, devices, make_optimizer):
+def _diffusers(args, devices, make_optimizer):
   import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
   from jax_titan.models.adapters import diffusers as hfd  # pylint: disable=g-import-not-at-top
 
+  name = args.model.partition(":")[2]
+  _no_init_from(args)
+  _synthetic_only(args)
   _one_stage(args)
   overrides = {k: tuple(v) if isinstance(v, list) else v for k, v in _overrides(args).items()}
   dtype = jnp.dtype(overrides.pop("dtype", "bfloat16"))
@@ -528,8 +265,8 @@ def _diffusers(args, name, devices, make_optimizer):
       args, in_channels=c.in_channels, joint_attention_dim=c.joint_attention_dim,
       pooled_projection_dim=c.pooled_projection_dim, guidance_embeds=c.guidance_embeds)
   inputs, targets = _batch_specs(batches)
-  layout = _spmd_layout(args, _data_mesh(devices), model, make_optimizer(model.decays),
-                        inputs, targets, lambda batch: batch)
+  layout = spmd_layout(args, _data_mesh(devices), model, make_optimizer(model.decays),
+                       inputs, targets, lambda batch: batch)
   work = Workload(
       num_params=_num_params(model.abstract(args.seed)),
       tokens_per_step=args.microbatches * args.microbatch_size * batches.tokens,
@@ -539,11 +276,16 @@ def _diffusers(args, name, devices, make_optimizer):
   return layout, work
 
 
-def _maxdiffusion(args, flavor, devices, make_optimizer):
+def _maxdiffusion(args, devices, make_optimizer):
+  flavor = args.model.partition(":")[2]
+  _no_init_from(args)
+  if flavor == "ideogram4":
+    return _ideogram(args, devices, make_optimizer, adapter=True)
   import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
   from jax_titan.data import diffusion  # pylint: disable=g-import-not-at-top
   from jax_titan.models.adapters import maxdiffusion as md  # pylint: disable=g-import-not-at-top
 
+  _synthetic_only(args)
   # FLUX.1's attention can run through jax_titan.ops; Wan 2.1's cannot.
   _one_stage(args, ops=flavor not in md.WAN)
   kwargs = {
@@ -573,8 +315,8 @@ def _maxdiffusion(args, flavor, devices, make_optimizer):
         pooled_projection_dim=flux.pooled_projection_dim, guidance_embeds=flux.guidance_embeds)
     flops = samples * md.flux_flops_per_sample(flux, batches.tokens - text_tokens, text_tokens)
   inputs, targets = _batch_specs(batches)
-  layout = _spmd_layout(args, mesh, model, make_optimizer(model.decays), inputs, targets,
-                        lambda batch: batch)
+  layout = spmd_layout(args, mesh, model, make_optimizer(model.decays), inputs, targets,
+                       lambda batch: batch)
   work = Workload(
       num_params=_num_params(model.abstract(args.seed)),
       tokens_per_step=samples * batches.tokens,
@@ -587,29 +329,24 @@ def _maxdiffusion(args, flavor, devices, make_optimizer):
 def _flux(args, devices, make_optimizer):
   """JAX-Titan's FLUX.1 on the batches of `_flux_batches`. Besides config
   fields, `--model_overrides` takes `dtype`."""
-  import jax  # pylint: disable=g-import-not-at-top
   import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
-  from jax_titan import mpmd as jt_mpmd  # pylint: disable=g-import-not-at-top
   from jax_titan.models import flux  # pylint: disable=g-import-not-at-top
 
+  _no_init_from(args)
+  _synthetic_only(args)
   _one_stage(args, ops=True)
   overrides = {k: tuple(v) if isinstance(v, list) else v for k, v in _overrides(args).items()}
   dtype = jnp.dtype(overrides.pop("dtype", "bfloat16"))
   cfg = dataclasses.replace(flux.FLAVORS[args.model], **overrides)
   mesh = _data_mesh(devices)
-  constrain = None
-  if args.parallel == "fsdp":
-    # Keeps the batch sharded, so FSDP gathers the weights and not the activations.
-    constrain = functools.partial(
-        jax.lax.with_sharding_constraint,
-        shardings=jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(jt_mpmd.DATA_AXIS)))
+  constrain = _keep_batch_sharded(mesh) if args.parallel == "fsdp" else None
   model = flux.Model(cfg, dtype=dtype, remat=args.remat, constrain=constrain)
   batches, text_tokens = _flux_batches(
       args, in_channels=cfg.in_channels, joint_attention_dim=cfg.joint_attention_dim,
       pooled_projection_dim=cfg.pooled_projection_dim, guidance_embeds=cfg.guidance_embeds)
   inputs, targets = _batch_specs(batches)
-  layout = _spmd_layout(args, mesh, model, make_optimizer(model.decays), inputs, targets,
-                        lambda batch: batch)
+  layout = spmd_layout(args, mesh, model, make_optimizer(model.decays), inputs, targets,
+                       lambda batch: batch)
   samples = args.microbatches * args.microbatch_size
   work = Workload(
       num_params=_num_params(model.abstract(args.seed)),
@@ -623,26 +360,22 @@ def _flux(args, devices, make_optimizer):
 def _llama(args, devices, make_optimizer):
   """JAX-Titan's Llama on token windows. Besides config fields,
   `--model_overrides` takes `dtype`."""
-  import jax  # pylint: disable=g-import-not-at-top
   import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
-  from jax_titan import mpmd as jt_mpmd  # pylint: disable=g-import-not-at-top
   from jax_titan.models import llama  # pylint: disable=g-import-not-at-top
   from jax_titan.observability import flops as flops_lib  # pylint: disable=g-import-not-at-top
 
+  _no_init_from(args)
   _one_stage(args, ops=True)
   overrides = _overrides(args)
   dtype = jnp.dtype(overrides.pop("dtype", "bfloat16"))
   cfg = dataclasses.replace(llama.FLAVORS[args.model], **overrides)
   _needs_own_tokens(args, cfg.vocab_size)
   mesh = _data_mesh(devices)
-  constrain = functools.partial(
-      jax.lax.with_sharding_constraint,
-      shardings=jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(jt_mpmd.DATA_AXIS)))
-  model = llama.Model(cfg, dtype=dtype, remat=args.remat, constrain=constrain)
+  model = llama.Model(cfg, dtype=dtype, remat=args.remat, constrain=_keep_batch_sharded(mesh))
   tokens, _ = _token_batches(args)
   # One microbatch of any size: a validation batch need not have the step's.
-  layout = _spmd_layout(args, mesh, model, make_optimizer(model.decays), tokens, tokens,
-                        lambda batch: (batch[None, :, :-1], batch[None, :, 1:]))
+  layout = spmd_layout(args, mesh, model, make_optimizer(model.decays), tokens, tokens,
+                       lambda batch: (batch[None, :, :-1], batch[None, :, 1:]))
   seq = args.seq_len
   tokens_per_step = args.microbatches * args.microbatch_size * seq
   work = Workload(
@@ -656,11 +389,12 @@ def _llama(args, devices, make_optimizer):
   return layout, work
 
 
-def _ideogram(args, devices, make_optimizer, own: bool):
-  """Ideogram 4, JAX-Titan's own (`own`) or from MaxDiffusion's Ideogram branch.
+def _ideogram(args, devices, make_optimizer, adapter: bool = False):
+  """Ideogram 4: JAX-Titan's model or, with `adapter`, the one of MaxDiffusion's
+  Ideogram branch (`--model=maxdiffusion:ideogram4`).
 
   Besides config fields, `--model_overrides` takes `dtype` and, for JAX-Titan's
-  own model, `timestep_mean` and `timestep_std` of the training timesteps. That
+  model, `timestep_mean` and `timestep_std` of the training timesteps. That
   model's config starts from the `config.json` of published weights that
   `--init_from` names. It also trains on a cache of real samples
   (`--data`), with a tenth of its images, at least one, held out for
@@ -678,40 +412,31 @@ def _ideogram(args, devices, make_optimizer, own: bool):
   overrides = _overrides(args)
   dtype = jnp.dtype(overrides.pop("dtype", "bfloat16"))
   schedule = {}
-  if own:
-    ig, config = ideogram, ideogram.IdeogramConfig
-    schedule = {k: overrides.pop(f"timestep_{k}") for k in ("mean", "std")
-                if f"timestep_{k}" in overrides}
-  else:
+  if adapter:
     from jax_titan.models.adapters import ideogram as ig  # pylint: disable=g-import-not-at-top
 
-    config = ig.Ideogram4Config
+    config, model_class = ig.Ideogram4Config, ig.AdapterModel
+  else:
+    ig, config, model_class = ideogram, ideogram.IdeogramConfig, ideogram.Model
+    schedule = {k: overrides.pop(f"timestep_{k}") for k in ("mean", "std")
+                if f"timestep_{k}" in overrides}
   fields = {k: tuple(v) if isinstance(v, list) else v for k, v in overrides.items()}
-  if own and args.init_from and pretrained.is_safetensors(args.init_from):
+  if not adapter and args.init_from and pretrained.is_safetensors(args.init_from):
     cfg = dataclasses.replace(ideogram.pretrained_config(args.init_from), **fields)
   else:
     cfg = config(**fields)
 
-  def make_mesh(d):
-    return jax.sharding.Mesh(
-        np.asarray(d).reshape(len(d), 1), (jt_mpmd.DATA_AXIS, jt_mpmd.TENSOR_AXIS))
-
-  mesh = make_mesh(devices)
-  constrain = None
-  if args.parallel == "fsdp":
-    # Keeps the batch sharded, so FSDP gathers the weights and not the activations.
-    constrain = functools.partial(
-        jax.lax.with_sharding_constraint,
-        shardings=jax.sharding.NamedSharding(mesh, P(jt_mpmd.DATA_AXIS)))
-  model = ig.Model(cfg, num_stages=args.num_stages, blocks=_stage_layers(args), dtype=dtype,
-                   remat=args.remat, constrain=constrain)
+  mesh = _data_mesh(devices)
+  constrain = _keep_batch_sharded(mesh) if args.parallel == "fsdp" else None
+  model = model_class(cfg, num_stages=args.num_stages, blocks=_stage_layers(args), dtype=dtype,
+                      remat=args.remat, constrain=constrain)
 
   side = args.resolution // 16
   image_tokens = side * side
   text_tokens = args.text_tokens or 256
   cache, held_out = None, 0
   if args.data not in ("", "synthetic"):
-    if not own:
+    if adapter:
       raise NotImplementedError("--data reads a cache of samples for ideogram4 only")
     from jax_titan.data import ideogram as data  # pylint: disable=g-import-not-at-top
 
@@ -763,10 +488,10 @@ def _ideogram(args, devices, make_optimizer, own: bool):
 
   optimizer = make_optimizer(model.decays)
   if args.parallel == "mpmd":
-    layout = _mpmd_layout(args, _topology(args, devices, make_mesh), model, optimizer,
-                          inputs, targets, lambda batch: batch)
+    layout = mpmd_layout(args, stage_topology(args, devices, _data_mesh), model, optimizer,
+                         inputs, targets, lambda batch: batch)
   else:
-    layout = _spmd_layout(args, mesh, model, optimizer, inputs, targets, lambda batch: batch)
+    layout = spmd_layout(args, mesh, model, optimizer, inputs, targets, lambda batch: batch)
   samples = num_mb * mb
   work = Workload(
       num_params=_num_params(model.abstract(args.seed)),
@@ -812,17 +537,8 @@ def _command_a(args, devices, make_optimizer):
   else:
     cfg = command_a.CommandAConfig(**overrides)
 
-  def make_mesh(d):
-    return jax.sharding.Mesh(
-        np.asarray(d).reshape(len(d), 1), (jt_mpmd.DATA_AXIS, jt_mpmd.TENSOR_AXIS))
-
-  mesh = make_mesh(devices)
-  constrain = None
-  if args.parallel == "fsdp":
-    # Keeps the batch sharded, so FSDP gathers the weights and not the activations.
-    constrain = functools.partial(
-        jax.lax.with_sharding_constraint,
-        shardings=jax.sharding.NamedSharding(mesh, P(jt_mpmd.DATA_AXIS)))
+  mesh = _data_mesh(devices)
+  constrain = _keep_batch_sharded(mesh) if args.parallel == "fsdp" else None
   mb, num_mb, seq = args.microbatch_size, args.microbatches, args.seq_len
   cache = data.Cache.open(args.data) if os.path.isdir(args.data) else None
   if cache is not None:
@@ -886,10 +602,10 @@ def _command_a(args, devices, make_optimizer):
 
   optimizer = make_optimizer(model.decays)
   if args.parallel == "mpmd":
-    layout = _mpmd_layout(args, _topology(args, devices, make_mesh), model, optimizer,
-                          inputs, tokens, split_batch)
+    layout = mpmd_layout(args, stage_topology(args, devices, _data_mesh), model, optimizer,
+                         inputs, tokens, split_batch)
   else:
-    layout = _spmd_layout(args, mesh, model, optimizer, inputs, tokens, split_batch)
+    layout = spmd_layout(args, mesh, model, optimizer, inputs, tokens, split_batch)
   tokens_per_step = num_mb * mb * seq
   # Not the stages' parameters: with several stages the embedding is held twice.
   shapes = jax.eval_shape(lambda: command_a.init_params(cfg, jax.random.key(0), tiles > 0))
@@ -904,47 +620,32 @@ def _command_a(args, devices, make_optimizer):
   return layout, work
 
 
+# The module of a model (`jax_titan.models`) -> its builder.
+BUILDERS = {
+    "llama": _llama,
+    "flux": _flux,
+    "ideogram": _ideogram,
+    "command_a": _command_a,
+    "adapters.maxtext": _maxtext,
+    "adapters.maxdiffusion": _maxdiffusion,
+    "adapters.transformers": _transformers,
+    "adapters.diffusers": _diffusers,
+}
+
+
 def build(args, devices, make_optimizer) -> tuple[Layout, Workload]:
-  """The layout and workload of `--model=<provider>:<name>`, or of one of `MODELS`.
+  """The layout and workload of `--model`, from the builder of its module.
 
   `make_optimizer(decays)` gives the optimizer for a model's `decays(path,
   leaf)`, which says which parameters take weight decay.
   """
-  provider, _, name = args.model.partition(":")
-  own = args.model in MODELS
-  ideogram = args.model == "ideogram4" or (provider == "maxdiffusion" and name == "ideogram4")
   if args.stage_fsdp or args.tensor_parallel != 1:
     raise NotImplementedError(f"{args.model} takes neither --stage_fsdp nor --tensor_parallel")
   if args.parallel == "mpmd" and args.reduce_grads != "microbatch":
     raise NotImplementedError(f"{args.model} reduces gradients per microbatch only")
-  if args.init_from and provider not in ("maxtext", "transformers") and (
-      not own or args.model in FLUX + LLAMA):
-    raise NotImplementedError(
-        "--init_from loads parameters of maxtext: and transformers: models, ideogram4 and "
-        "command-a-plus")
-  synthetic_only = (provider == "diffusers" or (provider == "maxdiffusion" and not ideogram)
-                    or args.model in FLUX)
-  if synthetic_only and args.data not in ("", "synthetic"):
-    raise NotImplementedError(f"{args.model} trains on synthetic batches only")
   if args.parallel != "mpmd" and (args.microbatches * args.microbatch_size) % len(devices):
     raise ValueError(
         f"--parallel={args.parallel} splits all {args.microbatches * args.microbatch_size} "
         f"sequences of a step across {len(devices)} devices"
     )
-  if provider == "transformers":
-    return _transformers(args, name, devices, make_optimizer)
-  if provider == "diffusers":
-    return _diffusers(args, name, devices, make_optimizer)
-  if provider == "maxtext":
-    return _maxtext(args, name, devices, make_optimizer)
-  if ideogram:
-    return _ideogram(args, devices, make_optimizer, own)
-  if args.model == "command-a-plus":
-    return _command_a(args, devices, make_optimizer)
-  if args.model in FLUX:
-    return _flux(args, devices, make_optimizer)
-  if args.model in LLAMA:
-    return _llama(args, devices, make_optimizer)
-  if provider == "maxdiffusion":
-    return _maxdiffusion(args, name, devices, make_optimizer)
-  raise ValueError(f"unknown model provider {provider!r}; known: {', '.join(PROVIDERS)}")
+  return BUILDERS[models.module_of(args.model)](args, devices, make_optimizer)

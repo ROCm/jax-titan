@@ -38,7 +38,7 @@ def config(name: str, **overrides) -> dict:
   return {**diffusers.ModelMixin.load_config(name, subfolder=subfolder), **overrides}
 
 
-def denoiser(cfg: dict, *, seed: int, dtype, remat: bool = True) -> torch_bridge.Bridged:
+def denoiser(cfg: dict, *, seed: int, dtype, remat: bool = True) -> torch_bridge.AdapterModel:
   """The denoiser of `cfg` as one stage, with its family's loss: the mean
   squared error of its output to the batch's target.
 
@@ -57,4 +57,4 @@ def denoiser(cfg: dict, *, seed: int, dtype, remat: bool = True) -> torch_bridge
     pred = forward({names[k]: v if k.endswith("_ids") else v.astype(dtype) for k, v in x.items()})
     return losses.mean_squared_error(pred, target)
 
-  return torch_bridge.Bridged(module, dtype=dtype, loss=loss)
+  return torch_bridge.AdapterModel(module, dtype=dtype, loss=loss)

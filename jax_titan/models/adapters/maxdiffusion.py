@@ -3,7 +3,7 @@ Wan 2.1.
 
 MaxDiffusion supplies the model, its layers and its parameter layout;
 JAX-Titan supplies the objective (`jax_titan.data.diffusion`), the mesh and
-the train step. `WholeModel` calls a denoiser whole, MaxDiffusion's own
+the train step. `AdapterModel` calls a denoiser whole, MaxDiffusion's own
 `__call__`, with a few lines per family (`whole_flux`, `whole_wan`).
 
 MaxDiffusion needs the `maxdiffusion-*` patches in `third_party/patches`.
@@ -69,7 +69,7 @@ def _attention_interceptor(attention: Callable):
   return intercept
 
 
-class WholeModel:
+class AdapterModel:
   """A MaxDiffusion denoiser called whole, as one stage for `--parallel=dp` and `fsdp`.
 
   `init_full(seed)` gives its parameters as MaxDiffusion initializes them and
@@ -149,7 +149,7 @@ def flux_flops_per_sample(f: FluxTransformer2DModel, image_tokens: int,
 
 
 def whole_flux(flux: FluxTransformer2DModel, mesh: jax.sharding.Mesh, *, fsdp: bool = False,
-               attention: Callable | None = None) -> WholeModel:
+               attention: Callable | None = None) -> AdapterModel:
   """FLUX.1 through `FluxTransformer2DModel.__call__`. With `attention`, such
   as `jax_titan.ops.attention`, the blocks' attention runs there instead of in
   MaxDiffusion's attention op."""
@@ -165,10 +165,11 @@ def whole_flux(flux: FluxTransformer2DModel, mesh: jax.sharding.Mesh, *, fsdp: b
     with nn.intercept_methods(interceptor):
       return call()[0]
 
-  return WholeModel(functools.partial(_flux_init, flux), apply, mesh, fsdp=fsdp, stacked=_STACKS)
+  return AdapterModel(
+      functools.partial(_flux_init, flux), apply, mesh, fsdp=fsdp, stacked=_STACKS)
 
 
-def whole_wan(mesh: jax.sharding.Mesh, *, fsdp: bool = False, **kwargs) -> WholeModel:
+def whole_wan(mesh: jax.sharding.Mesh, *, fsdp: bool = False, **kwargs) -> AdapterModel:
   """Wan 2.1 text to video through `WanModel.__call__`, a `WanModel(**kwargs)`
   such as one of `WAN`.
 
@@ -191,4 +192,5 @@ def whole_wan(mesh: jax.sharding.Mesh, *, fsdp: bool = False, **kwargs) -> Whole
       return model(hidden_states=x["latents"], timestep=x["timestep"],
                    encoder_hidden_states=x["txt"], deterministic=True)
 
-  return WholeModel(lambda seed: init_full(seed)[0], apply, mesh, fsdp=fsdp, stacked=("blocks",))
+  return AdapterModel(
+      lambda seed: init_full(seed)[0], apply, mesh, fsdp=fsdp, stacked=("blocks",))

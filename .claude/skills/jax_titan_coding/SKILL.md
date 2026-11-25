@@ -50,7 +50,7 @@ for a later comparison: do not import from it or edit it.
   in every mode before a policy uses it.
 - **MaxText models:** `models/adapters/maxtext.py` runs MaxText's models
   from its own layers at the pinned release (`maxtext==0.2.5`, the `maxtext`
-  extra). `WholeModel` calls MaxText's `Transformer` whole, as one stage for
+  extra). `AdapterModel` calls MaxText's `Transformer` whole, as one stage for
   `--parallel=dp` and `fsdp`, with no code per model family, and refuses a
   config whose loss has more terms than the cross-entropy and the MoE
   load-balance term. Parameters keep MaxText's names and layer axis;
@@ -58,7 +58,7 @@ for a later comparison: do not import from it or edit it.
   whose reference the adapter is.
 - **MaxDiffusion models:** `models/adapters/maxdiffusion.py` runs
   MaxDiffusion's denoisers at commit `821afc36` with the
-  `third_party/patches/maxdiffusion-*.patch` patches. `WholeModel` calls a
+  `third_party/patches/maxdiffusion-*.patch` patches. `AdapterModel` calls a
   denoiser whole, as one stage for `--parallel=dp` and `fsdp`: FLUX.1 and
   Wan 2.1, each with a few lines (`whole_flux`, `whole_wan`).
 - **A model of another repository is one stage.** The adapters of MaxText,
@@ -79,7 +79,7 @@ for a later comparison: do not import from it or edit it.
   family in `data/diffusion.py`, for every adapter that runs the family.
 - **Ideogram 4:** `models/ideogram.py` is JAX-Titan's own model, written after
   diffusers' `Ideogram4Transformer2DModel` and its training example. It
-  trains through the layouts of `trainer/adapters.py` (`--model=ideogram4`),
+  trains through the layouts of `trainer/layout.py` (`--model=ideogram4`),
   so with gradients reduced per microbatch. `models/adapters/ideogram.py`
   builds the same stages from MaxDiffusion's Ideogram branch
   (`maxdiffusion:ideogram4`), and its `own_params` maps those weights onto
@@ -109,7 +109,7 @@ for a later comparison: do not import from it or edit it.
   dimensions reordered for `ops.rope`; `params_from_tensors` and
   `tensors_from_params` map both ways, so keep them inverse. Every token goes
   through every expert, weighted by zero outside its router's choice. It
-  trains through the layouts of `trainer/adapters.py`
+  trains through the layouts of `trainer/layout.py`
   (`--model=command-a-plus`): as one stage, since its output head is its
   embedding matrix, or as a pipeline with the embedding frozen and a copy on
   the first stage and on the last. `data/command_a.py` applies the
@@ -121,7 +121,7 @@ for a later comparison: do not import from it or edit it.
   generation runs over these stages.
 - **Frozen parameters:** a staged model may train part of its parameters:
   `is_frozen(path)` names the rest (Command A+'s `freeze`). The layouts of
-  `trainer/adapters.py` keep frozen parameters out of the trained state, in
+  `trainer/layout.py` keep frozen parameters out of the trained state, in
   the model's compute dtype, with no gradient and no optimizer state; the
   step takes them after the state (`Layout.frozen`), and neither a
   checkpoint nor `--save_params` holds them: a run that resumes reads them

@@ -2,7 +2,7 @@
 
 `--model=maxdiffusion:<name>` trains a denoiser of MaxDiffusion, pinned at
 commit `821afc36`, with JAX-Titan's trainer. The model is MaxDiffusion's and
-runs as MaxDiffusion wrote it; the training is JAX-Titan's. `WholeModel`
+runs as MaxDiffusion wrote it; the training is JAX-Titan's. `AdapterModel`
 (`models/adapters/maxdiffusion.py`) calls a denoiser whole, MaxDiffusion's own
 `__call__`, under `--parallel=dp` or `fsdp`, with a few lines per family.
 

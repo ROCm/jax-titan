@@ -126,12 +126,12 @@ def test_fsdp_trains_as_dp_does(tmp_path):
 @pytest.mark.gpu
 def test_refuses_what_was_not_compared_with_pytorch():
   import optax  # pylint: disable=g-import-not-at-top
-  from jax_titan.trainer import adapters  # pylint: disable=g-import-not-at-top
+  from jax_titan.trainer import builders  # pylint: disable=g-import-not-at-top
   from jax_titan.trainer import train  # pylint: disable=g-import-not-at-top
 
   def build(*flags):
     args = train.parse_args(["--data=synthetic", "--parallel=dp", *flags])
-    return adapters.build(args, [None], lambda decays=None: optax.sgd(0.0))
+    return builders.build(args, [None], lambda decays=None: optax.sgd(0.0))
 
   # HRM's gradient is wrong through torchax without an error: its forward leans on no_grad.
   with pytest.raises(NotImplementedError, match="not compared with PyTorch"):

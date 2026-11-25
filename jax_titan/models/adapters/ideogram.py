@@ -128,7 +128,7 @@ def own_params(stage_params: Sequence[dict]) -> tuple[dict, ...]:
   return tuple(out)
 
 
-class Model:
+class AdapterModel:
   """The branch's Ideogram 4 transformer split into pipeline stages.
 
   `blocks` gives the blocks per stage; the default splits them as evenly as

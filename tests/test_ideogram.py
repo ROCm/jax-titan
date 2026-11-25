@@ -20,7 +20,7 @@ import pytest
 from jax_titan import parallel
 from jax_titan.models import ideogram
 from jax_titan.observability import records
-from jax_titan.trainer import adapters, checkpoint, layout, train
+from jax_titan.trainer import builders, checkpoint, layout, train
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 # The rotary sections end below the head's 16 frequencies, as they do at full size, so the
@@ -444,7 +444,7 @@ def test_resume_on_a_cache_is_exact(toy, tmp_path):
 
 def _workload(*flags):
   args = train.parse_args(FLAGS + ["--parallel=dp", *flags])
-  return adapters.build(args, jax.devices(), lambda decays=None: optax.sgd(0.0))[1]
+  return builders.build(args, jax.devices(), lambda decays=None: optax.sgd(0.0))[1]
 
 
 def test_validation_draws_the_held_out_images_and_training_the_others(toy):

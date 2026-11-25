@@ -3,7 +3,7 @@
 MaxText supplies the model configs, the layers and the parameter layout;
 JAX-Titan supplies the loss, the mesh and the train step. Parameters are
 plain dicts with MaxText's parameter names, so they map one to one onto
-MaxText checkpoints. `WholeModel` calls MaxText's `Transformer` whole, with no
+MaxText checkpoints. `AdapterModel` calls MaxText's `Transformer` whole, with no
 code per model family. `llama_config` and `llama_params` map a Llama model
 onto `jax_titan.models.llama`, to set JAX-Titan's own Llama against MaxText's.
 """
@@ -102,7 +102,7 @@ def llama_config(cfg) -> llama.LlamaConfig:
 
 
 def llama_params(cfg, params: dict) -> dict:
-  """A Llama model's parameters, as `WholeModel` holds them, in the layout of
+  """A Llama model's parameters, as `AdapterModel` holds them, in the layout of
   `jax_titan.models.llama` as one stage.
 
   Puts the layer axis first, takes MaxText's 1/sqrt(head_dim) attention scale
@@ -208,7 +208,7 @@ def _beyond_the_step(cfg) -> dict:
   return {name: value for name, value in settings.items() if value}
 
 
-class WholeModel:
+class AdapterModel:
   """A MaxText model as one stage, for `--parallel=dp` and `fsdp`.
 
   MaxText's `Transformer` is called whole, so nothing here depends on the

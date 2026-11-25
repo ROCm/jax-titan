@@ -115,7 +115,7 @@ def _loss(forward, tokens, targets):
 
 
 def causal_lm(cfg: transformers.PretrainedConfig, *, seed: int, dtype, remat: bool = True,
-              init_from: str = "") -> torch_bridge.Bridged:
+              init_from: str = "") -> torch_bridge.AdapterModel:
   """The causal language model of `cfg` as one stage, with the loss
   `losses.cross_entropy` of its logits.
 
@@ -134,7 +134,7 @@ def causal_lm(cfg: transformers.PretrainedConfig, *, seed: int, dtype, remat: bo
   if remat:
     module._set_gradient_checkpointing(  # pylint: disable=protected-access
         enable=True, gradient_checkpointing_func=torch_bridge.remat)
-  return torch_bridge.Bridged(module, dtype=dtype, loss=_loss)
+  return torch_bridge.AdapterModel(module, dtype=dtype, loss=_loss)
 
 
 def vocab_size(cfg: transformers.PretrainedConfig) -> int:

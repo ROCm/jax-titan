@@ -10,7 +10,7 @@ import numpy as np
 import optax
 import pytest
 
-from jax_titan.trainer import adapters, train
+from jax_titan.trainer import builders, train
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
@@ -69,7 +69,7 @@ def test_command_a_frozen_parity():
         "--model=command-a-plus", f"--model_overrides={overrides}", "--num_stages=2",
         "--microbatches=2", "--microbatch_size=8", "--seq_len=16", "--data=synthetic",
         "--reduce_grads=microbatch", f"--parallel={parallel}"])
-    layout, _ = adapters.build(args, jax.devices(), lambda decays=None: optax.sgd(0.1))
+    layout, _ = builders.build(args, jax.devices(), lambda decays=None: optax.sgd(0.1))
     (params, opt_states), frozen, losses = layout.init(), layout.frozen(), []
     for step in range(4):
       batch = np.random.default_rng(step).integers(0, 128, (16, 17), dtype=np.int32)

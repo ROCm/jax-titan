@@ -22,7 +22,7 @@ from jax_titan.models import command_a
 from jax_titan.models import command_a_generate
 from jax_titan.models import losses
 from jax_titan.observability import records
-from jax_titan.trainer import adapters, checkpoint, train
+from jax_titan.trainer import builders, checkpoint, train
 from jax_titan.trainer.layout import EVAL_STEPS
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -176,7 +176,7 @@ def test_fine_tunes_on_a_cache_of_conversations(tmp_path, capsys):
            "--eval_batches=1"]
   # Five conversations to train on, and the last one held out for validation.
   args = train.parse_args([*FLAGS, *flags, "--parallel=dp"])
-  work = adapters.build(args, jax.devices(), lambda decays=None: optax.sgd(0.0))[1]
+  work = builders.build(args, jax.devices(), lambda decays=None: optax.sgd(0.0))[1]
   assert work.data.endswith("(5 conversations, 1 more held out)") and work.tokens_per_step == 144
   tokens, targets = work.next_batch(0)
   assert tokens.shape == targets.shape == (2, 8, 9)
@@ -267,7 +267,7 @@ def test_every_parameter_is_sharded_and_only_norms_do_not_decay():
 def test_trains_as_one_stage_and_with_tiles_on_synthetic_batches_only():
   def build(*flags):
     args = train.parse_args([*FLAGS, *flags])
-    return adapters.build(args, jax.devices(), lambda decays=None: optax.sgd(0.0))
+    return builders.build(args, jax.devices(), lambda decays=None: optax.sgd(0.0))
 
   with pytest.raises(NotImplementedError, match="one stage"):
     build(*SMALL, "--parallel=dp", "--num_stages=2")

@@ -18,7 +18,7 @@ from jax_titan import parallel
 from jax_titan.data import diffusion
 from jax_titan.models import flux
 from jax_titan.observability import records
-from jax_titan.trainer import adapters, train
+from jax_titan.trainer import builders, train
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 CONFIG = {
@@ -228,7 +228,7 @@ def test_resume_is_exact(parallel_flag, tmp_path):
 def test_refuses(flags, error):
   args = train.parse_args(["--model=flux-dev", *flags])
   with pytest.raises(NotImplementedError, match=error):
-    adapters.build(args, [None], lambda decays=None: optax.sgd(0.0))
+    builders.build(args, [None], lambda decays=None: optax.sgd(0.0))
 
 
 def test_runs_as_one_stage_by_default():
