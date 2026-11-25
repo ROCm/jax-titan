@@ -6,14 +6,16 @@ parallel.
 - **Sections 1 and 2, models:** as the code implements them.
   [../adding_a_model.md](../adding_a_model.md) has the steps for a new model.
 - **Sections 3 and 4, parallelism:** a proposal, which the code does not implement yet.
-  [../pipelines.md](../pipelines.md) has the flags of today.
+  `python -m jax_titan.trainer.train --help` has the flags of today, and
+  [../pipelines.md](../pipelines.md) the schedules and the measurements.
 
 ## From a model's definition to the trainer
 
 A model is defined in its module, found through two tables, built by its builder, and given to a
 layout function of the trainer. The example is Llama; an adapter model goes the same way through
 `SOURCES`. The dashed part is the proposal of section 3: the flags of parallelism come to a plan,
-which gives the model its stages and the layout function its meshes.
+which the builder takes in place of `devices`; it gives the model its stages and the layout
+function its meshes.
 
 ```mermaid
 flowchart TD
@@ -49,7 +51,7 @@ flowchart TD
     OBJ -->|"the model enters the trainer"| LAYFN
     OPT --> LAYFN
     WORK --> LOOP
-    PLAN -.->|"the stages"| OBJ
+    PLAN -.->|"the stages, the constraint"| OBJ
     PLAN -.->|"the meshes"| LAYFN
 
     classDef proposed stroke-dasharray: 5 5
@@ -513,12 +515,12 @@ makes `mt.AdapterModel(...)` (2.2).
 
 A run has four strategies, which TorchTitan and MaxText have under the same names.
 
-| Strategy | The GPUs | Parameters and optimizer state | In the trainer today |
+| Strategy | The GPUs | Parameters and optimizer state | Taken by |
 |---|---|---|---|
 | **DP**, data parallelism | each takes a share of the batch | a copy on each | every model |
-| **FSDP**, fully sharded data parallelism | each takes a share of the batch | sharded across them | every model, without a pipeline |
-| **TP**, tensor parallelism | a group shares every layer | attention heads, MLP columns and the vocabulary sharded across the group | no model: the pipeline library has it |
-| **PP**, pipeline parallelism | one group per stage; a microbatch goes from group to group | each stage's on its own group | Ideogram 4 and Command A+, with DP inside a stage |
+| **FSDP**, fully sharded data parallelism | each takes a share of the batch | sharded across them | every model |
+| **TP**, tensor parallelism | a group shares every layer | attention heads, MLP columns and the vocabulary sharded across the group | Llama, and another model once its builder names it (3.5) |
+| **PP**, pipeline parallelism | the groups run the stages, and a microbatch goes from group to group | each stage's on the group that runs it | the JAX-Titan models with stages: Llama, Ideogram 4, Command A+ |
 
 They combine as a product: a pipeline of stages, and inside every stage tensor parallelism and one
 of the two data parallelisms.
@@ -534,123 +536,123 @@ of the two data parallelisms.
 
 A row shares every layer of its stage, and the rows of a stage each take a share of the batch.
 
-Pipeline parallelism is the one strategy that is not a sharding inside a mesh. JAX-Titan runs it as
-one Shardy MPMD program, with every stage on a mesh of its own (3.4).
+In JAX-Titan, pipeline parallelism is the one strategy that is not a sharding inside a mesh: a step
+is one Shardy MPMD program, with a mesh for every group of GPUs and the stages as named
+computations on them (3.4).
 
 Left out on purpose:
 
 - DP and FSDP together in one mesh, hybrid sharding: a mesh has one data axis;
+- gradients summed once per step from per-GPU copies of the parameters, `--reduce_grads=step`: a
+  pipeline sums them in every microbatch. The pipeline library has the other way, no model takes it
+  today, and the fastest pipelines of [../pipelines.md](../pipelines.md) ran with it: it returns
+  after the strategies;
+- sequence parallelism beside TP, which TorchTitan turns on by default;
 - context and expert parallelism;
-- degrees per network, such as MaxText's `ici_` and `dcn_`, until a run spans nodes;
+- degrees per interconnect, such as MaxText's `ici_` and `dcn_`, until a run spans nodes;
 - a table of rules from logical axes to mesh axes: `jax_titan.parallel` keeps its one rule (3.4).
 
 ### 3.2 Flags
 
-One flag per strategy, and data parallelism takes the GPUs that are left. With no flag a run is
-data parallel over all GPUs, which every model takes. Today's default is a pipeline of two stages,
-which Llama and FLUX.1, among others, refuse.
+One flag per strategy. Data parallelism takes the GPUs that are left, and it is FSDP unless
+`--no-fsdp` is given, as in TorchTitan and MaxText. With no flag a run is FSDP over all GPUs, which
+every model takes.
 
 | Flag | Default | What it asks for | TorchTitan | MaxText |
 |---|---|---|---|---|
-| `--pipeline_parallel=N` | 1 | N groups of GPUs with a stage on each | `pipeline_parallel_degree` | `ici_pipeline_parallelism` |
+| `--pipeline_parallel=N` | 1 | N groups of GPUs run the model's stages, one each unless `--num_stages` says more | `pipeline_parallel_degree` | `ici_pipeline_parallelism` |
 | `--tensor_parallel=N` | 1 | N GPUs share every layer | `tensor_parallel_degree` | `ici_tensor_parallelism` |
-| `--fsdp` | off | the state sharded across the data-parallel GPUs, in place of a copy on each | `data_parallel_shard_degree` | `ici_fsdp_parallelism` |
-| none | | data parallelism over the GPUs that are left, `GPUs / (pipeline_parallel × tensor_parallel)` in every group | `data_parallel_replicate_degree` | `ici_data_parallelism` |
+| `--fsdp`, `--no-fsdp` | `--fsdp` | the GPUs that are left, `GPUs / (pipeline_parallel × tensor_parallel)` in every group, hold the state sharded across them, or with `--no-fsdp` a copy each, which is DP | `data_parallel_shard_degree`, `-1` by default; DP is `data_parallel_replicate_degree` | `ici_fsdp_parallelism`, `-1` by default; DP is `ici_data_parallelism` |
 
-The flags replace today's:
+FSDP is the default of both, and the measurements of [../pipelines.md](../pipelines.md) agree
+without a pipeline: there it was faster than DP at a fifth of the memory. Inside a pipeline it was
+the slower of the two and held less.
 
-| Today | With this proposal |
-|---|---|
-| `--parallel=dp` | no flag |
-| `--parallel=fsdp`, and `--stage_fsdp` in a pipeline | `--fsdp` |
-| `--parallel=mpmd --num_stages=N` | `--pipeline_parallel=N` |
-| `--num_stages=N --stages_per_mesh=K` | `--pipeline_parallel=N/K --stages_per_mesh=K` |
-| `--parallel=dp --num_stages=N`, the state of a pipeline without one | `--stages_per_mesh=N` |
-| `--tensor_parallel=N` | the same |
+The options of pipeline parallelism:
 
-The options of a strategy keep their flags and their defaults:
-
-| Option | Of | Default |
+| Option | What it sets | Default |
 |---|---|---|
-| `--schedule` | PP: the order of the microbatches' forward and backward passes, an entry of Shardy's registry | `ZERO_BUBBLE_H1` |
-| `--stage_layers` | PP: the layers of each stage | an even split |
-| `--stages_per_mesh` | PP: stages on each group of GPUs, above 1 for a circular schedule | 1 |
-| `--reduce_grads` | DP and FSDP in a pipeline: a stage's GPUs sum their gradients in every microbatch, or once per step | `microbatch` |
-| `--microbatches`, `--microbatch_size` | the batch of a step | 8 and 4 |
+| `--num_stages` | the stages the model is cut into, a multiple of `--pipeline_parallel`. More than one per group is for a circular schedule; more than one without a pipeline holds the state stage by stage, as a pipeline of that many stages does | `--pipeline_parallel` |
+| `--stage_layers` | the layers of each stage | an even split |
+| `--schedule` | the order of the microbatches' forward and backward passes, an entry of Shardy's registry | `ZERO_BUBBLE_H1` |
 
-`--per_device` and `--mpmd_options` stay as they are.
+`--parallel`, `--stage_fsdp` and `--stages_per_mesh` go, and `--mpmd_options` stays as it is.
 
 ### 3.3 The plan
 
 **Pattern:** value object.
 
-The plan is what the flags and the devices of a run come to: its degrees and its meshes. It stands
-between a model and a layout function, and each of the three owns one thing:
+The plan is what the flags and the devices of a run come to: its degrees, its stages and its
+meshes. It stands between a model and a layout function, and each of the three owns one thing:
 
 | | Owns | Code |
 |---|---|---|
-| **Model** | what can be made parallel: the logical axes of its parameters, its cut into stages | `jax_titan/models`, read through the contract (1.3) |
-| **Plan** | what the run asks for: the degrees and the meshes | `jax_titan/parallel` |
+| **Model** | what can be made parallel: the logical axes of its parameters, and the stages it can be cut into | `jax_titan/models`, read through the contract (1.3) |
+| **Plan** | what the run asks for: the degrees, the stages and the meshes | `jax_titan/parallel` |
 | **Layout** | the two put together: the sharding of the state, and the step | `jax_titan/trainer/layout.py` |
 
-A model names no flag and no mesh, the plan names no model, and a layout function reads the model
-through the contract and the plan through its fields.
+A JAX-Titan model names no flag and no mesh: of the plan it gets its stages and one function,
+`constrain`. The plan names no model. A layout function reads the model through the contract and
+the plan through its fields.
 
 ```python
 # jax_titan/parallel/plan.py
 @dataclasses.dataclass(frozen=True)
 class Plan:
-  pipeline_parallel: int        # groups of GPUs, with a stage on each
+  pipeline_parallel: int        # groups of GPUs, which run the stages
   data_parallel: int            # GPUs of a group that each take a share of the batch
   tensor_parallel: int          # GPUs that share every layer
-  fsdp: bool                    # the state sharded across the data-parallel GPUs
-  num_stages: int               # pipeline_parallel * stages_per_mesh
-  meshes: tuple                 # one jax.sharding.Mesh per group, with the axes data and tensor
-  constrain: Callable           # keeps a batch sharded along the data axis
+  fsdp: bool                    # the state sharded across the data-parallel GPUs, or a copy on each
+  num_stages: int               # stages of the model, a multiple of pipeline_parallel
+  stage_layers: tuple | None    # layers of each stage, or None for an even split
+  meshes: dict                  # mesh name -> jax.sharding.Mesh, one per group, axes data and tensor
 
-def resolve(devices, *, pipeline_parallel=1, tensor_parallel=1, fsdp=False,
-            stages_per_mesh=1) -> Plan:
-  ...                           # refuses devices that do not divide into the groups
+  def constrain(self, x): ...   # under FSDP, keeps a batch sharded along the data axis
+
+def resolve(devices, *, pipeline_parallel=1, tensor_parallel=1, fsdp=True, num_stages=None,
+            stage_layers=None) -> Plan:
+  ...                           # refuses devices and stages that do not divide into the groups
 ```
 
-- **Made once, before the builder.** The trainer resolves the plan from the flags and
-  `jax.devices()` and gives it to `build` in place of the devices. Every builder's `devices` (1.2)
-  becomes `plan`.
+- **Made once, before the builder.** `build` resolves the plan from the flags and the devices, and
+  gives it to the builder in place of the devices: every builder's `devices` (1.2) becomes `plan`.
 - **A builder makes no mesh, reads no flag of parallelism and chooses no layout function.** It
-  gives the model `plan.num_stages` and `plan.constrain`, and gives the plan to the one entry of
-  `trainer/layout.py`, `make_layout`, which is `spmd_layout` without a pipeline and `mpmd_layout`
-  with one.
-- **What divides is checked once:** `resolve` refuses GPUs that do not divide into the groups, and
-  `build` a batch that does not divide across `plan.data_parallel` GPUs. Today the checks are in
-  `build` and in `stage_topology`.
-- **The plan is no part of a model's configuration** (1.4). A run records it beside the
-  configuration. A checkpoint is not tied to the degrees: restoring places the state on the
-  shardings of the current plan, so a run can resume with `--fsdp` added. It is tied to the
-  pipeline and its number of stages, as today.
+  gives the model `plan.num_stages`, `plan.stage_layers` and `plan.constrain`, and gives the plan
+  to the one entry of `trainer/layout.py`, `make_layout`, which is `spmd_layout` without a pipeline
+  and `mpmd_layout` with one. The schedule and Shardy's options stay flags, which `mpmd_layout`
+  reads.
+- **An adapter model** takes DP and FSDP alone, with the one exception of 3.5. MaxText's and
+  MaxDiffusion's initialize their parameters on their shardings, so their builders give them
+  `plan.fsdp` and a mesh: the plan's, or for MaxText a mesh of the plan's devices under MaxText's
+  axis names, the one mesh that a builder makes.
+- **What divides is checked once:** `resolve` refuses GPUs and stages that do not divide into the
+  groups, and `build` a batch that does not divide across `plan.data_parallel` GPUs.
+- **The plan is no part of a model's configuration** (1.4). A run records its degrees beside the
+  configuration. A checkpoint is not tied to the data-parallel and tensor-parallel degrees or to
+  FSDP: restoring places the state on the shardings of the current plan. It is tied to a pipeline
+  or none, to the number of stages and to their layers, as today.
 
 ### 3.4 From the flags to the program
 
 | | From | To | By |
 |---|---|---|---|
-| 1 | the flags, the devices | the `Plan` | `parallel.resolve`, new |
-| 2 | the plan | one mesh per group of GPUs, with the axes `data` and `tensor` | `mpmd.make_topology`, of the pipeline library |
-| 3 | the plan, the model's `logical_axes` | the sharding of every parameter and of the optimizer state that mirrors it | `parallel.tree_specs`, as today |
-| 4 | the plan, the model's `stage_fns` | the step, one program | `spmd_layout` and `mpmd_layout`, as today, behind `make_layout` |
-| 5 | the step | what the GPUs run | Shardy and XLA, below JAX-Titan |
+| 1 | the flags, the devices | the `Plan`: the degrees, the stages, and one mesh per group of GPUs with the axes `data` and `tensor` | `parallel.resolve`, new; it makes the meshes, in place of `mpmd.make_topology` |
+| 2 | the plan, the model's `logical_axes` | the sharding of every parameter and of the optimizer state that mirrors it | `parallel.tree_specs`, which exists |
+| 3 | the plan, the model's `stage_fns` | the step, one program | `spmd_layout` and `mpmd_layout`, behind `make_layout` |
+| 4 | the step | what the GPUs run | Shardy and XLA, below JAX-Titan |
 
-- **Step 3** has one rule. TP shards the first dimension named `heads`, `kv_heads`, `mlp` or
-  `vocab` across the `tensor` axis. FSDP shards the first other dimension that divides, never
-  `layers`, across the `data` axis. A leaf with neither is replicated, which is DP.
-- **Step 4** without a pipeline is one `jax.jit` program on the one mesh. With a pipeline it is one
-  Shardy MPMD program: every stage is a named computation on its mesh, and every microbatch an
-  `mpmd.call` with its own call counter.
-- **Step 5** is not JAX-Titan's. Shardy cuts a pipeline's step into fragments, one per stage,
-  microbatch and direction, and orders them by the schedule. Inside a mesh the shardings of step 3
+- **Step 2** has one rule. TP shards the first dimension named `heads`, `kv_heads`, `mlp` or
+  `vocab` that divides, across the `tensor` axis. FSDP shards the first other dimension that
+  divides, never `layers`, across the `data` axis. A leaf with neither is replicated, which is DP.
+- **Step 3** is where the layout functions change. Both take their meshes from the plan and the
+  shardings of the state from step 2, where today `spmd_layout` shards under FSDP alone and
+  `mpmd_layout` replicates every stage. The step is one `jax.jit` program without a pipeline. With
+  one it is one Shardy MPMD program: every stage is a named computation on its mesh, and every
+  microbatch an `mpmd.call` with its own call counter.
+- **Step 4** is not JAX-Titan's. Shardy cuts a pipeline's step into fragments, one per stage,
+  microbatch and direction, and orders them by the schedule. Inside a mesh the shardings of step 2
   become collectives: an all-reduce of the gradients under DP, an all-gather of the weights and a
   reduce-scatter of the gradients under FSDP.
-
-The code of steps 2 to 4 exists. The proposal adds step 1 and has the others read the plan, in
-place of the flags and of the meshes that the builders make, whose tensor axis is 1.
 
 ### 3.5 A model's part
 
@@ -659,54 +661,50 @@ place of the flags and of the meshes that the builders make, whose tensor axis i
 | DP | nothing | |
 | FSDP | the logical axes of every parameter | `logical_axes` |
 | TP | among them `heads`, `kv_heads`, `mlp` or `vocab`, on the dimensions to share | `logical_axes` |
-| PP | its layers cut into `plan.num_stages` stages, with a parameter tree and a function for each | a class that takes `num_stages`; `init`, `abstract`, `stage_fns` |
+| PP | its layers cut into `plan.num_stages` stages, with a parameter tree and a function for each | a class that takes `num_stages` and the layers of each stage; `init`, `abstract`, `stage_fns` |
 
-The contract (1.3) keeps its members. What a model gets from the plan is the number of stages and
-one function, `constrain`.
+The contract (1.3) keeps its members.
 
-A builder names what its model takes beyond DP and FSDP, as `_options` names its run options:
-`_strategies(args, plan, "pipeline_parallel", "tensor_parallel")`. A strategy of the plan that is
-not named is refused, in one place and one wording. This takes the place of `_one_stage`'s refusal
-of a pipeline, and of `build`'s refusal of `--stage_fsdp` and `--tensor_parallel` for every model.
+A builder names the strategies, beyond DP and FSDP, that JAX-Titan runs its model with, as
+`_options` names its run options: `_strategies(args, plan, "stages", "tensor_parallel")`. A plan
+with more than one stage, or with tensor parallelism, is refused for a model whose builder does not
+name it, in one place and one wording. An adapter model names neither, but for
+`maxdiffusion:ideogram4`, which keeps its pipeline.
 
-## 4. Parallelism: examples
+## 4. Parallelism: examples (proposed)
 
 ### 4.1 Commands
 
 On 8 GPUs, the flags after `python -m jax_titan.trainer.train --model=llama3.1-8b`:
 
-| Flags | PP × DP × TP | Meshes | The state | The step |
+| Flags | PP × data × TP | Meshes | The state | The step |
 |---|---|---|---|---|
-| none | 1 × 8 × 1 | one of 8 GPUs | a copy on each GPU | one `jax.jit` program |
-| `--fsdp` | 1 × 8 × 1 | one of 8 GPUs | sharded across the 8 | one `jax.jit` program |
-| `--tensor_parallel=2` | 1 × 4 × 2 | one of 4 × 2 GPUs | sharded across each pair, a copy on each pair | one `jax.jit` program |
-| `--pipeline_parallel=2` | 2 × 4 × 1 | two of 4 GPUs | a stage's on its mesh, a copy on each GPU | one MPMD program |
-| `--pipeline_parallel=2 --fsdp` | 2 × 4 × 1 | two of 4 GPUs | a stage's sharded across its 4 GPUs | one MPMD program |
+| none | 1 × 8 × 1 | one of 8 GPUs | sharded across the 8 | one `jax.jit` program |
+| `--no-fsdp` | 1 × 8 × 1 | one of 8 GPUs | a copy on each GPU | one `jax.jit` program |
+| `--tensor_parallel=2` | 1 × 4 × 2 | one of 4 × 2 GPUs | sharded both ways: across each pair, and across the 4 pairs | one `jax.jit` program |
+| `--pipeline_parallel=2` | 2 × 4 × 1 | two of 4 GPUs | a stage's sharded across its 4 GPUs | one MPMD program |
+| `--pipeline_parallel=2 --no-fsdp` | 2 × 4 × 1 | two of 4 GPUs | a stage's copied on each of its 4 GPUs | one MPMD program |
 | `--pipeline_parallel=2 --tensor_parallel=4` | 2 × 1 × 4 | two of 1 × 4 GPUs | a stage's sharded across its 4 GPUs along heads, MLP columns and vocabulary | one MPMD program |
-| `--pipeline_parallel=2 --tensor_parallel=2 --fsdp` | 2 × 2 × 2 | two of 2 × 2 GPUs | a stage's sharded both ways | one MPMD program |
+| `--pipeline_parallel=2 --tensor_parallel=2` | 2 × 2 × 2 | two of 2 × 2 GPUs | a stage's sharded both ways | one MPMD program |
 
-### 4.2 The plan in the trainer and in a builder
+### 4.2 The plan in `build` and in a builder
 
 ```python
-# jax_titan/trainer/train.py
-plan = parallel.resolve(devices, pipeline_parallel=args.pipeline_parallel,
-                        tensor_parallel=args.tensor_parallel, fsdp=args.fsdp,
-                        stages_per_mesh=args.stages_per_mesh)
-layout, work = builders.build(args, plan, make_optimizer)
-
 # jax_titan/trainer/builders.py
-def _strategies(args, plan, *taken):              # what a model takes beyond DP and FSDP
-  for flag in ("pipeline_parallel", "tensor_parallel"):
-    if getattr(plan, flag) > 1 and flag not in taken:
-      raise NotImplementedError(f"{args.model} takes no --{flag}")
+def build(args, devices, make_optimizer) -> tuple[Layout, Workload]:
+  plan = parallel.resolve(devices, pipeline_parallel=args.pipeline_parallel,
+                          tensor_parallel=args.tensor_parallel, fsdp=args.fsdp,
+                          num_stages=args.num_stages, stage_layers=_stage_layers(args))
+  ...                                             # the batch divides across plan.data_parallel
+  return BUILDERS[models.module_of(args.model)](args, plan, make_optimizer)
 
 def _llama(args, plan, make_optimizer):
-  _strategies(args, plan, "pipeline_parallel", "tensor_parallel")
+  _strategies(args, plan, "stages", "tensor_parallel")
   cfg = config.resolve(llama, args.model, overrides=_overrides(args))
   _needs_own_tokens(args, cfg.vocab_size)
-  model = llama.Model(cfg, num_stages=plan.num_stages, layers=_stage_layers(args),
-                      dtype=jnp.dtype(args.dtype), remat=args.remat, constrain=plan.constrain)
-  tokens, split_batch = _token_batches(args)      # the spec of a step's token windows
+  model = llama.Model(cfg, num_stages=plan.num_stages, layers=plan.stage_layers,
+                      dtype=_dtype(args), remat=args.remat, constrain=plan.constrain)
+  tokens, split_batch = ...                       # the spec and the split of a step's token windows
   layout = make_layout(args, plan, model, make_optimizer(model.decays), tokens, tokens,
                        split_batch)
   work = Workload(num_params=cfg.num_params(), tokens_per_step=..., flops_per_step=...,
@@ -720,9 +718,8 @@ def make_layout(args, plan, model, optimizer, inputs, targets, split_batch) -> L
   return mpmd_layout(args, plan, model, optimizer, inputs, targets, split_batch)
 ```
 
-Against 2.1, `_one_stage`, `_data_mesh(devices)`, `_keep_batch_sharded(mesh)` and the call of
-`spmd_layout` are gone from the builder. The builder of a model without stages changes the same
-way and names no strategy: `_strategies(args, plan)`.
+The builder of a model without stages changes the same way and names no strategy:
+`_strategies(args, plan)`.
 
 ### 4.3 Llama with stages
 
@@ -748,18 +745,16 @@ class Model:
     return [functools.partial(stage_forward, cfg=self.config, stage=i,
                               num_stages=self.num_stages, ...)
             for i in range(self.num_stages)]
-
-  def merge(self, stage_params):                  # for --save_params
-    return merge_stage_params(stage_params)
 ```
 
-`logical_axes` is as today: it names `heads`, `kv_heads`, `mlp` and `vocab`, so Llama takes TP
-without a change.
+`stage_forward` gets the default `targets=None`: a stage before the last is called without
+targets. `logical_axes` is as today: it names `heads`, `kv_heads`, `mlp` and `vocab`, so Llama
+takes TP without a change.
 
 ### 4.4 One command, down to the program
 
 ```
-flags    --model=llama3.1-8b --pipeline_parallel=2 --fsdp     on 8 GPUs, 8 microbatches of 4 sequences
+flags    --model=llama3.1-8b --pipeline_parallel=2            on 8 GPUs, 8 microbatches of 4 sequences
 plan     Plan(pipeline_parallel=2, data_parallel=4, tensor_parallel=1, fsdp=True, num_stages=2, ...)
 meshes   mesh0 = GPUs 0-3, mesh1 = GPUs 4-7, each data=4 x tensor=1
 model    llama.Model(cfg, num_stages=2): 16 layers a stage, embed on stage 0, lm_head on stage 1
@@ -767,11 +762,12 @@ state    layers/wq  [16, 4096, 4096]   (layers, embed, heads)   P(None, "data") 
          embed      [128256, 4096]     (vocab_in, embed)        P("data")         on mesh0
          lm_head    [4096, 128256]     (embed, vocab)           P("data")         on mesh1
 batch    tokens     [8, 4, 2048]                                P(None, "data")   on mesh0, targets on mesh1
-step     mpmd.jit(make_train_step(model.stage_fns(), optimizer), make_config(meshes, "ZERO_BUBBLE_H1"))
+step     mpmd.jit(make_train_step(model.stage_fns(), optimizer),
+                  make_config(plan.meshes, "ZERO_BUBBLE_H1", num_stages=2))
 below    Shardy: fragments per stage, microbatch and direction, in the schedule's order; in each mesh
          an all-gather of the weights and a reduce-scatter of the gradients
 ```
 
-With `--tensor_parallel=4` in place of `--fsdp`, the meshes are data=1 x tensor=4 and the three
-leaves get `P(None, None, "tensor")`, `P()` and `P(None, "tensor")`: the embedding names no
-tensor-parallel axis and stays whole on each GPU.
+With `--tensor_parallel=4` added, the meshes are data=1 x tensor=4 and the three leaves get
+`P(None, None, "tensor")`, `P()` and `P(None, "tensor")`: the embedding names no tensor-parallel
+axis and stays whole on each GPU.
