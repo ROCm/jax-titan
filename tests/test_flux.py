@@ -18,7 +18,7 @@ from jax_titan import parallel
 from jax_titan.data import diffusion
 from jax_titan.models import flux
 from jax_titan.observability import records
-from jax_titan.trainer import adapters, train
+from jax_titan.trainer import builders, train
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 CONFIG = {
@@ -28,7 +28,7 @@ CONFIG = {
 }
 FLAGS = [
     "--platform=cpu", "--model=flux-dev", "--resolution=64", "--text_tokens=8",
-    "--model_overrides=" + json.dumps(CONFIG | {"dtype": "float32"}), "--microbatches=2",
+    "--model_overrides=" + json.dumps(CONFIG), "--dtype=float32", "--microbatches=2",
     "--microbatch_size=8", "--steps=4", "--warmup_steps=1",
 ]
 
@@ -142,18 +142,18 @@ def test_matches_diffusers(guidance_embeds):
 
 
 def test_every_parameter_is_sharded_and_only_norms_do_not_decay():
-  for name, cfg in flux.FLAVORS.items():
+  for name, cfg in flux.CONFIGS.items():
     params = jax.eval_shape(lambda c=cfg: flux.init_params(c, jax.random.key(0)))
     specs = parallel.tree_specs(params, flux.logical_axes, {"data": 8, "tensor": 1}, fsdp=True)
     for path, spec in jax.tree_util.tree_flatten_with_path(specs)[0]:
       assert "data" in spec, (name, path)
       if path[0].key in ("double", "single"):
         assert spec[0] is None, (name, path)
-    kept = {path[-1].key for path, decays in
-            jax.tree_util.tree_flatten_with_path(train._decay_mask(params))[0] if not decays}
+    kept = {path[-1].key for path, leaf in jax.tree_util.tree_flatten_with_path(params)[0]
+            if not flux.decays(path, leaf)}
     assert kept == {"q_norm", "k_norm"}, name
   # The parameter count of the published FLUX.1-dev, 11.90B.
-  dev = jax.eval_shape(lambda: flux.init_params(flux.FLAVORS["flux-dev"], jax.random.key(0)))
+  dev = jax.eval_shape(lambda: flux.init_params(flux.CONFIGS["flux-dev"], jax.random.key(0)))
   assert sum(x.size for x in jax.tree.leaves(dev)) == 11_901_408_320
 
 
@@ -228,12 +228,13 @@ def test_resume_is_exact(parallel_flag, tmp_path):
 def test_refuses(flags, error):
   args = train.parse_args(["--model=flux-dev", *flags])
   with pytest.raises(NotImplementedError, match=error):
-    adapters.build(args, [None], lambda decays=None: optax.sgd(0.0))
+    builders.build(args, [None], lambda decays=None: optax.sgd(0.0))
 
 
-def test_runs_as_one_stage_by_default():
-  assert train.parse_args(["--model=flux-schnell"]).num_stages == 1
-  assert train.parse_args(["--model=llama3.1-8b"]).num_stages == 2
+def test_stages_default_to_two_in_a_pipeline_and_to_one_without():
+  assert train.parse_args(["--model=ideogram4"]).num_stages == 2
+  assert train.parse_args(["--model=ideogram4", "--parallel=fsdp"]).num_stages == 1
+  assert train.parse_args(["--model=flux-schnell", "--parallel=dp"]).num_stages == 1
 
 
 @pytest.mark.gpu(2)

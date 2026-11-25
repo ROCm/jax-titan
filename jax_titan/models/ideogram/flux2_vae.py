@@ -17,7 +17,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from jax_titan.models import pretrained
+from jax_titan.models import weights as weights_lib
 
 _LAYOUT = ("NHWC", "HWIO", "NHWC")
 
@@ -95,8 +95,8 @@ def params_from_tensors(tensors: dict, cfg: Flux2VaeConfig) -> dict:
 def load(path) -> tuple[Flux2VaeConfig, dict]:
   """The config and the fp32 parameters, on the default device, of the published
   weights at `path`, a safetensors file or a directory of them."""
-  cfg = pretrained.config(Flux2VaeConfig, path)
-  return cfg, pretrained.to_device(params_from_tensors(pretrained.read(path), cfg))
+  cfg = weights_lib.config(Flux2VaeConfig, path)
+  return cfg, weights_lib.to_device(params_from_tensors(weights_lib.read(path), cfg))
 
 
 def _conv(x, p, stride=1, padding="SAME"):

@@ -34,9 +34,9 @@ from jax_titan.mlperf import mllog
 MODELS = {"llama31_8b": "llama3.1-8b"}
 
 # Trainer flags the runner derives from the contract.
-CONTROLLED = ("model", "model_overrides", "init_from", "seq_len", "steps", "lr", "warmup_steps",
-              "lr_schedule", "lr_decay_steps", "adam_b1", "adam_b2", "adam_eps", "weight_decay",
-              "max_grad_norm", "data", "eval_data", "eval_every", "eval_samples",
+CONTROLLED = ("model", "model_overrides", "dtype", "init_from", "seq_len", "steps", "lr",
+              "warmup_steps", "lr_schedule", "lr_decay_steps", "adam_b1", "adam_b2", "adam_eps",
+              "weight_decay", "max_grad_norm", "data", "eval_data", "eval_every", "eval_samples",
               "eval_batch_size", "eval_batches", "target_eval_loss", "seed", "synthetic_warmup")
 
 

@@ -51,7 +51,7 @@ Both commands run the same configuration:
 non-commercial license. The command needs the `ideogram` extra.
 
 ```bash
-HIP_VISIBLE_DEVICES=0 python -m jax_titan.models.ideogram_generate --checkpoint=$CKPT \
+HIP_VISIBLE_DEVICES=0 python -m jax_titan.models.ideogram.generate --checkpoint=$CKPT \
   --prompt=@examples/ideogram4_caption.json --out=picture.png
 ```
 
@@ -85,7 +85,7 @@ HIP_VISIBLE_DEVICES=0,1,2,3 XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" \
   --init_from=$CKPT/transformer --lr=1e-5 --steps=300 --eval_every=50 \
   --save_params=finetuned --run_dir=runs/ideogram4-finetune
 
-HIP_VISIBLE_DEVICES=0 python -m jax_titan.models.ideogram_generate --checkpoint=$CKPT \
+HIP_VISIBLE_DEVICES=0 python -m jax_titan.models.ideogram.generate --checkpoint=$CKPT \
   --transformer=finetuned --prompt=@caption.json --out=picture.png --resolution=512
 ```
 
@@ -147,7 +147,7 @@ the floor.
   below 2 from step 145 on, and after 1,000 steps its validation loss is
   1.6051, 0.0070 above the floor.
 - **JAX-Titan's own model and the adapter draw one line.** From the adapter's
-  weights, on its batches and with its timesteps, the own model on 4 GPUs
+  weights, on its batches and with its timesteps, JAX-Titan's model on 4 GPUs
   follows the adapter on 8: the losses of a step differ by at most 0.0031
   from step 200 on, where the loss varies by 0.10 from batch to batch. Their
   means over 100 steps agree to 0.0001 from step 200 on, and their
@@ -180,7 +180,7 @@ with a tolerance of 2e-3 in loss, and over 30:
 | The adapter on 4 GPUs against the adapter on 8 | 4.5e-4 | 4.5e-4 | 1.7e-3 | 1.8e-3 |
 | Two identical runs of the adapter on 8 GPUs | 1.8e-4 | 2.8e-4 | 8.1e-4 | 1.5e-3 |
 
-JAX-Titan's own model (`models/ideogram.py`) is written after diffusers'
+JAX-Titan's own model (`models/ideogram/`) is written after diffusers'
 `Ideogram4Transformer2DModel` and its training example, and the adapter
 builds the same stages from MaxDiffusion's Ideogram branch, a port of the
 same model. The model against its references, with the same weights on both
@@ -212,9 +212,9 @@ records are in [results/2026-11-17](../results/2026-11-17).
 ### Pictures from the published weights
 
 The pictures come from three more modules of JAX-Titan's own: the text
-encoder (`models/qwen3.py`, the text tower of Qwen3-VL), the autoencoder
-(`models/flux2_vae.py`) and a reader of published weights
-(`models/pretrained.py`). The checkpoint `ideogram-ai/ideogram-4-fp8` stores
+encoder (`models/ideogram/qwen3.py`, the text tower of Qwen3-VL), the
+autoencoder (`models/ideogram/flux2_vae.py`) and a reader of published
+weights (`models/weights.py`). The checkpoint `ideogram-ai/ideogram-4-fp8` stores
 a Linear weight as float8 with one scale per output row; the reader
 multiplies them out to fp32.
 
@@ -321,7 +321,7 @@ outside any mesh:
   code has no such filter.
 - The cache keeps the text features of every distinct caption, 0.1 MB per
   text token.
-- The model trains through the layouts of `jax_titan.trainer.adapters`:
+- The model trains through the layouts of `jax_titan.trainer.layout`:
   FSDP or data parallelism without a pipeline, or a pipeline with data
   parallelism inside its stages and gradients reduced per microbatch. It has
   no tensor parallelism and no FSDP inside pipeline stages.

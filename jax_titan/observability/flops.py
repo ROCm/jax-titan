@@ -5,7 +5,7 @@
       [--devices=8] [--tensor_parallel=1] [--reduce_grads=step] [--stage_fsdp] [--no-remat]
       [--peak_tflops=1436] [--busbw_gbs=160] [--json OUT]
 
-`--model` is a JAX-Titan Llama flavor or `maxtext:<name>` (with MaxText installed).
+`--model` is a JAX-Titan Llama or `maxtext:<name>` (with MaxText installed).
 
 Model FLOPs follow the usual convention: a matmul's backward pass costs twice its forward
 (activation and weight gradients), so training costs three forward passes, and causal
@@ -146,7 +146,7 @@ def communication(d: Dims, seq_len: int, stage_layers, *, microbatches: int,
 
 
 def model_dims(model: str):
-  """`Dims` and the LlamaConfig of a JAX-Titan flavor or `maxtext:<name>`."""
+  """`Dims` and the LlamaConfig of a JAX-Titan Llama or of `maxtext:<name>`."""
   if model.startswith("maxtext:"):
     from jax_titan.models.adapters import maxtext as mt  # pylint: disable=g-import-not-at-top
 
@@ -154,7 +154,7 @@ def model_dims(model: str):
   else:
     from jax_titan.models import llama  # pylint: disable=g-import-not-at-top
 
-    cfg = llama.FLAVORS[model]
+    cfg = llama.CONFIGS[model]
   return Dims.of(cfg), cfg
 
 

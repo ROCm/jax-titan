@@ -1,17 +1,19 @@
 """Llama 3 decoder with parameters grouped by pipeline stage.
 
-Architecture and flavors follow MaxText's `decoder_block: llama2` and its
+Architecture and configurations follow MaxText's `decoder_block: llama2` and its
 `configs/models/llama3*.yml`: pre-norm RMSNorm, RoPE, grouped-query attention
 and a SwiGLU MLP.
 """
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 import dataclasses
+import functools
 
 import jax
 import jax.numpy as jnp
 
 from jax_titan import ops
+from jax_titan.models import losses
 
 
 @dataclasses.dataclass(frozen=True)
@@ -50,7 +52,7 @@ class LlamaConfig:
     return 6 * non_embedding + attn
 
 
-FLAVORS = {
+CONFIGS = {
     "llama3.1-8b": LlamaConfig(
         vocab_size=128256, emb_dim=4096, num_layers=32, num_query_heads=32,
         num_kv_heads=8, head_dim=128, mlp_dim=14336,
@@ -152,6 +154,12 @@ def logical_axes(path: tuple, leaf) -> tuple | None:
   return axes if len(axes) == getattr(leaf, "ndim", -1) else None
 
 
+def decays(path: tuple, leaf) -> bool:
+  """Whether a parameter takes weight decay: every one but the norms' weights."""
+  del leaf
+  return path[-1].key not in ("attn_norm", "mlp_norm", "final_norm")
+
+
 def device_copy_axes(params: dict) -> dict:
   """Axes to stack per-device parameter copies along, one per leaf.
 
@@ -221,13 +229,6 @@ def _run_layers(
   return h
 
 
-def cross_entropy(logits: jax.Array, targets: jax.Array) -> jax.Array:
-  logits = logits.astype(jnp.float32)
-  logz = jax.nn.logsumexp(logits, axis=-1)
-  gold = jnp.take_along_axis(logits, targets[..., None], axis=-1)[..., 0]
-  return jnp.mean(logz - gold)
-
-
 def stage_forward(
     params: dict,
     inputs: jax.Array,
@@ -258,4 +259,36 @@ def stage_forward(
       "bse,ev->bsv", h, params["lm_head"].astype(compute_dtype),
       preferred_element_type=jnp.float32,
   )
-  return cross_entropy(logits, targets)
+  return losses.cross_entropy(logits, targets)
+
+
+class Model:
+  """Llama as one stage, for the trainer's `--parallel=dp` and `fsdp` layouts.
+
+  Parameters are fp32; the model computes in `dtype`. `constrain`, when given,
+  is applied to the hidden states after the embedding and after the layers.
+  """
+
+  logical_axes = staticmethod(logical_axes)
+  decays = staticmethod(decays)
+
+  def __init__(self, config: LlamaConfig, *, dtype=jnp.bfloat16, remat: bool = True,
+               constrain: Callable | None = None):
+    self.config = config
+    self.dtype = dtype
+    self._remat = remat
+    self._constrain = constrain
+
+  def init(self, seed: int = 0) -> tuple[dict]:
+    """The parameters of the one stage, randomly initialized."""
+    return (jax.jit(lambda key: init_stage_params(self.config, key, 0, 1))(jax.random.key(seed)),)
+
+  def abstract(self, seed: int = 0) -> tuple[dict]:
+    """ShapeDtypeStructs of `init(seed)`, without initializing."""
+    return (jax.eval_shape(lambda: init_stage_params(self.config, jax.random.key(seed), 0, 1)),)
+
+  def stage_fns(self) -> list[Callable[..., jax.Array]]:
+    """The one stage function, `fn(params, tokens, targets)`, which returns the loss."""
+    return [functools.partial(
+        stage_forward, cfg=self.config, stage=0, num_stages=1, remat=self._remat,
+        constrain=self._constrain, compute_dtype=self.dtype)]

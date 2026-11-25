@@ -50,7 +50,7 @@ for a later comparison: do not import from it or edit it.
   in every mode before a policy uses it.
 - **MaxText models:** `models/adapters/maxtext.py` runs MaxText's models
   from its own layers at the pinned release (`maxtext==0.2.5`, the `maxtext`
-  extra). `WholeModel` calls MaxText's `Transformer` whole, as one stage for
+  extra). `AdapterModel` calls MaxText's `Transformer` whole, as one stage for
   `--parallel=dp` and `fsdp`, with no code per model family, and refuses a
   config whose loss has more terms than the cross-entropy and the MoE
   load-balance term. Parameters keep MaxText's names and layer axis;
@@ -58,7 +58,7 @@ for a later comparison: do not import from it or edit it.
   whose reference the adapter is.
 - **MaxDiffusion models:** `models/adapters/maxdiffusion.py` runs
   MaxDiffusion's denoisers at commit `821afc36` with the
-  `third_party/patches/maxdiffusion-*.patch` patches. `WholeModel` calls a
+  `third_party/patches/maxdiffusion-*.patch` patches. `AdapterModel` calls a
   denoiser whole, as one stage for `--parallel=dp` and `fsdp`: FLUX.1 and
   Wan 2.1, each with a few lines (`whole_flux`, `whole_wan`).
 - **A model of another repository is one stage.** The adapters of MaxText,
@@ -77,23 +77,23 @@ for a later comparison: do not import from it or edit it.
 - **Diffusion objectives:** a denoiser's repository keeps the noising, the
   timestep and the target outside the model. JAX-Titan states them once per
   family in `data/diffusion.py`, for every adapter that runs the family.
-- **Ideogram 4:** `models/ideogram.py` is JAX-Titan's own model, written after
+- **Ideogram 4:** `models/ideogram/` is JAX-Titan's own model, written after
   diffusers' `Ideogram4Transformer2DModel` and its training example. It
-  trains through the layouts of `trainer/adapters.py` (`--model=ideogram4`),
+  trains through the layouts of `trainer/layout.py` (`--model=ideogram4`),
   so with gradients reduced per microbatch. `models/adapters/ideogram.py`
   builds the same stages from MaxDiffusion's Ideogram branch
-  (`maxdiffusion:ideogram4`), and its `own_params` maps those weights onto
-  `models/ideogram.py`. Compute the rotary frequencies on the host: a compiled
-  program folds the same expression to other last bits, and image positions
-  start at 65536. The models around the transformer are JAX-Titan's own too:
-  `models/qwen3.py` (the text encoder) on `jax_titan.ops`, and
-  `models/flux2_vae.py` (the autoencoder) in plain JAX, on one device outside
-  any mesh. Both are frozen: `data/ideogram.py` runs them once into a cache
-  that the trainer reads (`--data`), and `models/ideogram_generate.py` runs
+  (`maxdiffusion:ideogram4`), and its `jax_titan_params` maps those weights
+  onto `models/ideogram/`. Compute the rotary frequencies on the host: a
+  compiled program folds the same expression to other last bits, and image
+  positions start at 65536. The models around the transformer are JAX-Titan's
+  own too: `models/ideogram/qwen3.py` (the text encoder) on `jax_titan.ops`,
+  and `models/ideogram/flux2_vae.py` (the autoencoder) in plain JAX, on one
+  device outside any mesh. Both are frozen: `data/ideogram.py` runs them once into a cache
+  that the trainer reads (`--data`), and `models/ideogram/generate.py` runs
   them to draw pictures. Image tokens are scaled by `TOKEN_MEAN` and
-  `TOKEN_STD` of `models/ideogram.py`, the constants of Ideogram's pipeline,
+  `TOKEN_STD` of `models/ideogram/`, the constants of Ideogram's pipeline,
   never by the batch-norm statistics stored with the autoencoder. Published
-  weights are read by `models/pretrained.py` without PyTorch; torch, diffusers
+  weights are read by `models/weights.py` without PyTorch; torch, diffusers
   and transformers appear in tests only, as references.
 - **FLUX.1:** `models/flux.py` is JAX-Titan's own model, written after
   diffusers' `FluxTransformer2DModel`, as one stage for `--parallel=dp` and
@@ -101,7 +101,7 @@ for a later comparison: do not import from it or edit it.
   `flux-schnell`). Its queries and keys keep each head's features in split
   halves, the layout of `ops.rope`, where diffusers interleaves the pairs, so
   diffusers' weights map onto it with that permutation (`tests/test_flux.py`).
-- **Command A+:** `models/command_a.py` is JAX-Titan's own model, written
+- **Command A+:** `models/command_a/` is JAX-Titan's own model, written
   after transformers' `cohere2_moe` and `cohere2_vision`: the sparse
   mixture-of-experts language model, the SigLIP vision tower and the
   projector. Its parameters are the published checkpoint's, with kernels as
@@ -109,19 +109,19 @@ for a later comparison: do not import from it or edit it.
   dimensions reordered for `ops.rope`; `params_from_tensors` and
   `tensors_from_params` map both ways, so keep them inverse. Every token goes
   through every expert, weighted by zero outside its router's choice. It
-  trains through the layouts of `trainer/adapters.py`
+  trains through the layouts of `trainer/layout.py`
   (`--model=command-a-plus`): as one stage, since its output head is its
   embedding matrix, or as a pipeline with the embedding frozen and a copy on
   the first stage and on the last. `data/command_a.py` applies the
   checkpoint's chat template, tokenizer and image settings and caches
-  conversations to fine-tune on, and `models/command_a_generate.py` generates
+  conversations to fine-tune on, and `models/command_a/generate.py` generates
   text. The published model is too large for one device:
   `load_stages` reads its checkpoint stage by stage onto several, a run of
   layers on each, with the transposing and casting done on the device, and
   generation runs over these stages.
 - **Frozen parameters:** a staged model may train part of its parameters:
   `is_frozen(path)` names the rest (Command A+'s `freeze`). The layouts of
-  `trainer/adapters.py` keep frozen parameters out of the trained state, in
+  `trainer/layout.py` keep frozen parameters out of the trained state, in
   the model's compute dtype, with no gradient and no optimizer state; the
   step takes them after the state (`Layout.frozen`), and neither a
   checkpoint nor `--save_params` holds them: a run that resumes reads them
@@ -133,9 +133,21 @@ for a later comparison: do not import from it or edit it.
 - **Precision:** parameters and optimizer state are fp32; compute casts to
   bf16 before the layer scan. Casting inside the rematerialized layer was
   measured slower; do not move it back without a new A/B.
-- **Trainer:** builders return a `Layout` with `init()` and `abstract_state`,
-  so checkpoints restore without initializing first. Entry points import jax
-  inside `main()`, after `--platform=cpu` sets `JAX_PLATFORMS`.
+- **Models:** a model is a module or a package of `jax_titan/models`, with a
+  frozen configuration dataclass, `CONFIGS` by the names `--model` takes, and
+  `class Model` with the members of `models/contract.py`. Its names are in
+  `models.MODELS`, and a module imports no other model's. The loss comes from
+  `models/losses.py`. A model of another repository is an `AdapterModel` in
+  `models/adapters`, named in `models.SOURCES`. `docs/adding_a_model.md` has
+  the steps.
+- **Trainer:** one builder per model's module in `trainer/builders.py`
+  (`BUILDERS`) makes the model from the flags and gives it to `spmd_layout`
+  or `mpmd_layout` of `trainer/layout.py`. It returns a `Layout` with
+  `init()` and `abstract_state`, so checkpoints restore without initializing
+  first, and a `Workload`. A model's configuration comes from
+  `models.config.resolve`; a run option that is no field of it is a flag.
+  Entry points import jax inside `main()`, after `--platform=cpu` sets
+  `JAX_PLATFORMS`.
 - **Checkpoints** go through `jax_titan.trainer.checkpoint` (Orbax). Restoring
   takes target shardings from the current layout.
 
@@ -182,7 +194,7 @@ for a later comparison: do not import from it or edit it.
   `tests/test_transformers_adapter.py` and `tests/test_diffusers_adapter.py`
   compare the traced PyTorch models with PyTorch's own loss and gradients, on
   GPUs (skipped without the `transformers` or `diffusers` extra).
-- `tests/test_ideogram.py` checks `models/ideogram.py` against diffusers'
+- `tests/test_ideogram.py` checks `models/ideogram/` against diffusers'
   model (skipped without `torch` and `diffusers`), its stages against one
   stage, and its layouts against `--parallel=dp`.
   `tests/test_ideogram_adapter.py` checks it against the Ideogram branch's
@@ -198,7 +210,7 @@ for a later comparison: do not import from it or edit it.
   against data parallelism and resume on CPU.
   `tests/test_compare.py` checks `observability/compare.py` on runs it writes
   and on the trainer's own records.
-- `tests/test_command_a.py` checks `models/command_a.py` against
+- `tests/test_command_a.py` checks `models/command_a/` against
   transformers' model in logits, loss and gradients, and the checkpoint
   layout both ways (skipped without `torch` and a `transformers` with
   `cohere2_moe`). It also holds the loss and gradient norm of the test model

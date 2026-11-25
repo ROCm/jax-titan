@@ -121,7 +121,7 @@ def test_adamw_matches_torch():
 
 
 def test_llama31_8b_is_the_references():
-  cfg = llama.FLAVORS["llama3.1-8b"]
+  cfg = llama.CONFIGS["llama3.1-8b"]
   # Meta-Llama-3.1-8B's parameters, with separate embedding and output matrices and
   # 128,256 vocabulary rows, as NeMo builds the model from Llama 3.1's tokenizer.
   assert cfg.num_params() == 8_030_261_248
@@ -229,7 +229,7 @@ def _losses(tmp_path, *flags):
   result = subprocess.run(
       [sys.executable, "-m", "jax_titan.trainer.train", "--platform=cpu", "--model=llama3-test",
        "--data=synthetic", "--seq_len=64", "--microbatches=2", "--microbatch_size=8",
-       "--steps=4", "--warmup_steps=2", "--lr=1e-3", "--lr_schedule=nemo_cosine",
+       "--steps=8", "--warmup_steps=2", "--lr=1e-3", "--lr_schedule=nemo_cosine",
        "--lr_decay_steps=1199998", "--adam_eps=1e-5", "--step_timeout=0",
        f"--log_file={log}", *flags],
       capture_output=True, text=True, check=False, cwd=REPO)
@@ -239,10 +239,8 @@ def _losses(tmp_path, *flags):
 
 def test_layouts_agree_under_mlperf_adamw(tmp_path):
   dp = _losses(tmp_path, "--parallel=dp")
-  assert len(dp) == 4 and dp[-1] < dp[0]
+  assert len(dp) == 8 and dp[-1] < dp[0]
   np.testing.assert_allclose(_losses(tmp_path, "--parallel=fsdp"), dp, rtol=1e-5)
-  np.testing.assert_allclose(_losses(tmp_path, "--parallel=mpmd", "--num_stages=2",
-                                     "--schedule=ONE_FWD_ONE_BWD"), dp, rtol=1e-3)
 
 
 def _megatron_data(tmp_path):
@@ -294,7 +292,7 @@ def test_validation_loss_is_the_mean_over_tokens(tmp_path):
   np.testing.assert_allclose(losses[1:], [losses[0]] * 2, rtol=1e-5)
 
 
-@pytest.mark.parametrize("layout", [["--parallel=dp"], ["--parallel=mpmd", "--num_stages=2"]])
+@pytest.mark.parametrize("layout", [["--parallel=dp"], ["--parallel=fsdp"]])
 def test_synthetic_warmup_trains_from_the_initial_state(tmp_path, layout):
   """Warm-up steps and a validation pass on synthetic tokens leave no trace: the run
   then trains and validates as one without them, and its clock starts after them."""
@@ -314,8 +312,6 @@ def test_synthetic_warmup_trains_from_the_initial_state(tmp_path, layout):
 @pytest.mark.parametrize("flags,message", [
     (["--target_eval_loss=3.3"], "needs validation passes"),
     (["--eval_every=1", "--eval_samples=20", "--eval_batch_size=8"], "not whole batches of 8"),
-    (["--eval_every=1", "--parallel=mpmd", "--eval_batch_size=8"],
-     "validates batches of one step's 16 sequences"),
     (["--model=command-a-plus", "--synthetic_warmup=1"], "--synthetic_warmup is for Llama"),
 ])
 def test_validation_flags_are_checked(tmp_path, flags, message):

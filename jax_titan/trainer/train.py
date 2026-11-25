@@ -1,12 +1,13 @@
-"""Pretrains a model with Shardy MPMD pipeline parallelism.
+"""Pretrains a model, with Shardy MPMD pipeline parallelism or without a pipeline.
 
-  python -m jax_titan.trainer.train --model=llama3.1-8b --num_stages=2
+  python -m jax_titan.trainer.train --model=llama3.1-8b --parallel=fsdp
 
-`--model` is a JAX-Titan Llama flavor, `ideogram4`, `command-a-plus`, FLUX.1
-(`flux-dev`, `flux-schnell`), or a model of another repository; FLUX.1 and the
-models of other repositories take `--parallel=dp` or `fsdp`:
+`--model` is a JAX-Titan model, Llama (`llama3.1-8b`, `llama3-test`), `ideogram4`,
+`command-a-plus` or FLUX.1 (`flux-dev`, `flux-schnell`), or a model of another
+repository; Llama, FLUX.1
+and the models of other repositories take `--parallel=dp` or `fsdp`:
 `maxtext:<name>`, `maxdiffusion:<name>`, `transformers:<name>` or
-`diffusers:<name>` (see `jax_titan.trainer.adapters` and docs/adapters).
+`diffusers:<name>` (see `jax_titan.trainer.builders` and docs/adapters).
 
 `--parallel=dp` and `--parallel=fsdp` train the same model on the same batches
 without the pipeline, as one `jax.jit` program over all devices.
@@ -16,41 +17,61 @@ With `--checkpoint_dir`, training resumes from the latest checkpoint there.
 
 import argparse
 import dataclasses
-import functools
 import json
 import os
 import socket
 import time
 
+from jax_titan import models
 from jax_titan import paths
-from jax_titan.trainer import adapters
-from jax_titan.trainer.layout import EVAL_STEPS, Layout
-from jax_titan.trainer.layout import Workload
-from jax_titan.trainer.layout import abstract
-from jax_titan.trainer.layout import placement as layout_placement
-
-_NORM_PARAMS = ("attn_norm", "mlp_norm", "final_norm", "attn_out_norm", "mlp_out_norm", "q_norm",
-                "k_norm", "text_norm")
-# Matched against a parameter's own name only: MaxDiffusion's FLUX.1 keeps kernels under a
-# module named `norm`.
-_NORM_LEAVES = ("norm", "norm1", "norm2", "norm1_bias", "norm2_bias", "final_norm_bias")
+from jax_titan.trainer import builders
+from jax_titan.trainer.layout import EVAL_STEPS
 
 
 def parse_args(argv=None):
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument(
       "--model", default="llama3.1-8b",
-      help="A Llama flavor (llama3.1-8b, llama3-test), ideogram4, command-a-plus, or, with "
-      "--parallel=dp or fsdp, flux-dev, flux-schnell or a model of another repository: "
+      help=f"A JAX-Titan model ({', '.join(models.MODELS)}), or a model of another repository "
+      f"as <source>:<name>, with a source of {', '.join(models.SOURCES)}: "
       "maxtext:<MaxText model name>, maxdiffusion:flux-dev, maxdiffusion:flux-schnell or "
       "maxdiffusion:wan2.1-t2v-1.3b, transformers:<directory or model type>, "
-      "diffusers:<denoiser class or directory>. maxdiffusion:ideogram4 is the pipeline of "
+      "diffusers:<denoiser class or directory>. Llama, FLUX.1 and a model of another "
+      "repository take --parallel=dp or fsdp; maxdiffusion:ideogram4 is the pipeline of "
       "MaxDiffusion's Ideogram branch.",
   )
   parser.add_argument(
       "--model_overrides", default="",
-      help="JSON object of model config overrides for ideogram4, command-a-plus, FLUX.1 and "
-      "for the models of other repositories, e.g. '{\"base_num_decoder_layers\": 4}'.",
+      help="JSON object of overrides of the model's configuration: fields of a JAX-Titan "
+      "model's configuration, e.g. '{\"num_layers\": 4}', or keys of the configuration of a "
+      "model of another repository, e.g. '{\"base_num_decoder_layers\": 4}'. A key that a "
+      "JAX-Titan model's configuration does not have is refused.",
+  )
+  parser.add_argument(
+      "--dtype", default="",
+      help="The dtype a JAX-Titan model, or a transformers: or diffusers: model, computes "
+      "in; default bfloat16. Parameters and optimizer state are float32. A maxtext: or "
+      "maxdiffusion: model takes the dtype keys of its repository in --model_overrides.",
+  )
+  parser.add_argument(
+      "--freeze", default="",
+      help="command-a-plus: comma-separated groups of parameters that are not trained, of "
+      "experts and embed. The model runs as more than one stage only with its embedding "
+      "frozen.",
+  )
+  parser.add_argument(
+      "--image_tiles", type=int, default=0,
+      help="command-a-plus: image tiles that every sequence of a synthetic batch opens "
+      "with. With them, the vision tower and the projector train with the language model.",
+  )
+  parser.add_argument(
+      "--timestep_mean", type=float, default=None,
+      help="ideogram4: the mean of the logit-normal noise level of the training timesteps, "
+      "before the shift that grows with --resolution; default 0.",
+  )
+  parser.add_argument(
+      "--timestep_std", type=float, default=None,
+      help="ideogram4: the standard deviation of that noise level; default 1.5.",
   )
   parser.add_argument(
       "--ops", default="",
@@ -62,13 +83,15 @@ def parse_args(argv=None):
       "--parallel", default="mpmd", choices=["mpmd", "dp", "fsdp"],
       help="mpmd: Shardy MPMD pipeline, data parallel inside each stage. "
       "dp, fsdp: no pipeline; one jax.jit program over all devices with "
-      "replicated or sharded parameters and optimizer state. FLUX.1 and a model of "
-      "another repository take dp or fsdp only.",
+      "replicated or sharded parameters and optimizer state. Llama, FLUX.1 and a model "
+      "of another repository take dp or fsdp only.",
   )
   parser.add_argument(
       "--num_stages", type=int, default=None,
-      help="Pipeline stages, 2 by default. dp and fsdp start from the same weights as the "
-      "pipeline with this many stages. FLUX.1 and a model of another repository take none.",
+      help="Pipeline stages: 2 by default with --parallel=mpmd, and 1 without a pipeline. "
+      "With more than 1, dp and fsdp hold the model's parameters stage by stage, as the "
+      "pipeline of that many stages does. Llama, FLUX.1 and a model of another repository "
+      "take none.",
   )
   parser.add_argument(
       "--schedule", default="ZERO_BUBBLE_H1",
@@ -91,11 +114,10 @@ def parse_args(argv=None):
       '\'{"mpmd_merge_inferred_after_scheduling": true}\'.',
   )
   parser.add_argument(
-      "--reduce_grads", default=None, choices=["microbatch", "step"],
+      "--reduce_grads", default="microbatch", choices=["microbatch", "step"],
       help="When mpmd stages sum gradients across their data-parallel ranks: "
       "in every microbatch's backward pass, or once per step from per-rank "
-      "parameter copies. Default: step for Llama flavors, microbatch for "
-      "the other models, which support only that.",
+      "parameter copies, which no model takes.",
   )
   parser.add_argument(
       "--per_device", default="vmap", choices=["vmap", "shard_map"],
@@ -206,7 +228,7 @@ def parse_args(argv=None):
   parser.add_argument(
       "--eval_batch_size", type=int, default=0,
       help="Token models: sequences per validation batch, a multiple of the data-parallel "
-      "ranks; default one step's batch, the only size a pipeline takes.",
+      "ranks; default one step's batch.",
   )
   parser.add_argument(
       "--target_eval_loss", type=float, default=0.0,
@@ -215,7 +237,7 @@ def parse_args(argv=None):
   )
   parser.add_argument(
       "--synthetic_warmup", type=int, default=0,
-      help="Llama flavors: train this many steps, and validate once, on synthetic tokens "
+      help="Llama: train this many steps, and validate once, on synthetic tokens "
       "before the run starts, so both programs are compiled and warm; the state is then "
       "initialized (or restored) again. The run_start event, where MLPerf's clock starts, "
       "follows it, and the first tokens of a Megatron dataset are read after it.",
@@ -257,7 +279,7 @@ def parse_args(argv=None):
       "--save_params", default="",
       help="Writes the model's parameters here after the last step, as --init_from reads "
       "them (ideogram4, command-a-plus). A model with frozen parameters writes the trained "
-      "ones alone, which command_a_generate --params reads and --init_from does not. The "
+      "ones alone, which command_a.generate --params reads and --init_from does not. The "
       "directory must not exist.",
   )
   parser.add_argument(
@@ -286,232 +308,8 @@ def parse_args(argv=None):
   parser.add_argument("--seed", type=int, default=0)
   args = parser.parse_args(argv)
   if args.num_stages is None:
-    args.num_stages = adapters.default_num_stages(args.model)
+    args.num_stages = 2 if args.parallel == "mpmd" else 1
   return args
-
-
-def _decay_mask(params):
-  """Weight decay for every parameter but the norms' (MaxText's and
-  MaxDiffusion's norms hold their weight as `scale`)."""
-  import jax  # pylint: disable=g-import-not-at-top
-
-  def decays(path, _):
-    keys = [getattr(k, "key", None) for k in path]
-    norm = any(k in _NORM_PARAMS or k == "scale" for k in keys) or keys[-1] in _NORM_LEAVES
-    return not norm
-
-  return jax.tree_util.tree_map_with_path(decays, params)
-
-
-def _stage_layers(args):
-  return tuple(int(n) for n in args.stage_layers.split(",")) if args.stage_layers else None
-
-
-def _build_mpmd(args, cfg, devices, optimizer) -> Layout:
-  """Shardy MPMD pipeline: one mesh per stage, DP, FSDP and TP inside each."""
-  import jax  # pylint: disable=g-import-not-at-top
-  import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
-  from jax_titan import mpmd as jt_mpmd  # pylint: disable=g-import-not-at-top
-  from jax_titan import ops  # pylint: disable=g-import-not-at-top
-  from jax_titan import parallel  # pylint: disable=g-import-not-at-top
-  from jax_titan.models import llama  # pylint: disable=g-import-not-at-top
-  from shardy.integrations.python.jax import mpmd  # pylint: disable=g-import-not-at-top
-
-  P = jax.sharding.PartitionSpec  # pylint: disable=invalid-name
-  NamedSharding = jax.sharding.NamedSharding  # pylint: disable=invalid-name
-
-  num_stages = args.num_stages
-  num_meshes = num_stages // args.stages_per_mesh
-  topology = jt_mpmd.make_topology(
-      num_meshes, devices, tensor_parallel=args.tensor_parallel
-  )
-  options = json.loads(args.mpmd_options) if args.mpmd_options else None
-  config = jt_mpmd.make_config(
-      topology, args.schedule or None, options, num_stages=num_stages
-  )
-  meshes = [topology[jt_mpmd.mesh_name(i % num_meshes)] for i in range(num_stages)]
-  data_parallel = meshes[0].shape[jt_mpmd.DATA_AXIS]
-  if args.microbatch_size % data_parallel:
-    raise ValueError(
-        f"--microbatch_size={args.microbatch_size} does not split across "
-        f"{data_parallel} data-parallel ranks per stage"
-    )
-  activation_sharding = NamedSharding(meshes[0], P(jt_mpmd.DATA_AXIS))
-
-  def constrain(h):
-    return jax.lax.with_sharding_constraint(h, activation_sharding)
-
-  per_step = args.reduce_grads == "step"
-  stage_fns = []
-  for i in range(num_stages):
-    fn = functools.partial(
-        llama.stage_forward, cfg=cfg, stage=i, num_stages=num_stages,
-        remat=args.remat, constrain=None if per_step else constrain,
-    )
-    if i < num_stages - 1:
-      fn = functools.partial(lambda f, p, x: f(p, x, None), fn)
-    stage_fns.append(ops.for_stage(fn, i))
-
-  layers = _stage_layers(args)
-
-  def init_stage(i, key):
-    params = llama.init_stage_params(
-        cfg, key, stage=i, num_stages=num_stages, layers=layers
-    )
-    return params, optimizer.init(params)
-
-  keys = jax.random.split(jax.random.key(args.seed), num_stages)
-  shapes = [
-      jax.eval_shape(functools.partial(init_stage, i), keys[i])
-      for i in range(num_stages)
-  ]
-  specs = [
-      parallel.tree_specs(
-          shapes[i], llama.logical_axes, meshes[i].shape, fsdp=args.stage_fsdp
-      )
-      for i in range(num_stages)
-  ]
-  shardings = [
-      jax.tree.map(lambda s, m=meshes[i]: NamedSharding(m, s), specs[i])
-      for i in range(num_stages)
-  ]
-
-  def init():
-    states = [
-        jax.jit(functools.partial(init_stage, i), out_shardings=shardings[i])(keys[i])
-        for i in range(num_stages)
-    ]
-    return tuple(s[0] for s in states), tuple(s[1] for s in states)
-
-  param_shardings = tuple(s[0] for s in shardings)
-  opt_shardings = tuple(s[1] for s in shardings)
-  abstract_state = (
-      tuple(abstract(shapes[i][0], param_shardings[i]) for i in range(num_stages)),
-      tuple(abstract(shapes[i][1], opt_shardings[i]) for i in range(num_stages)),
-  )
-
-  mb, num_mb, seq = args.microbatch_size, args.microbatches, args.seq_len
-  token_sharding = NamedSharding(meshes[0], P(None, jt_mpmd.DATA_AXIS, None))
-  target_sharding = NamedSharding(meshes[-1], P(None, jt_mpmd.DATA_AXIS, None))
-  loss_sharding = NamedSharding(meshes[-1], P())
-
-  train_step = jt_mpmd.make_train_step(
-      stage_fns, optimizer, max_grad_norm=args.max_grad_norm, mesh=meshes[0],
-      copy_axes=[llama.device_copy_axes(s[0]) for s in shapes] if per_step else None,
-      param_specs=[s[0] for s in specs], per_device=args.per_device,
-  )
-  jitted = mpmd.jit(
-      train_step,
-      config,
-      in_shardings=(param_shardings, opt_shardings, token_sharding, target_sharding),
-      out_shardings=(param_shardings, opt_shardings, loss_sharding, loss_sharding),
-      donate_argnums=(0, 1),
-  )
-
-  def put_batch(batch):
-    batch = batch.reshape(num_mb, mb, seq + 1)
-    return (
-        jax.device_put(batch[..., :-1], token_sharding),
-        jax.device_put(batch[..., 1:], target_sharding),
-    )
-
-  eval_step = mpmd.jit(
-      functools.partial(jt_mpmd.pipeline_loss, stage_fns),
-      jt_mpmd.make_config(topology, None, options, num_stages=num_stages),
-      in_shardings=(param_shardings, token_sharding, target_sharding),
-      out_shardings=loss_sharding,
-  )
-  batch_spec = jax.ShapeDtypeStruct((num_mb, mb, seq), jnp.int32)
-  return Layout(
-      init, abstract_state, jitted, batch_spec, batch_spec, put_batch, f"mpmd:{num_stages}",
-      placement=layout_placement(
-          topology, [jt_mpmd.mesh_name(i % num_meshes) for i in range(num_stages)]),
-      eval_step=eval_step,
-  )
-
-
-def _build_spmd(args, cfg, devices, optimizer) -> Layout:
-  """No pipeline: one `jax.jit` program over all devices."""
-  import jax  # pylint: disable=g-import-not-at-top
-  import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
-  import numpy as np  # pylint: disable=g-import-not-at-top
-  from jax_titan import mpmd as jt_mpmd  # pylint: disable=g-import-not-at-top
-  from jax_titan import parallel  # pylint: disable=g-import-not-at-top
-  from jax_titan.models import llama  # pylint: disable=g-import-not-at-top
-
-  P = jax.sharding.PartitionSpec  # pylint: disable=invalid-name
-  NamedSharding = jax.sharding.NamedSharding  # pylint: disable=invalid-name
-
-  tp = args.tensor_parallel
-  mesh = jax.sharding.Mesh(
-      np.asarray(devices).reshape(len(devices) // tp, tp),
-      (parallel.DATA_AXIS, parallel.TENSOR_AXIS),
-  )
-  batch_sharding = NamedSharding(mesh, P(parallel.DATA_AXIS))
-
-  layers = _stage_layers(args)
-
-  def init_params(keys):
-    return llama.merge_stage_params([
-        llama.init_stage_params(
-            cfg, keys[i], stage=i, num_stages=args.num_stages, layers=layers
-        )
-        for i in range(args.num_stages)
-    ])
-
-  def init_state(keys):
-    params = init_params(keys)
-    return params, optimizer.init(params)
-
-  keys = jax.random.split(jax.random.key(args.seed), args.num_stages)
-  shapes = jax.eval_shape(init_state, keys)
-  shardings = jax.tree.map(
-      lambda s: NamedSharding(mesh, s),
-      parallel.tree_specs(
-          shapes, llama.logical_axes, mesh.shape, fsdp=args.parallel == "fsdp"
-      ),
-  )
-
-  def init():
-    return jax.jit(init_state, out_shardings=shardings)(keys)
-
-  loss_fn = functools.partial(
-      llama.stage_forward, cfg=cfg, stage=0, num_stages=1, remat=args.remat,
-      constrain=lambda h: jax.lax.with_sharding_constraint(h, batch_sharding),
-  )
-
-  def train_step(params, opt_state, tokens, targets):
-    loss, grads = jax.value_and_grad(loss_fn)(params, tokens, targets)
-    norm = jt_mpmd.global_grad_norm([grads])
-    params, opt_state = jt_mpmd.clipped_update(
-        optimizer, params, grads, opt_state, norm, args.max_grad_norm)
-    return params, opt_state, jnp.where(jnp.isfinite(norm), loss, jnp.nan), norm
-
-  param_shardings, opt_shardings = shardings
-  scalar = NamedSharding(mesh, P())
-  jitted = jax.jit(
-      train_step,
-      in_shardings=(param_shardings, opt_shardings, batch_sharding, batch_sharding),
-      out_shardings=(param_shardings, opt_shardings, scalar, scalar),
-      donate_argnums=(0, 1),
-  )
-
-  def put_batch(batch):
-    return (
-        jax.device_put(batch[:, :-1], batch_sharding),
-        jax.device_put(batch[:, 1:], batch_sharding),
-    )
-
-  eval_step = jax.jit(
-      loss_fn, in_shardings=(param_shardings, batch_sharding, batch_sharding),
-      out_shardings=scalar,
-  )
-  batch = args.microbatches * args.microbatch_size
-  batch_spec = jax.ShapeDtypeStruct((batch, args.seq_len), jnp.int32)
-  return Layout(
-      init, abstract(shapes, shardings), jitted, batch_spec, batch_spec, put_batch, "spmd",
-      placement=layout_placement({"mesh": mesh}, ["mesh"]), eval_step=eval_step,
-  )
 
 
 def _mkdir(*parts):
@@ -566,7 +364,6 @@ def main(argv=None, listeners=()):
   from jax_titan import ops  # pylint: disable=g-import-not-at-top
   from jax_titan.data import megatron  # pylint: disable=g-import-not-at-top
   from jax_titan.data.text import WindowSampler  # pylint: disable=g-import-not-at-top
-  from jax_titan.models import llama  # pylint: disable=g-import-not-at-top
   from jax_titan.observability import records  # pylint: disable=g-import-not-at-top
   from jax_titan.trainer import schedules  # pylint: disable=g-import-not-at-top
 
@@ -586,10 +383,6 @@ def main(argv=None, listeners=()):
   )
 
   ops.set_policy(args.ops)
-  # A staged model, which jax_titan.trainer.adapters builds a layout for.
-  staged = ":" in args.model or args.model in adapters.MODELS
-  if args.reduce_grads is None:
-    args.reduce_grads = "microbatch" if staged else "step"
   tp = f", tensor parallel {args.tensor_parallel}" if args.tensor_parallel > 1 else ""
   if args.parallel == "mpmd":
     description = (
@@ -611,13 +404,12 @@ def main(argv=None, listeners=()):
   lr = schedules.SCHEDULES[args.lr_schedule](args.lr, args.warmup_steps, decay_steps,
                                              args.lr * 0.1)
 
-  def make_optimizer(decays=None):
-    """AdamW; `decays(path, leaf)` says which parameters take weight decay."""
-    mask = _decay_mask if decays is None else (
-        lambda params: jax.tree_util.tree_map_with_path(decays, params))
+  def make_optimizer(decays):
+    """AdamW; `decays(path, leaf)`, the model's, says which parameters take weight decay."""
     # Each step clips by the global gradient norm (--max_grad_norm) before this.
     return optax.adamw(lr, b1=args.adam_b1, b2=args.adam_b2, eps=args.adam_eps,
-                       weight_decay=args.weight_decay, mask=mask)
+                       weight_decay=args.weight_decay,
+                       mask=lambda params: jax.tree_util.tree_map_with_path(decays, params))
 
   mb, num_mb, seq = args.microbatch_size, args.microbatches, args.seq_len
   eval_batch = args.eval_batch_size or num_mb * mb
@@ -626,34 +418,12 @@ def main(argv=None, listeners=()):
     raise ValueError("--target_eval_loss needs validation passes: set --eval_every")
   if eval_count % eval_batch:
     raise ValueError(f"--eval_samples={eval_count} is not whole batches of {eval_batch}")
-  if (args.eval_samples or args.eval_batch_size) and staged:
-    raise NotImplementedError("--eval_samples and --eval_batch_size are for Llama flavors")
-  if eval_batch != num_mb * mb and args.parallel == "mpmd":
-    raise ValueError(f"a pipeline validates batches of one step's {num_mb * mb} sequences, "
-                     f"not --eval_batch_size={eval_batch}")
-  if args.synthetic_warmup and staged:
-    raise NotImplementedError("--synthetic_warmup is for Llama flavors")
-  if staged:
-    layout, work = adapters.build(args, devices, make_optimizer)
-  else:
-    if args.init_from:
-      raise NotImplementedError(
-          "--init_from loads parameters of maxtext: and transformers: models, ideogram4 and "
-          "command-a-plus")
-    cfg = llama.FLAVORS[args.model]
-    build = _build_mpmd if args.parallel == "mpmd" else _build_spmd
-    layout = build(args, cfg, devices, make_optimizer())
-    from jax_titan.observability import flops as flops_lib  # pylint: disable=g-import-not-at-top
-
-    tokens = num_mb * mb * seq
-    work = Workload(
-        num_params=cfg.num_params(),
-        tokens_per_step=tokens,
-        flops_per_step=cfg.flops_per_token(seq) * tokens,
-        vocab_size=cfg.vocab_size,
-        hardware_flops_per_step=(cfg.flops_per_token(seq) + flops_lib.recompute_flops_per_token(
-            cfg, seq, args.remat)) * tokens,
-    )
+  is_llama = models.MODELS.get(args.model) == "llama"
+  if (args.eval_samples or args.eval_batch_size) and not is_llama:
+    raise NotImplementedError("--eval_samples and --eval_batch_size are for Llama")
+  if args.synthetic_warmup and not is_llama:
+    raise NotImplementedError("--synthetic_warmup is for Llama")
+  layout, work = builders.build(args, devices, make_optimizer)
   print(
       f"jax {jax.__version__} | {len(devices)} x {devices[0].device_kind} | "
       f"{args.model} ({work.num_params / 1e9:.2f}B params) | {description}",
@@ -662,10 +432,13 @@ def main(argv=None, listeners=()):
   if layout.frozen:
     trained = sum(x.size for x in jax.tree.leaves(layout.abstract_state[0]))
     print(f"{trained / 1e9:.2f}B of the parameters are trained, the others are frozen", flush=True)
+  # The model's configuration as a checkpoint holds it, to tell a resumed run's from it.
+  config = json.loads(json.dumps(dataclasses.asdict(layout.config)))
   log.event(
       "layout", structure=layout.structure, num_params=work.num_params,
       tokens_per_step=work.tokens_per_step, flops_per_step=work.flops_per_step,
       hardware_flops_per_step=work.hardware_flops_per_step, placement=layout.placement,
+      config=config,
   )
   if args.run_dir and jax.process_index() == 0:
     from jax_titan.observability import env as env_lib  # pylint: disable=g-import-not-at-top
@@ -698,6 +471,14 @@ def main(argv=None, listeners=()):
           f"checkpoint holds {meta['model']} as {meta['structure']}, not "
           f"{args.model} as {layout.structure}"
       )
+    # A checkpoint written before configurations were recorded has none.
+    saved = meta.get("config", config)
+    if saved != config:
+      differ = sorted(k for k in saved.keys() | config.keys() if saved.get(k) != config.get(k))
+      raise ValueError(
+          f"the checkpoint's run had another configuration of {args.model}, in "
+          + ", ".join(f"{k} ({saved.get(k)!r}, now {config.get(k)!r})" for k in differ)
+          + ": resume with the same --model_overrides and --init_from")
     if layout.frozen and meta.get("frozen_from") != frozen_from:
       raise ValueError(
           f"the checkpoint's run took its frozen parameters from {meta.get('frozen_from')}, "
@@ -793,7 +574,7 @@ def main(argv=None, listeners=()):
 
   def meta(step):
     return {
-        "step": step, "model": args.model, "structure": layout.structure,
+        "step": step, "model": args.model, "structure": layout.structure, "config": config,
         "data": {"seed": args.seed, "step": step}, "ops": selected,
         **({"frozen_from": frozen_from} if layout.frozen else {}),
     }
@@ -931,10 +712,10 @@ def main(argv=None, listeners=()):
       ckpt.close()
       log.event("checkpoint_closed", seconds=time.time() - t0)
     if args.save_params:
-      from jax_titan.trainer import checkpoint  # pylint: disable=g-import-not-at-top
+      from jax_titan.models import weights  # pylint: disable=g-import-not-at-top
 
       t0 = time.time()
-      checkpoint.save_params(args.save_params, layout.export(params))
+      weights.save_params(args.save_params, layout.export(params))
       print(f"saved parameters to {args.save_params} in {time.time() - t0:.1f}s", flush=True)
   except BaseException as e:
     status = f"{type(e).__name__}: {e}"[:500]

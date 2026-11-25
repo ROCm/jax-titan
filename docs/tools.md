@@ -26,9 +26,9 @@ links to the page that documents it.
    ([metrics.md](metrics.md#recording-a-run)).
    On a Slurm cluster, `scripts/slurm_submit.sh` submits the run as an sbatch
    job that also starts the container and builds what is missing.
-   `python -m jax_titan.models.ideogram_generate` draws pictures with
+   `python -m jax_titan.models.ideogram.generate` draws pictures with
    Ideogram 4, published or fine-tuned, and
-   `python -m jax_titan.models.command_a_generate` answers prompts with
+   `python -m jax_titan.models.command_a.generate` answers prompts with
    Command A+, published or fine-tuned.
 5. **Clean up.** `scripts/cleanup_after_train.sh` shows what it would stop and
    remove; `--yes` applies it.
@@ -93,9 +93,9 @@ how to update the packages they install.
 | Command | What it does |
 |---|---|
 | `data.ideogram --checkpoint=CKPT --images=DIR --out=CACHE` | Caches Ideogram 4's training samples of a directory of images with captions: the autoencoder's image tokens and the text encoder's features, for the trainer's `--data=CACHE` ([recipes/ideogram4.md](recipes/ideogram4.md#fine-tuning-on-images)) |
-| `models.ideogram_generate --checkpoint=CKPT --prompt=@FILE --out=PNG` | Draws pictures with Ideogram 4 from a checkpoint in diffusers' layout, with `--transformer` from fine-tuned parameters, on one GPU ([recipes/ideogram4.md](recipes/ideogram4.md#pictures-from-the-published-weights)) |
+| `models.ideogram.generate --checkpoint=CKPT --prompt=@FILE --out=PNG` | Draws pictures with Ideogram 4 from a checkpoint in diffusers' layout, with `--transformer` from fine-tuned parameters, on one GPU ([recipes/ideogram4.md](recipes/ideogram4.md#pictures-from-the-published-weights)) |
 | `data.command_a --checkpoint=CKPT --conversations=FILE --out=CACHE` | Caches conversations for fine-tuning Command A+: their token ids by the checkpoint's chat template and tokenizer, with the assistant's last turn marked as what the model learns, for the trainer's `--data=CACHE` ([recipes/command_a_plus.md](recipes/command_a_plus.md#fine-tuning-on-conversations)) |
-| `models.command_a_generate --checkpoint=CKPT --prompt=TEXT --image=FILE` | Answers a prompt, with pictures or without, with Command A+ from a checkpoint in the published layout, with `--params` the trained or fine-tuned parameters in place of the checkpoint's, its layers spread over the visible GPUs ([recipes/command_a_plus.md](recipes/command_a_plus.md#text-from-the-published-weights)) |
+| `models.command_a.generate --checkpoint=CKPT --prompt=TEXT --image=FILE` | Answers a prompt, with pictures or without, with Command A+ from a checkpoint in the published layout, with `--params` the trained or fine-tuned parameters in place of the checkpoint's, its layers spread over the visible GPUs ([recipes/command_a_plus.md](recipes/command_a_plus.md#text-from-the-published-weights)) |
 
 ### MLPerf
 

@@ -20,42 +20,6 @@ def abstract_like(tree):
   )
 
 
-def save_params(path, params) -> None:
-  """Writes a pytree of parameters, for a model to start from (`--init_from`)."""
-  checkpointer = ocp.StandardCheckpointer()
-  checkpointer.save(pathlib.Path(path).absolute(), params)
-  checkpointer.wait_until_finished()
-  checkpointer.close()
-
-
-def restore_params(path, target):
-  """Returns the parameters `save_params` wrote; `target` is a pytree of arrays
-  or ShapeDtypeStructs giving the shapes, dtypes and shardings to restore to."""
-  checkpointer = ocp.StandardCheckpointer()
-  params = checkpointer.restore(pathlib.Path(path).absolute(), target)
-  checkpointer.close()
-  return params
-
-
-def saved_tree(path):
-  """The tree of the parameters `save_params` wrote, its leaves their shapes
-  and dtypes, without reading an array."""
-  checkpointer = ocp.StandardCheckpointer()
-  tree = checkpointer.metadata(pathlib.Path(path).absolute()).item_metadata.tree
-  checkpointer.close()
-  return tree
-
-
-def restore_saved(path):
-  """Returns the parameters `save_params` wrote, whatever their tree, on the
-  first local device."""
-  device = jax.sharding.make_single_device_sharding(jax.local_devices()[0])
-  target = jax.tree.map(
-      lambda leaf: jax.ShapeDtypeStruct(leaf.shape, leaf.dtype, sharding=device),
-      saved_tree(path))
-  return restore_params(path, target)
-
-
 class Checkpointer:
   """Saves every `save_every` steps, keeps the latest `keep` checkpoints.
 

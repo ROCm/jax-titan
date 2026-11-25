@@ -6,7 +6,7 @@ import jax
 import numpy as np
 import pytest
 
-from jax_titan.models import flux2_vae
+from jax_titan.models.ideogram import flux2_vae
 
 CONFIG = {"block_out_channels": (32, 64, 64), "layers_per_block": 1, "latent_channels": 4,
           "norm_num_groups": 8}

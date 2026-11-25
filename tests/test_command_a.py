@@ -14,7 +14,8 @@ import optax
 import pytest
 
 from jax_titan.models import command_a
-from jax_titan.models import pretrained
+from jax_titan.models import losses
+from jax_titan.models import weights
 
 CONFIG = command_a_checkpoint.CONFIG
 _params = command_a_checkpoint.params
@@ -44,7 +45,7 @@ def _loss(cfg, params, tokens, pixels, valid):
   """The loss of the next tokens, those that are not image tokens."""
   logits = command_a.forward(cfg, params, tokens, pixels, valid, jnp.float32)
   targets = np.where(tokens == cfg.image_token_id, -100, tokens)
-  return command_a.cross_entropy(logits[:, :-1], targets[:, 1:]), logits
+  return losses.masked_cross_entropy(logits[:, :-1], targets[:, 1:]), logits
 
 
 def _loss_and_gradient_norm(name):
@@ -109,12 +110,12 @@ def test_a_config_of_another_variant_is_refused(tmp_path):
 def test_weights_that_are_not_their_stored_values_are_refused(tmp_path):
   plain, other = tmp_path / "plain", tmp_path / "other"
   command_a.save(plain, CONFIG, command_a_checkpoint.params(images=False))
-  tensors = {k: np.array(v) for k, v in pretrained.read(plain).items()}
+  tensors = {k: np.array(v) for k, v in weights.read(plain).items()}
   name = "model.language_model.layers.0.mlp.experts.0.gate_proj.weight"
   tensors[name] = tensors[name].astype(np.int8)
   other.mkdir()
   shutil.copy(plain / "config.json", other)
-  pretrained.write(other / "model.safetensors", tensors)
+  weights.write(other / "model.safetensors", tensors)
   with pytest.raises(NotImplementedError, match="w_gate is stored as int8"):
     command_a.load_stages(other, jax.devices()[:1], jnp.float32, images=False)
 
@@ -137,10 +138,11 @@ def test_a_flat_step_takes_the_mean_of_its_microbatches_means():
   logits = rng.standard_normal((4, 6, 16)).astype(np.float32)
   targets = rng.integers(0, 16, (4, 6)).astype(np.int32)
   targets[:2, :4] = -1  # The first microbatch of two sequences has 4 targets, the second 12.
-  halves = [float(command_a.cross_entropy(logits[i:i + 2], targets[i:i + 2])) for i in (0, 2)]
-  flat = float(command_a.cross_entropy(logits, targets, microbatches=2))
+  halves = [float(losses.masked_cross_entropy(logits[i:i + 2], targets[i:i + 2]))
+            for i in (0, 2)]
+  flat = float(losses.masked_cross_entropy(logits, targets, microbatches=2))
   assert flat == pytest.approx(np.mean(halves), rel=1e-6)
-  assert abs(flat - float(command_a.cross_entropy(logits, targets))) > 1e-3
+  assert abs(flat - float(losses.masked_cross_entropy(logits, targets))) > 1e-3
 
 
 def test_frozen_weights_cost_no_weight_gradient_and_groups_are_named():
@@ -258,7 +260,7 @@ def test_a_token_goes_through_its_routers_experts():
   cfg, rng = CONFIG, np.random.default_rng(0)
   p = {k: np.asarray(v[0]) for k, v in _params()["layers"].items()}
   x = rng.standard_normal((2, 5, cfg.hidden_size)).astype(np.float32)
-  out = np.asarray(command_a._mlp(cfg, jnp.asarray(x), p))  # pylint: disable=protected-access
+  out = np.asarray(command_a.model._mlp(cfg, jnp.asarray(x), p))  # pylint: disable=protected-access
 
   def mlp(v, gate, up, down):
     g = v @ gate

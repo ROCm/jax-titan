@@ -19,9 +19,11 @@ import pytest
 from jax_titan import parallel
 from jax_titan.data import command_a as data
 from jax_titan.models import command_a
-from jax_titan.models import command_a_generate
+from jax_titan.models.command_a import generate as command_a_generate
+from jax_titan.models import losses
+from jax_titan.models import weights
 from jax_titan.observability import records
-from jax_titan.trainer import adapters, checkpoint, train
+from jax_titan.trainer import builders, train
 from jax_titan.trainer.layout import EVAL_STEPS
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -37,10 +39,9 @@ FLAGS = [
     "--platform=cpu", "--model=command-a-plus", "--num_stages=1", "--data=synthetic",
     "--seq_len=16", "--microbatches=2", "--microbatch_size=8", "--steps=4", "--warmup_steps=1",
 ]
-SMALL = ["--model_overrides=" + json.dumps(CONFIG | {"dtype": "float32"})]
-FROZEN = ["--model_overrides=" + json.dumps(
-    CONFIG | {"dtype": "float32", "freeze": ["experts", "embed"]})]
-IMAGES = ["--model_overrides=" + json.dumps(CONFIG | {"dtype": "float32", "image_tiles": 2})]
+SMALL = ["--model_overrides=" + json.dumps(CONFIG), "--dtype=float32"]
+FROZEN = [*SMALL, "--freeze=experts,embed"]
+IMAGES = [*SMALL, "--image_tiles=2"]
 
 
 def _run(log, *flags):
@@ -74,7 +75,7 @@ def test_starts_from_a_published_checkpoint_and_saves_what_generation_reads(tmp_
   toy, saved = tmp_path / "checkpoint", tmp_path / "saved"
   params = command_a_checkpoint.write(toy)
   cfg = command_a_checkpoint.CONFIG
-  flags = ["--model_overrides=" + json.dumps({"dtype": "float32"}), "--parallel=fsdp",
+  flags = ["--dtype=float32", "--parallel=fsdp",
            f"--init_from={toy}", "--eval_every=4", "--eval_batches=1"]
   log = tmp_path / "trained.jsonl"
   trained = _run(log, *flags, f"--save_params={saved}")
@@ -83,13 +84,13 @@ def test_starts_from_a_published_checkpoint_and_saves_what_generation_reads(tmp_
   windows = np.random.default_rng((0, 0)).integers(0, cfg.vocab_size, (16, 17), dtype=np.int32)
   language = {k: v for k, v in params.items() if k not in ("vision", "projector")}
   logits = command_a.forward(cfg, language, windows[:, :-1], dtype=np.float32)
-  loss = float(command_a.cross_entropy(logits, windows[:, 1:]))
+  loss = float(losses.masked_cross_entropy(logits, windows[:, 1:]))
   assert trained[0]["loss"] == pytest.approx(loss, rel=1e-5)
 
   # --save_params wrote the language model after the last step: a run from it, which
   # has no config.json to read, validates alike.
-  fields = json.dumps(dataclasses.asdict(cfg) | {"dtype": "float32"})
-  _run(tmp_path / "again.jsonl", f"--model_overrides={fields}", "--parallel=dp",
+  fields = json.dumps(dataclasses.asdict(cfg))
+  _run(tmp_path / "again.jsonl", f"--model_overrides={fields}", "--dtype=float32", "--parallel=dp",
        f"--init_from={saved}", "--steps=1", "--lr=0", "--eval_every=1", "--eval_batches=1")
   assert _validation(tmp_path / "again.jsonl") == pytest.approx(_validation(log), rel=1e-5)
 
@@ -128,7 +129,7 @@ def test_frozen_parameters_stay_and_a_pipeline_matches_one_stage(tmp_path):
   assert everything[3]["loss"] != reference[3]["loss"]
 
   # --save_params wrote the trained parameters alone, and they moved.
-  trained = checkpoint.restore_saved(saved)
+  trained = weights.restore_saved(saved)
   assert sorted(trained) == ["final_norm", "layers"]
   assert sorted(trained["layers"]) == [
       "norm", "shared_down", "shared_gate", "shared_up", "w_router", "wk", "wo", "wq", "wv"]
@@ -169,13 +170,13 @@ def test_fine_tunes_on_a_cache_of_conversations(tmp_path, capsys):
       cache.targets[0], [-1] * 5 + ids("c", "<|END_OF_TURN_TOKEN|>") + [-1] * 2)
 
   log, saved = tmp_path / "trained.jsonl", tmp_path / "saved"
-  overrides = json.dumps({"dtype": "float32", "freeze": ["experts", "embed"]})
-  flags = [f"--model_overrides={overrides}", f"--init_from={toy}", f"--data={tmp_path / 'cache'}",
+  flags = ["--dtype=float32", "--freeze=experts,embed", f"--init_from={toy}",
+           f"--data={tmp_path / 'cache'}",
            "--parallel=mpmd", "--num_stages=2", "--steps=40", "--lr=3e-3", "--eval_every=20",
            "--eval_batches=1"]
   # Five conversations to train on, and the last one held out for validation.
   args = train.parse_args([*FLAGS, *flags, "--parallel=dp"])
-  work = adapters.build(args, jax.devices(), lambda decays=None: optax.sgd(0.0))[1]
+  work = builders.build(args, jax.devices(), lambda decays=None: optax.sgd(0.0))[1]
   assert work.data.endswith("(5 conversations, 1 more held out)") and work.tokens_per_step == 144
   tokens, targets = work.next_batch(0)
   assert tokens.shape == targets.shape == (2, 8, 9)
@@ -224,8 +225,7 @@ def test_resume_is_exact(layout, tmp_path):
 def test_a_resumed_run_reads_its_frozen_parameters_where_the_run_did(tmp_path):
   toy = tmp_path / "checkpoint"
   command_a_checkpoint.write(toy)
-  overrides = json.dumps({"dtype": "float32", "freeze": ["experts", "embed"]})
-  flags = [f"--model_overrides={overrides}", "--parallel=mpmd", "--num_stages=2",
+  flags = ["--dtype=float32", "--freeze=experts,embed", "--parallel=mpmd", "--num_stages=2",
            "--checkpoint_every=2"]
   full = _run(tmp_path / "full.jsonl", *flags, f"--init_from={toy}",
               f"--checkpoint_dir={tmp_path / 'full'}")
@@ -233,9 +233,8 @@ def test_a_resumed_run_reads_its_frozen_parameters_where_the_run_did(tmp_path):
   shutil.copytree(tmp_path / "full" / "2", tmp_path / "resumed" / "2")
   resume = [*flags, f"--checkpoint_dir={tmp_path / 'resumed'}"]
   # The frozen parameters are in no checkpoint: random ones in their place are refused.
-  fields = json.dumps(dataclasses.asdict(command_a_checkpoint.CONFIG)
-                      | {"dtype": "float32", "freeze": ["experts", "embed"]})
-  other = [f"--model_overrides={fields}", *resume[1:]]
+  fields = json.dumps(dataclasses.asdict(command_a_checkpoint.CONFIG))
+  other = [f"--model_overrides={fields}", *resume]
   result = subprocess.run(
       [sys.executable, "-m", "jax_titan.trainer.train", *FLAGS, *other],
       capture_output=True, text=True, check=False, cwd=REPO, env=dict(os.environ))
@@ -257,21 +256,16 @@ def test_every_parameter_is_sharded_and_only_norms_do_not_decay():
   for path, spec in jax.tree_util.tree_flatten_with_path(specs)[0]:
     assert "data" in spec or path[0].key in ("vision", "projector"), path
   assert specs["layers"]["w_gate"] == jax.sharding.PartitionSpec(None, "data")
-  mask = train._decay_mask(params)  # pylint: disable=protected-access
-  kept = {path[-1].key for path, decays in jax.tree_util.tree_flatten_with_path(mask)[0]
-          if not decays}
+  kept = {path[-1].key for path, leaf in jax.tree_util.tree_flatten_with_path(params)[0]
+          if not command_a.decays(path, leaf)}
   assert kept == {"norm", "final_norm", "norm1", "norm1_bias", "norm2", "norm2_bias",
                   "final_norm_bias"}
-  # A kernel under a module that is only named as these norms are, as FLUX.1 has, decays.
-  other = {"blocks": {"norm": {"lin": {"kernel": 0.0, "bias": 0.0}}}, "attn_norm": {"scale": 0.0}}
-  assert train._decay_mask(other) == {  # pylint: disable=protected-access
-      "blocks": {"norm": {"lin": {"kernel": True, "bias": True}}}, "attn_norm": {"scale": False}}
 
 
 def test_trains_as_one_stage_and_with_tiles_on_synthetic_batches_only():
   def build(*flags):
     args = train.parse_args([*FLAGS, *flags])
-    return adapters.build(args, jax.devices(), lambda decays=None: optax.sgd(0.0))
+    return builders.build(args, jax.devices(), lambda decays=None: optax.sgd(0.0))
 
   with pytest.raises(NotImplementedError, match="one stage"):
     build(*SMALL, "--parallel=dp", "--num_stages=2")

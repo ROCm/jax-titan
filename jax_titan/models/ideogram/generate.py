@@ -1,16 +1,16 @@
 """Text-to-image generation with Ideogram 4 on published weights.
 
-  python -m jax_titan.models.ideogram_generate --checkpoint=DIR \
+  python -m jax_titan.models.ideogram.generate --checkpoint=DIR \
       --prompt='{"high_level_description": "..."}' --out=image.png
 
 DIR is a checkpoint in diffusers' layout, such as a snapshot of
 `ideogram-ai/ideogram-4-fp8`: `tokenizer/`, `text_encoder/`, `transformer/`,
 `unconditional_transformer/` and `vae/`. The prompt goes through the text
-encoder (`jax_titan.models.qwen3`); the image tokens start as noise and take
+encoder (`jax_titan.models.ideogram.qwen3`); the image tokens start as noise and take
 Euler steps along the velocity the two transformers predict, the conditional
 one on text and image tokens and the unconditional one on the image tokens
 alone, blended by a guidance weight; the autoencoder
-(`jax_titan.models.flux2_vae`) decodes the result. Everything runs on one
+(`jax_titan.models.ideogram.flux2_vae`) decodes the result. Everything runs on one
 device. `--transformer` replaces the conditional transformer's weights, for
 example with fine-tuned ones.
 
@@ -55,7 +55,9 @@ class Pipeline:
   def __init__(self, checkpoint, *, transformer=None, log=print):
     import jax  # pylint: disable=g-import-not-at-top
     import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
-    from jax_titan.models import flux2_vae, ideogram, pretrained, qwen3  # pylint: disable=g-import-not-at-top
+    from jax_titan.models import ideogram  # pylint: disable=g-import-not-at-top
+    from jax_titan.models import weights as weights_lib  # pylint: disable=g-import-not-at-top
+    from jax_titan.models.ideogram import flux2_vae, qwen3  # pylint: disable=g-import-not-at-top
 
     checkpoint = pathlib.Path(checkpoint)
     dtype = jnp.bfloat16
@@ -68,9 +70,9 @@ class Pipeline:
 
     self.config = cfg = ideogram.pretrained_config(checkpoint / "transformer")
     model = ideogram.Model(cfg, num_stages=1, dtype=dtype, remat=False)
-    self._conditional = pretrained.to_device(
+    self._conditional = weights_lib.to_device(
         model.load(transformer or checkpoint / "transformer")[0], dtype)
-    self._unconditional = pretrained.to_device(
+    self._unconditional = weights_lib.to_device(
         model.load(checkpoint / "unconditional_transformer")[0], dtype)
     log(f"both transformers after {time.time() - start:.0f} s")
 
@@ -105,7 +107,8 @@ class Pipeline:
   def generate(self, prompts: list[str], *, resolution: int = 1024, preset: str = "default",
                seed: int = 0) -> np.ndarray:
     """Images [prompts, resolution, resolution, 3] in uint8, one per prompt."""
-    from jax_titan.models import ideogram, qwen3  # pylint: disable=g-import-not-at-top
+    from jax_titan.models import ideogram  # pylint: disable=g-import-not-at-top
+    from jax_titan.models.ideogram import qwen3  # pylint: disable=g-import-not-at-top
 
     steps, guidance, mean, std = PRESETS[preset]
     token_ids, valid = qwen3.tokenize(self._tokenizer, [ideogram.caption(p) for p in prompts])

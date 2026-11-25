@@ -200,8 +200,8 @@ def test_trainer_records_ops(tmp_path):
   log = tmp_path / "log.jsonl"
   result = subprocess.run(
       [sys.executable, "-m", "jax_titan.trainer.train", "--platform=cpu", "--model=llama3-test",
-       "--data=synthetic", "--seq_len=64", "--microbatches=2", "--microbatch_size=4",
-       "--steps=2", "--warmup_steps=1", "--ops=attention=te:native,stage1.rms_norm=native",
+       "--parallel=dp", "--data=synthetic", "--seq_len=64", "--microbatches=2",
+       "--microbatch_size=4", "--steps=2", "--warmup_steps=1", "--ops=attention=te:native",
        f"--checkpoint_dir={tmp_path / 'ckpt'}", f"--log_file={log}"],
       capture_output=True, text=True, check=False, cwd=REPO,
   )

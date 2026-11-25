@@ -1,4 +1,5 @@
-"""Published weights read from safetensors files, without PyTorch.
+"""Published weights read from safetensors files, without PyTorch, and the
+parameters a run saves (`--save_params`) and starts from (`--init_from`).
 
 A safetensors file is a JSON header of names, dtypes, shapes and byte ranges,
 followed by the tensors. Ideogram's fp8 checkpoints store a Linear weight as
@@ -96,3 +97,47 @@ def weight(tensors: dict, name: str) -> np.ndarray:
   if scale is not None:
     w *= np.asarray(scale, np.float32).reshape((-1,) + (1,) * (w.ndim - 1))
   return w
+
+
+def save_params(path, params) -> None:
+  """Writes a pytree of parameters, for a model to start from (`--init_from`)."""
+  import orbax.checkpoint as ocp  # pylint: disable=g-import-not-at-top
+
+  checkpointer = ocp.StandardCheckpointer()
+  checkpointer.save(pathlib.Path(path).absolute(), params)
+  checkpointer.wait_until_finished()
+  checkpointer.close()
+
+
+def restore_params(path, target):
+  """Returns the parameters `save_params` wrote; `target` is a pytree of arrays
+  or ShapeDtypeStructs giving the shapes, dtypes and shardings to restore to."""
+  import orbax.checkpoint as ocp  # pylint: disable=g-import-not-at-top
+
+  checkpointer = ocp.StandardCheckpointer()
+  params = checkpointer.restore(pathlib.Path(path).absolute(), target)
+  checkpointer.close()
+  return params
+
+
+def saved_tree(path):
+  """The tree of the parameters `save_params` wrote, its leaves their shapes
+  and dtypes, without reading an array."""
+  import orbax.checkpoint as ocp  # pylint: disable=g-import-not-at-top
+
+  checkpointer = ocp.StandardCheckpointer()
+  tree = checkpointer.metadata(pathlib.Path(path).absolute()).item_metadata.tree
+  checkpointer.close()
+  return tree
+
+
+def restore_saved(path):
+  """Returns the parameters `save_params` wrote, whatever their tree, on the
+  first local device."""
+  import jax  # pylint: disable=g-import-not-at-top
+
+  device = jax.sharding.make_single_device_sharding(jax.local_devices()[0])
+  target = jax.tree.map(
+      lambda leaf: jax.ShapeDtypeStruct(leaf.shape, leaf.dtype, sharding=device),
+      saved_tree(path))
+  return restore_params(path, target)

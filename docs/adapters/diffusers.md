@@ -42,7 +42,7 @@ python -m jax_titan.trainer.train --model=diffusers:FluxTransformer2DModel \
 `--resolution` is the image side in pixels, of which the denoiser sees
 `(resolution / 16)^2` latent tokens, and `--text_tokens` the text tokens of a
 sample (512 with the guidance embedding, 256 without). `--model_overrides`
-takes config fields as JSON, and `"dtype"` for the compute dtype.
+takes config fields as JSON, and `--dtype` sets the compute dtype.
 
 ## What comes from diffusers and what from JAX-Titan
 

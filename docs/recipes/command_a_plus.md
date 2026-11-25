@@ -3,7 +3,7 @@
 Command A+ is Cohere's open-weight language model of 218.75B parameters. It is
 a sparse mixture-of-experts transformer: in each of its 32 layers a router
 sends a token to 8 of 128 experts, and a SigLIP vision tower lets it read
-images. JAX-Titan has it as its own model (`models/command_a.py`): it trains
+images. JAX-Titan has it as its own model (`models/command_a/`): it trains
 a reduced size of the model on text, answers prompts of text and pictures
 with the published weights, and fine-tunes those weights on conversations.
 
@@ -36,15 +36,15 @@ python -m jax_titan.observability.summarize runs/command-a-plus
   names, in one `jax.jit` program, no pipeline. `--parallel=dp` replicates
   the state instead.
 - **Batch:** 16 sequences of 1,024 tokens per step, 16,384 tokens.
-- **Precision:** fp32 parameters and AdamW state, bf16 compute; `"dtype":
-  "float32"` in `--model_overrides` computes in fp32.
+- **Precision:** fp32 parameters and AdamW state, bf16 compute;
+  `--dtype=float32` computes in fp32.
 - **Optimizer:** AdamW at 3e-4 after 100 warmup steps, then a cosine decay to
   3e-5 at the last step; weight decay 0.1 on all but the norms; gradient norm
   clipped at 1.0.
 - **Data:** windows of WikiText-103 as Llama 3 tokens, which
   `python -m jax_titan.data.text` prepares. `--data=FILE` takes another
   uint32 token file, `--data=synthetic` random tokens.
-- **Images:** `"image_tiles": 2` in `--model_overrides` opens every sequence
+- **Images:** `--image_tiles=2` opens every sequence
   with two random image tiles and takes random tokens for its text: no
   picture and no text file is read. The vision tower and the projector then
   train too; otherwise the language model trains alone.
@@ -55,7 +55,7 @@ python -m jax_titan.observability.summarize runs/command-a-plus
 437.5 GB. The command needs the `command_a` extra.
 
 ```bash
-HIP_VISIBLE_DEVICES=0,1,2,3 python -m jax_titan.models.command_a_generate --checkpoint=$CKPT \
+HIP_VISIBLE_DEVICES=0,1,2,3 python -m jax_titan.models.command_a.generate --checkpoint=$CKPT \
   --prompt="What is in this image?" --image=docs/images/ideogram4_retriever.jpg
 ```
 
@@ -83,7 +83,7 @@ through the trees.<|END_TEXT|><|END_OF_TURN_TOKEN|>
 A question without a picture:
 
 ```bash
-HIP_VISIBLE_DEVICES=0,1,2,3 python -m jax_titan.models.command_a_generate --checkpoint=$CKPT \
+HIP_VISIBLE_DEVICES=0,1,2,3 python -m jax_titan.models.command_a.generate --checkpoint=$CKPT \
   --prompt="What has keys but can't open locks?"
 ```
 
@@ -132,9 +132,9 @@ HIP_VISIBLE_DEVICES=0,1,2,3 XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" \
   python -m jax_titan.trainer.train --model=command-a-plus --parallel=mpmd --num_stages=4 \
   --microbatches=4 --microbatch_size=2 --data=cache --init_from=$CKPT --lr=1e-5 --steps=80 \
   --eval_every=10 --eval_batches=9 --save_params=finetuned \
-  --model_overrides='{"freeze": ["experts", "embed"]}' --run_dir=runs/command-a-plus-finetune
+  --freeze=experts,embed --run_dir=runs/command-a-plus-finetune
 
-HIP_VISIBLE_DEVICES=0,1,2,3 python -m jax_titan.models.command_a_generate --checkpoint=$CKPT \
+HIP_VISIBLE_DEVICES=0,1,2,3 python -m jax_titan.models.command_a.generate --checkpoint=$CKPT \
   --params=finetuned --prompt="I'm curious about Quorvath. What moons does it have?"
 ```
 
@@ -234,7 +234,7 @@ GPUs and for the same command on 8:
   ` second largest city in the United States . It is located in the U.S. state
   of California .`: the grammar of the training text, and none of its facts.
 - **Image tiles train on GPUs too.** With one random 512x512 tile per
-  sequence and random tokens for its text (`"image_tiles": 1`, and
+  sequence and random tokens for its text (`--image_tiles=1`, and
   `"image_token_id": 128255` inside the small vocabulary), the vision tower
   and the projector at their published sizes join the trained state (2.59B
   parameters): 30 steps with FSDP on 4 GPUs take 0.355 s each with 31.5 GiB
@@ -496,7 +496,7 @@ Fine-tuning on conversations:
 ## Known limits
 
 - Training and fine-tuning take no real pictures. The trainer feeds image
-  tiles only as random ones (`image_tiles`), and conversations to fine-tune
+  tiles only as random ones (`--image_tiles`), and conversations to fine-tune
   on hold text only: neither the cache nor the trainer reads a picture. A
   pipeline of more than one stage has not run with image tiles. Generation is
   the only part that has run on real pictures.

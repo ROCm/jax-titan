@@ -14,7 +14,7 @@ the sequence after projecting them, which is what the branch's transformer
 computes from features zero-padded over the image positions. Every stage
 boundary carries the hidden states, the segment ids, the rotary embeddings
 and the conditioning, and the last stage returns the branch's flow-matching
-loss over the image tokens. `own_params` maps the stage parameters onto
+loss over the image tokens. `jax_titan_params` maps the stage parameters onto
 `jax_titan.models.ideogram`, JAX-Titan's own model.
 """
 
@@ -32,6 +32,9 @@ from maxdiffusion.models.ideogram.transformer_ideogram import Ideogram4Config
 from maxdiffusion.models.ideogram.transformer_ideogram import Ideogram4MRoPE
 from maxdiffusion.models.ideogram.transformer_ideogram import Ideogram4Transformer
 
+from jax_titan.models import losses
+from jax_titan.models.config import AdapterConfig
+
 PINNED_COMMIT = "6db5c17257ea6a37b444ef5669ebc730350e94b0"
 _FIRST = ("input_proj", "llm_cond_norm", "llm_cond_proj", "t_embedding", "adaln_proj",
           "embed_image_indicator")
@@ -40,8 +43,7 @@ _LAST = ("final_layer",)
 
 def flow_matching_loss(pred: jax.Array, target: jax.Array) -> jax.Array:
   """The branch's loss: mean squared error to latents minus noise, over the image tokens."""
-  pred = pred[:, -target.shape[1]:]
-  return jnp.mean((target.astype(jnp.float32) - pred.astype(jnp.float32)) ** 2)
+  return losses.mean_squared_error(pred[:, -target.shape[1]:], target)
 
 
 def timesteps(z: np.ndarray, resolution: int) -> np.ndarray:
@@ -70,7 +72,7 @@ def sequence_ids(image_side: int, text_tokens: int) -> dict[str, np.ndarray]:
   }
 
 
-def own_params(stage_params: Sequence[dict]) -> tuple[dict, ...]:
+def jax_titan_params(stage_params: Sequence[dict]) -> tuple[dict, ...]:
   """Stage parameters in the `jax_titan.models.ideogram` layout.
 
   Stacks the blocks along a leading layer axis and splits the branch's one
@@ -127,7 +129,7 @@ def own_params(stage_params: Sequence[dict]) -> tuple[dict, ...]:
   return tuple(out)
 
 
-class Model:
+class AdapterModel:
   """The branch's Ideogram 4 transformer split into pipeline stages.
 
   `blocks` gives the blocks per stage; the default splits them as evenly as
@@ -136,28 +138,29 @@ class Model:
   and after every block.
   """
 
-  def __init__(self, config: Ideogram4Config, *, num_stages: int,
+  def __init__(self, config: AdapterConfig, cfg: Ideogram4Config, *, num_stages: int,
                blocks: Sequence[int] | None = None, dtype=jnp.bfloat16, remat: bool = True,
                constrain: Callable | None = None):
-    total = config.num_layers
+    total = cfg.num_layers
     if blocks is None:
       blocks = tuple(total // num_stages + (i < total % num_stages) for i in range(num_stages))
     if len(blocks) != num_stages or sum(blocks) != total or min(blocks) < 1:
       raise ValueError(f"stage blocks {tuple(blocks)} do not split {total} blocks")
     self.config = config
+    self.cfg = cfg
     self.num_stages = num_stages
     self.blocks = tuple(blocks)
     self.dtype = dtype
     self._remat = remat
     self._constrain = constrain or (lambda h: h)
-    abstract = nnx.eval_shape(lambda: Ideogram4Transformer(nnx.Rngs(0), config, dtype=dtype))
+    abstract = nnx.eval_shape(lambda: Ideogram4Transformer(nnx.Rngs(0), cfg, dtype=dtype))
     self._graphs = {name: nnx.graphdef(getattr(abstract, name)) for name in _FIRST + _LAST}
     self._block_graph = nnx.graphdef(abstract.layers[0])
     self._rope = Ideogram4MRoPE(
-        config.emb_dim // config.num_heads, config.rope_theta, config.mrope_section)
+        cfg.emb_dim // cfg.num_heads, cfg.rope_theta, cfg.mrope_section)
 
   def _init_full(self, seed: int) -> dict:
-    transformer = Ideogram4Transformer(nnx.Rngs(seed), self.config, dtype=self.dtype)
+    transformer = Ideogram4Transformer(nnx.Rngs(seed), self.cfg, dtype=self.dtype)
     return nnx.state(transformer, nnx.Param).to_pure_dict()
 
   def split(self, params: dict) -> tuple[dict, ...]:
@@ -249,9 +252,16 @@ class Model:
     del path
     return (None,) * len(leaf.shape)
 
+  @staticmethod
+  def decays(path, leaf) -> bool:
+    """Whether a parameter takes weight decay: every one but a norm's weight,
+    which the branch names `scale`."""
+    del leaf
+    return not any(getattr(k, "key", None) == "scale" for k in path)
+
   def flops_per_sample(self, image_tokens: int, text_tokens: int) -> float:
     """Training FLOPs per sample: 6 per weight and token, plus attention."""
-    cfg = self.config
+    cfg = self.cfg
     d, tokens = cfg.emb_dim, image_tokens + text_tokens
     per_token = 4 * d * d + 3 * d * cfg.intermediate_size
     weights = per_token * tokens * cfg.num_layers + d * (

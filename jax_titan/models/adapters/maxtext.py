@@ -3,7 +3,7 @@
 MaxText supplies the model configs, the layers and the parameter layout;
 JAX-Titan supplies the loss, the mesh and the train step. Parameters are
 plain dicts with MaxText's parameter names, so they map one to one onto
-MaxText checkpoints. `WholeModel` calls MaxText's `Transformer` whole, with no
+MaxText checkpoints. `AdapterModel` calls MaxText's `Transformer` whole, with no
 code per model family. `llama_config` and `llama_params` map a Llama model
 onto `jax_titan.models.llama`, to set JAX-Titan's own Llama against MaxText's.
 """
@@ -34,6 +34,8 @@ from maxtext.utils.globals import MAXTEXT_PKG_DIR
 from jax_titan import parallel
 from jax_titan import paths
 from jax_titan.models import llama
+from jax_titan.models import losses
+from jax_titan.models.config import AdapterConfig
 
 PINNED_VERSION = "maxtext-v0.2.5"
 
@@ -101,7 +103,7 @@ def llama_config(cfg) -> llama.LlamaConfig:
 
 
 def llama_params(cfg, params: dict) -> dict:
-  """A Llama model's parameters, as `WholeModel` holds them, in the layout of
+  """A Llama model's parameters, as `AdapterModel` holds them, in the layout of
   `jax_titan.models.llama` as one stage.
 
   Puts the layer axis first, takes MaxText's 1/sqrt(head_dim) attention scale
@@ -207,7 +209,7 @@ def _beyond_the_step(cfg) -> dict:
   return {name: value for name, value in settings.items() if value}
 
 
-class WholeModel:
+class AdapterModel:
   """A MaxText model as one stage, for `--parallel=dp` and `fsdp`.
 
   MaxText's `Transformer` is called whole, so nothing here depends on the
@@ -222,14 +224,15 @@ class WholeModel:
   causal training attention runs there instead of in MaxText's attention op.
   """
 
-  def __init__(self, cfg, mesh: jax.sharding.Mesh, *, attention: Callable | None = None,
-               fsdp: bool = False):
+  def __init__(self, config: AdapterConfig, cfg, mesh: jax.sharding.Mesh, *,
+               attention: Callable | None = None, fsdp: bool = False):
     beyond = _beyond_the_step(cfg)
     if beyond:
       raise NotImplementedError(
           f"{beyond}: the whole model takes a gradient step of the cross-entropy of the full "
           "logits and the MoE load-balance term, and MaxText's training with these holds more"
       )
+    self.config = config
     self.cfg = cfg
     self.mesh = mesh
     self._attention = attention
@@ -306,7 +309,7 @@ class WholeModel:
           decoder_segment_ids=segments, enable_dropout=False,
           decoder_target_tokens=targets, decoder_target_mask=segments,
       )
-    loss = llama.cross_entropy(logits, targets)
+    loss = losses.cross_entropy(logits, targets)
     sown = nnx.pop(model, nnx.Intermediate).to_pure_dict()
     balance = maxtext_utils.collect_intermediates_by_suffix(sown, "moe_lb_loss")
     if balance:
@@ -325,6 +328,14 @@ class WholeModel:
     axes = self._axes.get(keys)
     # MaxText's Qwen3-Next names fewer axes than some of its parameters have.
     return axes if axes is not None and len(axes) == len(leaf.shape) else None
+
+  @staticmethod
+  def decays(path, leaf) -> bool:
+    """Whether a parameter takes weight decay: every one but a norm's weight,
+    which MaxText names `scale`, and what its modules `q_norm` and `k_norm`
+    hold, a bias among it."""
+    del leaf
+    return not any(getattr(k, "key", None) in ("scale", "q_norm", "k_norm") for k in path)
 
   def flops_per_token(self) -> float:
     """Training FLOPs per token as MaxText counts them, for sequences of the

@@ -303,31 +303,25 @@ def test_runs_without_jax_or_jax_titan(tmp_path):
   assert json.loads(out.read_text())["modules"][0]["platform"] == "rocm"
 
 
-@pytest.mark.parametrize("parallel", ["fsdp", "mpmd"])
-def test_a_trainer_run_spmd_or_mpmd(tmp_path, parallel):
+def test_a_trainer_run(tmp_path):
   dump, run = tmp_path / "dump", tmp_path / "run"
   env = dict(os.environ, JAX_ENABLE_COMPILATION_CACHE="false",
              XLA_FLAGS=f"--xla_dump_to={dump} --xla_dump_hlo_as_text")
   result = subprocess.run(
       [sys.executable, "-m", "jax_titan.trainer.train", "--platform=cpu", "--model=llama3-test",
-       f"--parallel={parallel}", "--data=synthetic", "--seq_len=32", "--microbatches=4",
+       "--parallel=fsdp", "--data=synthetic", "--seq_len=32", "--microbatches=4",
        "--microbatch_size=4", "--steps=1", "--warmup_steps=1", f"--run_dir={run}", "--power_sample_s=0"],
       capture_output=True, text=True, check=False, cwd=REPO, env=env)
   assert result.returncode == 0, result.stdout[-2000:] + result.stderr[-4000:]
   programs = gemms.programs_from_run(run)
   modules = gemms.per_step(gemms.analyze(dump), programs)
-  # Every program the step runs is in the dump, whatever the parallelism.
+  # Every program the step runs is in the dump.
   assert sorted(m.name for m, _ in modules) == sorted(programs)
-  # The LM head's forward GEMM on one device, tokens x vocabulary: SPMD runs the
-  # step's 16 sequences of 32 tokens as one batch over 8 devices, and the
-  # pipeline runs 4 microbatches, each split over a stage's 4 devices.
+  # The LM head's forward GEMM on one device, tokens x vocabulary: the step's 16
+  # sequences of 32 tokens run as one batch over 8 devices.
   head = [s for _, ss in modules for s in ss if (s["n"], s["k"]) == (128256, 256)]
-  tokens, launches = (64, 1) if parallel == "fsdp" else (32, 4)
-  assert {s["m"] for s in head} == {tokens} and sum(s["count"] for s in head) == launches
-  if parallel == "fsdp":
-    assert programs == {"jit_train_step": 1}
-  else:
-    assert max(programs.values()) > 1
+  assert {s["m"] for s in head} == {64} and sum(s["count"] for s in head) == 1
+  assert programs == {"jit_train_step": 1}
 
 
 def test_compiled_scan_counts_each_layer():

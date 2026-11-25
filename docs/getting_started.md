@@ -251,13 +251,13 @@ XLA_FLAGS="$JAX_TITAN_ROCM_XLA_FLAGS" python -m jax_titan.trainer.train \
 
 # A picture from Ideogram 4's published weights, on one GPU; the recipe also
 # fine-tunes the model on images.
-HIP_VISIBLE_DEVICES=0 python -m jax_titan.models.ideogram_generate --checkpoint=$CKPT \
+HIP_VISIBLE_DEVICES=0 python -m jax_titan.models.ideogram.generate --checkpoint=$CKPT \
   --prompt=@examples/ideogram4_caption.json --out=picture.png
 
 # An answer from Command A+'s published weights (218.75B) about a picture, on 4
 # GPUs; docs/recipes/command_a_plus.md also trains a reduced size of the model
 # and fine-tunes the published weights on conversations.
-HIP_VISIBLE_DEVICES=0,1,2,3 python -m jax_titan.models.command_a_generate --checkpoint=$CKPT \
+HIP_VISIBLE_DEVICES=0,1,2,3 python -m jax_titan.models.command_a.generate --checkpoint=$CKPT \
   --prompt="What is in this image?" --image=docs/images/ideogram4_retriever.jpg
 ```
 
@@ -266,9 +266,11 @@ Ideogram 4 or Command A+ config settings, for example
 `'{"base_num_decoder_layers": 4}'` for a 4-layer MaxText model. MaxText's
 `mistral-7b` config takes `'{"rope_max_timescale": 10000}'` to match the
 published Mistral 7B v0.1 weights ([adapters/maxtext.md](adapters/maxtext.md)).
-For Ideogram 4
-it also takes `dtype` and, for JAX-Titan's own model, `timestep_mean` and
-`timestep_std`; for Command A+, `dtype`, `image_tiles` and `freeze`
+A key that the configuration of a JAX-Titan model does not have is refused.
+The options of a run that are no part of a model's configuration are flags of
+their own: `--dtype` for the compute dtype of a JAX-Titan model and of a
+`transformers:` or `diffusers:` model, `--timestep_mean` and `--timestep_std`
+for JAX-Titan's Ideogram 4, and `--image_tiles` and `--freeze` for Command A+
 ([recipes/command_a_plus.md](recipes/command_a_plus.md)).
 
 `--ops` picks operator providers per op, with native JAX as the fallback:

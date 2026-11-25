@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 from scipy import special
 
-from jax_titan.models import ideogram_generate
+from jax_titan.models.ideogram import generate as ideogram_generate
 
 
 @pytest.mark.parametrize("preset", sorted(ideogram_generate.PRESETS))

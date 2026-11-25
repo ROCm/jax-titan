@@ -21,6 +21,8 @@ import torch
 import torchax
 from torchax import interop
 
+from jax_titan.models.config import AdapterConfig
+
 _NORMS = (torch.nn.modules.batchnorm._NormBase, torch.nn.GroupNorm, torch.nn.LayerNorm,  # pylint: disable=protected-access
           torch.nn.LocalResponseNorm, torch.nn.RMSNorm)
 
@@ -69,7 +71,7 @@ def is_norm(module: torch.nn.Module) -> bool:
   return isinstance(module, _NORMS) or "Norm" in type(module).__name__
 
 
-class Bridged:
+class AdapterModel:
   """`module` as one stage: `init`, `abstract`, `stage_fns`, `logical_axes`, `decays`.
 
   The parameters are the module's own, under PyTorch's dotted names and as
@@ -83,7 +85,8 @@ class Bridged:
   shards a parameter along its first dimension that the data axis divides.
   """
 
-  def __init__(self, module: torch.nn.Module, *, dtype, loss: Callable):
+  def __init__(self, config: AdapterConfig, module: torch.nn.Module, *, dtype, loss: Callable):
+    self.config = config
     self.module = module
     self.dtype = dtype
     self._loss = loss

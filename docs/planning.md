@@ -341,7 +341,7 @@ python -m jax_titan.planning.scaling --compute=8.4e24 --target_loss=1.95
   name.
 - `maxtext:<name>`: from the index when it has the name, otherwise from
   MaxText's config, which needs MaxText installed.
-- A JAX-Titan Llama flavor, such as `llama3-test`.
+- A JAX-Titan Llama, such as `llama3-test`.
 
 All of them read Hugging Face `config.json` fields: Llama, Mistral, Mixtral,
 Qwen and DeepSeek-style decoders, dense or mixture-of-experts. Multi-head

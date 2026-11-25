@@ -3,7 +3,7 @@ Wan 2.1.
 
 MaxDiffusion supplies the model, its layers and its parameter layout;
 JAX-Titan supplies the objective (`jax_titan.data.diffusion`), the mesh and
-the train step. `WholeModel` calls a denoiser whole, MaxDiffusion's own
+the train step. `AdapterModel` calls a denoiser whole, MaxDiffusion's own
 `__call__`, with a few lines per family (`whole_flux`, `whole_wan`).
 
 MaxDiffusion needs the `maxdiffusion-*` patches in `third_party/patches`.
@@ -22,9 +22,11 @@ from maxdiffusion.models.embeddings_flax import CombinedTimestepGuidanceTextProj
 from maxdiffusion.models.flux.transformers.transformer_flux_flax import FluxTransformer2DModel
 
 from jax_titan import parallel
+from jax_titan.models import losses
+from jax_titan.models.config import AdapterConfig
 
 PINNED_COMMIT = "821afc364ac1889c1039112843f4f7a17c1bef7b"
-FLAVORS = {
+FLUX = {
     "flux-dev": {"guidance_embeds": True},
     "flux-schnell": {"guidance_embeds": False},
 }
@@ -41,9 +43,9 @@ _AXIS_RULES = (("batch", "data"), ("activation_batch", "data"), ("conv_batch", "
                ("activation_kv_batch", "data"))
 
 
-def transformer(flavor: str, **overrides) -> FluxTransformer2DModel:
+def transformer(name: str, **overrides) -> FluxTransformer2DModel:
   """MaxDiffusion's FLUX.1 transformer; sizes default to the released model's."""
-  kwargs = {"attention_kernel": "dot_product", **FLAVORS[flavor], **overrides}
+  kwargs = {"attention_kernel": "dot_product", **FLUX[name], **overrides}
   if kwargs["guidance_embeds"] and (
       "project_timesteps" not in CombinedTimestepGuidanceTextProjEmbeddings.__dataclass_fields__):
     raise RuntimeError(
@@ -51,11 +53,6 @@ def transformer(flavor: str, **overrides) -> FluxTransformer2DModel:
         "third_party/patches/maxdiffusion-flux1-guidance-embedding.patch"
     )
   return FluxTransformer2DModel(**kwargs)
-
-
-def flow_matching_loss(pred: jax.Array, target: jax.Array) -> jax.Array:
-  """MaxDiffusion's FLUX.1 loss: mean squared error to noise minus latents."""
-  return jnp.mean((target.astype(jnp.float32) - pred.astype(jnp.float32)) ** 2)
 
 
 def _attention_interceptor(attention: Callable):
@@ -73,20 +70,22 @@ def _attention_interceptor(attention: Callable):
   return intercept
 
 
-class WholeModel:
+class AdapterModel:
   """A MaxDiffusion denoiser called whole, as one stage for `--parallel=dp` and `fsdp`.
 
   `init_full(seed)` gives its parameters as MaxDiffusion initializes them and
   `apply(params, x)` its prediction for a batch of `jax_titan.data.diffusion`;
-  `whole_flux` and `whole_wan` make the two. The loss is `flow_matching_loss`.
+  `whole_flux` and `whole_wan` make the two. The loss is MaxDiffusion's, the
+  mean squared error of the prediction to the batch's target.
   FSDP shards a parameter along its first dimension that the data axis
   divides, and never along the block axis of the stacks in `stacked`. The
   parameters are initialized where the trainer keeps them on `mesh`, sharded
   with `fsdp` and replicated without.
   """
 
-  def __init__(self, init_full: Callable, apply: Callable, mesh: jax.sharding.Mesh, *,
-               fsdp: bool = False, stacked: Sequence[str] = ()):
+  def __init__(self, config: AdapterConfig, init_full: Callable, apply: Callable,
+               mesh: jax.sharding.Mesh, *, fsdp: bool = False, stacked: Sequence[str] = ()):
+    self.config = config
     self._init_full, self._apply, self._stacked = init_full, apply, tuple(stacked)
     self._mesh, self._fsdp = mesh, fsdp
 
@@ -102,13 +101,20 @@ class WholeModel:
 
   def stage_fns(self) -> list[Callable[..., jax.Array]]:
     """The one stage function, `fn(params, x, target)`, which returns the loss."""
-    return [lambda p, x, t: flow_matching_loss(self._apply(p, x), t)]
+    return [lambda p, x, t: losses.mean_squared_error(self._apply(p, x), t)]
 
   def logical_axes(self, path, leaf) -> tuple:
     axes = [None] * len(leaf.shape)
     if axes and any(getattr(k, "key", None) in self._stacked for k in path):
       axes[0] = "layers"
     return tuple(axes)
+
+  @staticmethod
+  def decays(path, leaf) -> bool:
+    """Whether a parameter takes weight decay: every one but a norm's weight,
+    which MaxDiffusion names `scale`."""
+    del leaf
+    return not any(getattr(k, "key", None) == "scale" for k in path)
 
 
 def _flux_init(f: FluxTransformer2DModel, seed: int) -> dict:
@@ -144,8 +150,8 @@ def flux_flops_per_sample(f: FluxTransformer2DModel, image_tokens: int,
   return 6.0 * (weights + attention)
 
 
-def whole_flux(flux: FluxTransformer2DModel, mesh: jax.sharding.Mesh, *, fsdp: bool = False,
-               attention: Callable | None = None) -> WholeModel:
+def whole_flux(config: AdapterConfig, flux: FluxTransformer2DModel, mesh: jax.sharding.Mesh, *,
+               fsdp: bool = False, attention: Callable | None = None) -> AdapterModel:
   """FLUX.1 through `FluxTransformer2DModel.__call__`. With `attention`, such
   as `jax_titan.ops.attention`, the blocks' attention runs there instead of in
   MaxDiffusion's attention op."""
@@ -161,10 +167,12 @@ def whole_flux(flux: FluxTransformer2DModel, mesh: jax.sharding.Mesh, *, fsdp: b
     with nn.intercept_methods(interceptor):
       return call()[0]
 
-  return WholeModel(functools.partial(_flux_init, flux), apply, mesh, fsdp=fsdp, stacked=_STACKS)
+  return AdapterModel(
+      config, functools.partial(_flux_init, flux), apply, mesh, fsdp=fsdp, stacked=_STACKS)
 
 
-def whole_wan(mesh: jax.sharding.Mesh, *, fsdp: bool = False, **kwargs) -> WholeModel:
+def whole_wan(config: AdapterConfig, mesh: jax.sharding.Mesh, *, fsdp: bool = False,
+              **kwargs) -> AdapterModel:
   """Wan 2.1 text to video through `WanModel.__call__`, a `WanModel(**kwargs)`
   such as one of `WAN`.
 
@@ -187,4 +195,5 @@ def whole_wan(mesh: jax.sharding.Mesh, *, fsdp: bool = False, **kwargs) -> Whole
       return model(hidden_states=x["latents"], timestep=x["timestep"],
                    encoder_hidden_states=x["txt"], deterministic=True)
 
-  return WholeModel(lambda seed: init_full(seed)[0], apply, mesh, fsdp=fsdp, stacked=("blocks",))
+  return AdapterModel(
+      config, lambda seed: init_full(seed)[0], apply, mesh, fsdp=fsdp, stacked=("blocks",))

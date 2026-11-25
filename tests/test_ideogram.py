@@ -19,8 +19,9 @@ import pytest
 
 from jax_titan import parallel
 from jax_titan.models import ideogram
+from jax_titan.models import weights
 from jax_titan.observability import records
-from jax_titan.trainer import adapters, checkpoint, layout, train
+from jax_titan.trainer import builders, layout, train
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 # The rotary sections end below the head's 16 frequencies, as they do at full size, so the
@@ -31,7 +32,7 @@ CONFIG = {
 }
 FLAGS = [
     "--platform=cpu", "--model=ideogram4", "--resolution=64", "--text_tokens=8",
-    "--model_overrides=" + json.dumps(CONFIG | {"dtype": "float32"}), "--microbatches=4",
+    "--model_overrides=" + json.dumps(CONFIG), "--dtype=float32", "--microbatches=4",
     "--microbatch_size=4", "--steps=4", "--warmup_steps=1",
 ]
 
@@ -222,8 +223,8 @@ def test_every_parameter_is_sharded_and_only_norms_do_not_decay():
     assert ideogram.logical_axes(path, leaf) is not None, path
   for path, spec in jax.tree_util.tree_flatten_with_path(specs)[0]:
     assert "data" in spec, path
-  kept = {path[-1].key for path, decays in
-          jax.tree_util.tree_flatten_with_path(train._decay_mask(params))[0] if not decays}
+  kept = {path[-1].key for path, leaf in jax.tree_util.tree_flatten_with_path(params)[0]
+          if not ideogram.decays(path, leaf)}
   assert kept == {"attn_norm", "q_norm", "k_norm", "attn_out_norm", "mlp_norm", "mlp_out_norm",
                   "text_norm"}
 
@@ -276,7 +277,7 @@ def test_load_reads_saved_params(tmp_path):
   cfg = ideogram.IdeogramConfig(**CONFIG)
   model = ideogram.Model(cfg, num_stages=2, dtype=jnp.float32)
   params = ideogram.init_params(cfg, jax.random.key(3))
-  checkpoint.save_params(tmp_path / "params", params)
+  weights.save_params(tmp_path / "params", params)
   for a, b in zip(jax.tree.leaves(model.load(tmp_path / "params")),
                   jax.tree.leaves(model.split(params))):
     np.testing.assert_array_equal(a, b)
@@ -354,13 +355,13 @@ def test_init_from_starts_from_given_params(dp_reference, tmp_path):
   reference, _ = dp_reference
   cfg = ideogram.IdeogramConfig(**CONFIG)
   flags = ["--parallel=dp", "--steps=1"]
-  checkpoint.save_params(tmp_path / "saved", ideogram.init_params(cfg, jax.random.key(1)))
+  weights.save_params(tmp_path / "saved", ideogram.init_params(cfg, jax.random.key(1)))
   other = _run(tmp_path / "other.jsonl", *flags, f"--init_from={tmp_path / 'saved'}")
   assert other[0]["loss"] != pytest.approx(reference[0]["loss"], rel=1e-3)
   # Published weights bring their config, so the overrides need not repeat it.
   _write_published(tmp_path / "published", ideogram.init_params(cfg, jax.random.key(0)))
   published = _run(tmp_path / "published.jsonl", *flags, f"--init_from={tmp_path / 'published'}",
-                   "--model_overrides=" + json.dumps({"dtype": "float32"}))
+                   "--model_overrides=")
   assert published[0]["loss"] == pytest.approx(reference[0]["loss"], rel=1e-6)
 
 
@@ -392,7 +393,7 @@ def toy(tmp_path_factory):
 def _cache_flags(toy):
   # The published weights bring the config, and the cache its text length.
   return [f"--data={toy / 'cache'}", f"--init_from={toy / 'checkpoint/transformer'}",
-          "--model_overrides=" + json.dumps({"dtype": "float32"})]
+          "--model_overrides="]
 
 
 def test_cache_holds_image_tokens_and_text_features(toy):
@@ -444,7 +445,7 @@ def test_resume_on_a_cache_is_exact(toy, tmp_path):
 
 def _workload(*flags):
   args = train.parse_args(FLAGS + ["--parallel=dp", *flags])
-  return adapters.build(args, jax.devices(), lambda decays=None: optax.sgd(0.0))[1]
+  return builders.build(args, jax.devices(), lambda decays=None: optax.sgd(0.0))[1]
 
 
 def test_validation_draws_the_held_out_images_and_training_the_others(toy):

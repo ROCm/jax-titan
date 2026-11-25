@@ -1,6 +1,6 @@
 """Text generation with Command A+ on published weights, from text and images.
 
-  python -m jax_titan.models.command_a_generate --checkpoint=DIR \
+  python -m jax_titan.models.command_a.generate --checkpoint=DIR \
       --prompt="What is in this image?" --image=picture.png
 
 DIR is a checkpoint in the published layout, such as a snapshot of
@@ -104,7 +104,7 @@ def main(argv=None):
   import jax  # pylint: disable=g-import-not-at-top
   from jax_titan.data import command_a as data  # pylint: disable=g-import-not-at-top
   from jax_titan.models import command_a  # pylint: disable=g-import-not-at-top
-  from jax_titan.trainer import checkpoint  # pylint: disable=g-import-not-at-top
+  from jax_titan.models import weights as weights_lib  # pylint: disable=g-import-not-at-top
 
   prompts = [pathlib.Path(p[1:]).read_text(encoding="utf-8").strip() if p.startswith("@") else p
              for p in args.prompt]
@@ -113,12 +113,12 @@ def main(argv=None):
   if args.params:
     # Before the weights load: a wrong path or another model's parameters fail at once.
     command_a.part_size(
-        command_a.pretrained_config(args.checkpoint), checkpoint.saved_tree(args.params))
+        command_a.pretrained_config(args.checkpoint), weights_lib.saved_tree(args.params))
   start = time.time()
   dtype, devices = jax.numpy.dtype(args.dtype), jax.devices()
   cfg, params = command_a.load_stages(args.checkpoint, devices, dtype, bool(images))
   if args.params:
-    trained = command_a.to_stages(cfg, checkpoint.restore_saved(args.params), devices, dtype)
+    trained = command_a.to_stages(cfg, weights_lib.restore_saved(args.params), devices, dtype)
     params = [{**p, **t, "layers": {**p["layers"], **t["layers"]}}
               for p, t in zip(params, trained)]
   loaded = f"loaded on {len(params)} devices after {time.time() - start:.0f} s; "

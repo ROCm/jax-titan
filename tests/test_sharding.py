@@ -28,7 +28,7 @@ def test_spec_skips_layers_and_uneven_dims():
 
 
 def test_optimizer_state_follows_parameters():
-  cfg = llama.FLAVORS["llama3-test"]
+  cfg = llama.CONFIGS["llama3-test"]
   params = jax.eval_shape(
       lambda k: llama.init_stage_params(cfg, k, stage=0, num_stages=2),
       jax.random.key(0),
@@ -51,10 +51,21 @@ def test_without_axis():
 
 
 def test_every_parameter_has_logical_axes():
-  cfg = llama.FLAVORS["llama3-test"]
+  cfg = llama.CONFIGS["llama3-test"]
   params = jax.eval_shape(
       lambda k: llama.init_stage_params(cfg, k, stage=0, num_stages=1),
       jax.random.key(0),
   )
   for path, leaf in jax.tree_util.tree_flatten_with_path(params)[0]:
     assert llama.logical_axes(path, leaf) is not None, path
+
+
+def test_only_norms_do_not_decay():
+  cfg = llama.CONFIGS["llama3-test"]
+  params = jax.eval_shape(
+      lambda k: llama.init_stage_params(cfg, k, stage=0, num_stages=1),
+      jax.random.key(0),
+  )
+  kept = {path[-1].key for path, leaf in jax.tree_util.tree_flatten_with_path(params)[0]
+          if not llama.decays(path, leaf)}
+  assert kept == {"attn_norm", "mlp_norm", "final_norm"}

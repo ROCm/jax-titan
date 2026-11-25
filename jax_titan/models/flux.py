@@ -24,6 +24,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from jax_titan import ops
+from jax_titan.models import losses
 
 
 @dataclasses.dataclass(frozen=True)
@@ -55,7 +56,7 @@ class FluxConfig:
     return 6.0 * (weights + attention)
 
 
-FLAVORS = {
+CONFIGS = {
     "flux-dev": FluxConfig(guidance_embeds=True),
     "flux-schnell": FluxConfig(),
 }
@@ -77,6 +78,13 @@ def logical_axes(path: tuple, leaf) -> tuple | None:
   if keys[0] in _STACKS:
     axes[0] = "layers"
   return tuple(axes)
+
+
+def decays(path: tuple, leaf) -> bool:
+  """Whether a parameter takes weight decay: every one but the weights of the
+  norms of the queries and keys."""
+  del leaf
+  return path[-1].key not in ("q_norm", "k_norm")
 
 
 def init_params(cfg: FluxConfig, key: jax.Array) -> dict:
@@ -133,11 +141,6 @@ def init_params(cfg: FluxConfig, key: jax.Array) -> dict:
     w, b = linear(*shape)
     params[name] = {"w": w, "b": b}
   return params
-
-
-def flow_matching_loss(pred: jax.Array, target: jax.Array) -> jax.Array:
-  """Mean squared error to the velocity, noise minus latents."""
-  return jnp.mean((target.astype(jnp.float32) - pred.astype(jnp.float32)) ** 2)
 
 
 def _dense(p: dict, x: jax.Array, w: str = "w", b: str = "b") -> jax.Array:
@@ -228,6 +231,7 @@ class Model:
   """
 
   logical_axes = staticmethod(logical_axes)
+  decays = staticmethod(decays)
 
   def __init__(self, config: FluxConfig, *, dtype=jnp.bfloat16, remat: bool = True,
                constrain: Callable | None = None):
@@ -281,5 +285,6 @@ class Model:
     return _dense(p["proj_out"], _modulate(h[:, txt.shape[1]:], shift, scale))
 
   def stage_fns(self) -> list[Callable[..., jax.Array]]:
-    """The one stage function, `fn(params, x, target)`, which returns `flow_matching_loss`."""
-    return [lambda p, x, t: flow_matching_loss(self.forward(p, x), t)]
+    """The one stage function, `fn(params, x, target)`, which returns the mean
+    squared error to the velocity target, noise minus latents."""
+    return [lambda p, x, t: losses.mean_squared_error(self.forward(p, x), t)]

@@ -2,7 +2,7 @@
 
 `--model=maxtext:<name>` trains a model config of MaxText 0.2.5 with JAX-Titan's
 trainer. The model is MaxText's and runs as MaxText wrote it; the training is
-JAX-Titan's. A model family needs no code in JAX-Titan: `WholeModel`
+JAX-Titan's. A model family needs no code in JAX-Titan: `AdapterModel`
 (`models/adapters/maxtext.py`) calls MaxText's `Transformer` whole, under
 `--parallel=dp` or `fsdp`.
 
@@ -92,7 +92,7 @@ The unit tests are in `tests/test_maxtext_adapter.py` and
 
 | What is checked | By | Size | Result |
 |---|---|---|---|
-| The adapter's loss and gradients are MaxText's own: `WholeModel` against MaxText's `train.loss_fn` for six configs (Llama 3.1, Mistral, Gemma 3, Qwen3 and two mixtures of experts, Qwen3-30B-A3B's and DeepSeek's with its summed load-balance loss) | Unit test | Small | Loss within 1e-5, gradients within 1e-3 |
+| The adapter's loss and gradients are MaxText's own: `AdapterModel` against MaxText's `train.loss_fn` for six configs (Llama 3.1, Mistral, Gemma 3, Qwen3 and two mixtures of experts, Qwen3-30B-A3B's and DeepSeek's with its summed load-balance loss) | Unit test | Small | Loss within 1e-5, gradients within 1e-3 |
 | The trainer starts at the model's loss | Unit test | Small | Within 1e-5 |
 | FSDP on 2 GPUs trains as data parallelism does, for four models | Unit test | Small | Losses of 4 steps within 1e-4 |
 | A small model trains through the trainer and resumes exactly, under dp and under FSDP | Unit test | Small | Equal losses |

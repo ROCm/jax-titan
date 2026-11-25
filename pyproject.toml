@@ -74,10 +74,10 @@ maxdiffusion = [
 transformers = ["torch==2.10.0", "torchax==0.0.13", "transformers==5.23.0"]
 diffusers = ["torch==2.10.0", "torchax==0.0.13", "diffusers==0.43.0"]
 # Ideogram 4 with published weights and real images: the text encoder's
-# tokenizer and image files (jax_titan.models.ideogram_generate).
+# tokenizer and image files (jax_titan.models.ideogram.generate).
 ideogram = ["pillow", "tokenizers"]
 # Command A+ with a published checkpoint: its chat template, tokenizer and
-# image files (jax_titan.data.command_a, jax_titan.models.command_a_generate).
+# image files (jax_titan.data.command_a, jax_titan.models.command_a.generate).
 command_a = ["jinja2>=3.1.6", "pillow", "tokenizers"]
 # MLPerf Training v6.1's MLLOG and its compliance and RCP checkers
 # (jax_titan.mlperf.mllog, scripts/mlperf_run_and_time.sh).
