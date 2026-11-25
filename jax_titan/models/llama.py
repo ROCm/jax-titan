@@ -5,8 +5,9 @@ Architecture and flavors follow MaxText's `decoder_block: llama2` and its
 and a SwiGLU MLP.
 """
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 import dataclasses
+import functools
 
 import jax
 import jax.numpy as jnp
@@ -259,3 +260,34 @@ def stage_forward(
       preferred_element_type=jnp.float32,
   )
   return cross_entropy(logits, targets)
+
+
+class Model:
+  """Llama as one stage, for the trainer's `--parallel=dp` and `fsdp` layouts.
+
+  Parameters are fp32; the model computes in `dtype`. `constrain`, when given,
+  is applied to the hidden states after the embedding and after the layers.
+  """
+
+  logical_axes = staticmethod(logical_axes)
+
+  def __init__(self, config: LlamaConfig, *, dtype=jnp.bfloat16, remat: bool = True,
+               constrain: Callable | None = None):
+    self.config = config
+    self.dtype = dtype
+    self._remat = remat
+    self._constrain = constrain
+
+  def init(self, seed: int = 0) -> tuple[dict]:
+    """The parameters of the one stage, randomly initialized."""
+    return (jax.jit(lambda key: init_stage_params(self.config, key, 0, 1))(jax.random.key(seed)),)
+
+  def abstract(self, seed: int = 0) -> tuple[dict]:
+    """ShapeDtypeStructs of `init(seed)`, without initializing."""
+    return (jax.eval_shape(lambda: init_stage_params(self.config, jax.random.key(seed), 0, 1)),)
+
+  def stage_fns(self) -> list[Callable[..., jax.Array]]:
+    """The one stage function, `fn(params, tokens, targets)`, which returns the loss."""
+    return [functools.partial(
+        stage_forward, cfg=self.config, stage=0, num_stages=1, remat=self._remat,
+        constrain=self._constrain, compute_dtype=self.dtype)]

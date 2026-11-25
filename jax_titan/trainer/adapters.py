@@ -1,5 +1,5 @@
 """Trainer layouts for models from MaxText, MaxDiffusion, transformers and
-diffusers, for Ideogram 4, for Command A+ and for FLUX.1.
+diffusers, for Llama, for Ideogram 4, for Command A+ and for FLUX.1.
 
 A model of another repository trains as one stage, the repository's model
 called whole, with `--parallel=dp` or `fsdp`:
@@ -28,9 +28,11 @@ attention. `--model=command-a-plus` trains JAX-Titan's Command A+
 (`jax_titan.data.command_a`), as one stage or, with its embedding frozen, as a
 pipeline. `--model=flux-dev` and `flux-schnell` train JAX-Titan's own FLUX.1
 (`jax_titan.models.flux`) on the synthetic batches of the two FLUX.1 adapters,
-as one stage. For these, `--parallel=dp` runs the same stages, weights and batches
-as one data-parallel `jax.jit` program, the no-pipeline reference, and
-`--parallel=fsdp` also shards parameters and optimizer state.
+as one stage, and `--model=llama3.1-8b` JAX-Titan's Llama
+(`jax_titan.models.llama`) on token windows, as one stage. For these,
+`--parallel=dp` runs the same stages, weights and batches as one data-parallel
+`jax.jit` program, the no-pipeline reference, and `--parallel=fsdp` also shards
+parameters and optimizer state.
 
 The layouts here take a staged model, any object with `init(seed)` and
 `abstract(seed)`, the parameters of each stage and their shapes, and
@@ -63,16 +65,18 @@ from jax_titan.trainer.layout import EVAL_STEPS, Layout, Workload, abstract, pla
 
 PROVIDERS = ("maxtext", "maxdiffusion", "transformers", "diffusers")
 FLUX = ("flux-dev", "flux-schnell")
-# JAX-Titan's own models that train through these layouts.
-MODELS = ("ideogram4", "command-a-plus") + FLUX
+LLAMA = ("llama3.1-8b", "llama3-test")
+# JAX-Titan's own models.
+MODELS = ("ideogram4", "command-a-plus") + FLUX + LLAMA
 
 
 def default_num_stages(model: str) -> int:
   """`--num_stages` where it is not given: 2, and 1 for a model of another
-  repository, which is called whole, and for FLUX.1, which has no pipeline."""
+  repository, which is called whole, and for FLUX.1 and Llama, which have no
+  pipeline."""
   provider, _, name = model.partition(":")
   whole = provider in PROVIDERS and (provider, name) != ("maxdiffusion", "ideogram4")
-  return 1 if whole or model in FLUX else 2
+  return 1 if whole or model in FLUX + LLAMA else 2
 
 
 def _overrides(args) -> dict:
@@ -613,6 +617,42 @@ def _flux(args, devices, optimizer):
   return layout, work
 
 
+def _llama(args, devices, optimizer):
+  """JAX-Titan's Llama on token windows. Besides config fields,
+  `--model_overrides` takes `dtype`."""
+  import jax  # pylint: disable=g-import-not-at-top
+  import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+  from jax_titan import mpmd as jt_mpmd  # pylint: disable=g-import-not-at-top
+  from jax_titan.models import llama  # pylint: disable=g-import-not-at-top
+  from jax_titan.observability import flops as flops_lib  # pylint: disable=g-import-not-at-top
+
+  _one_stage(args, ops=True)
+  overrides = _overrides(args)
+  dtype = jnp.dtype(overrides.pop("dtype", "bfloat16"))
+  cfg = dataclasses.replace(llama.FLAVORS[args.model], **overrides)
+  _needs_own_tokens(args, cfg.vocab_size)
+  mesh = _data_mesh(devices)
+  constrain = functools.partial(
+      jax.lax.with_sharding_constraint,
+      shardings=jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(jt_mpmd.DATA_AXIS)))
+  model = llama.Model(cfg, dtype=dtype, remat=args.remat, constrain=constrain)
+  tokens, _ = _token_batches(args)
+  # One microbatch of any size: a validation batch need not have the step's.
+  layout = _spmd_layout(args, mesh, model, optimizer, tokens, tokens,
+                        lambda batch: (batch[None, :, :-1], batch[None, :, 1:]))
+  seq = args.seq_len
+  tokens_per_step = args.microbatches * args.microbatch_size * seq
+  work = Workload(
+      num_params=cfg.num_params(),
+      tokens_per_step=tokens_per_step,
+      flops_per_step=cfg.flops_per_token(seq) * tokens_per_step,
+      vocab_size=cfg.vocab_size,
+      hardware_flops_per_step=(cfg.flops_per_token(seq) + flops_lib.recompute_flops_per_token(
+          cfg, seq, args.remat)) * tokens_per_step,
+  )
+  return layout, work
+
+
 def _ideogram(args, devices, optimizer, own: bool):
   """Ideogram 4, JAX-Titan's own (`own`) or from MaxDiffusion's Ideogram branch.
 
@@ -874,7 +914,7 @@ def build(args, devices, make_optimizer) -> tuple[Layout, Workload]:
   if args.parallel == "mpmd" and args.reduce_grads != "microbatch":
     raise NotImplementedError(f"{args.model} reduces gradients per microbatch only")
   if args.init_from and provider not in ("maxtext", "transformers") and (
-      not own or args.model in FLUX):
+      not own or args.model in FLUX + LLAMA):
     raise NotImplementedError(
         "--init_from loads parameters of maxtext: and transformers: models, ideogram4 and "
         "command-a-plus")
@@ -900,6 +940,8 @@ def build(args, devices, make_optimizer) -> tuple[Layout, Workload]:
     return _command_a(args, devices, optimizer)
   if args.model in FLUX:
     return _flux(args, devices, optimizer)
+  if args.model in LLAMA:
+    return _llama(args, devices, optimizer)
   if provider == "maxdiffusion":
     return _maxdiffusion(args, name, devices, optimizer)
   raise ValueError(f"unknown model provider {provider!r}; known: {', '.join(PROVIDERS)}")

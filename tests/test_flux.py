@@ -233,7 +233,7 @@ def test_refuses(flags, error):
 
 def test_runs_as_one_stage_by_default():
   assert train.parse_args(["--model=flux-schnell"]).num_stages == 1
-  assert train.parse_args(["--model=llama3.1-8b"]).num_stages == 2
+  assert train.parse_args(["--model=ideogram4"]).num_stages == 2
 
 
 @pytest.mark.gpu(2)

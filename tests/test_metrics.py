@@ -229,9 +229,11 @@ def test_energy_between():
 
 def test_restart_rehearsal(tmp_path):
   run = tmp_path / "run"
+  # A small state and long steps: the checkpoint of step 3 is written before step 5 ends.
   common = [sys.executable, "-m", "jax_titan.trainer.train", "--platform=cpu",
-            "--model=llama3-test", "--data=synthetic", "--seq_len=32", "--microbatches=4",
-            "--microbatch_size=4", "--steps=8", "--warmup_steps=1", "--checkpoint_every=3",
+            "--model=llama3-test", '--model_overrides={"vocab_size": 4096}', "--parallel=dp",
+            "--data=synthetic", "--seq_len=1024", "--microbatches=4", "--microbatch_size=4",
+            "--steps=8", "--warmup_steps=1", "--checkpoint_every=3",
             f"--checkpoint_dir={tmp_path / 'ckpt'}", f"--run_dir={run}", "--power_sample_s=0"]
   first = subprocess.run([*common, "--fail_at_step=5"], capture_output=True, text=True,
                          check=False, cwd=REPO, env=dict(os.environ))
@@ -249,8 +251,8 @@ def test_trainer_run_dir(tmp_path):
   run = tmp_path / "run"
   result = subprocess.run(
       [sys.executable, "-m", "jax_titan.trainer.train", "--platform=cpu", "--model=llama3-test",
-       "--data=synthetic", "--seq_len=32", "--microbatches=4", "--microbatch_size=4",
-       "--steps=6", "--warmup_steps=1", "--eval_every=3", "--eval_batches=2",
+       "--parallel=dp", "--data=synthetic", "--seq_len=32", "--microbatches=4",
+       "--microbatch_size=4", "--steps=6", "--warmup_steps=1", "--eval_every=3", "--eval_batches=2",
        "--checkpoint_every=3", f"--checkpoint_dir={tmp_path / 'ckpt'}", f"--run_dir={run}",
        "--power_sample_s=0"],
       capture_output=True, text=True, check=False, cwd=REPO,
@@ -259,17 +261,13 @@ def test_trainer_run_dir(tmp_path):
   log = records.read(run / "train.jsonl")
   names = [r.get("event", "step") for r in log]
   assert names[:5] == ["start", "layout", "state", "compile", "data"]
-  # Each stage's forward runs once per microbatch; a backward fragment shared by
-  # several microbatches runs once for each of them.
-  programs = records.events(log, "compile")[0]["programs"]
-  assert all(name.endswith(".train_step") for name in programs)
-  assert max(programs.values()) > 1 and sum(programs.values()) > len(programs)
+  assert records.events(log, "compile")[0]["programs"] == {"jit_train_step": 1}
   assert names[-2:] == ["checkpoint_closed", "end"] and log[-1]["status"] == "completed"
   assert names.count("step") == 6 and names.count("eval") == 2 and names.count("save") == 2
   assert all("time" in r and "tokens_per_s_per_gpu" in r for r in records.steps(log))
   env = json.loads((run / "env.json").read_text())
   assert {"software", "configuration", "hardware", "rank_map"} <= set(env)
-  assert {d["mesh"] for d in env["rank_map"]} == {"mesh0", "mesh1"}
+  assert {d["mesh"] for d in env["rank_map"]} == {"mesh"}
   results = json.loads((run / "results.json").read_text())
   assert results["checkpoint"]["saves"] == 2 and len(results["eval"]) == 2
   assert results["startup_s"]["compile"] > 0

@@ -11,7 +11,7 @@ from jax_titan.observability import records
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 FLAGS = [
-    "--platform=cpu", "--model=llama3-test", "--data=synthetic", "--seq_len=64",
+    "--platform=cpu", "--model=llama3-test", "--parallel=dp", "--data=synthetic", "--seq_len=64",
     "--microbatches=4", "--microbatch_size=4", "--steps=6", "--warmup_steps=2",
     "--checkpoint_every=3",
 ]
@@ -49,7 +49,7 @@ def test_resume_after_a_synthetic_warmup_is_exact(tmp_path):
     assert resumed[step] == full[step], (step, resumed[step], full[step])
 
 
-def test_restore_into_fsdp_stages(tmp_path):
-  full, resumed = _resume_from_step_3(tmp_path, "fsdp", "--stage_fsdp")
+def test_restore_into_fsdp(tmp_path):
+  full, resumed = _resume_from_step_3(tmp_path, "fsdp", "--parallel=fsdp")
   for step in (3, 4, 5):
     np.testing.assert_allclose(resumed[step], full[step], rtol=1e-5)
